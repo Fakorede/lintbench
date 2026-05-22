@@ -33,7 +33,7 @@ cd ../..
 
 # 2. Install Python dependencies and activate the virtualenv
 uv sync
-source lint_benchmark/.venv/bin/activate
+source .venv/bin/activate
 
 # 3. Build the Docker evaluation image (one-time, ~5 min)
 docker build -t lintbench-eval build_env/
@@ -50,7 +50,7 @@ lint_benchmark/
   data/                 Benchmark artifacts (lintbench.json, intermediates)
   run_inference.py      Entry point: generate detector files from a model
   run_eval.py           Entry point: compile and test generated detectors
-  pyproject.toml        uv/pip package config
+pyproject.toml          uv/pip package config (repo root)
 ```
 
 ## Pipeline
