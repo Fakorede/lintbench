@@ -43,13 +43,24 @@ dependencies {
     testImplementation("org.mockito:mockito-core:5.11.0")
     testImplementation("org.mockito.kotlin:mockito-kotlin:5.3.1")
 
+    // Google Truth — used by AppLinksValidDetectorTest, CheckResultDetectorTest, etc.
+    testImplementation("com.google.truth:truth:1.4.2")
+
+    // Guava — runtime dep of lint-api (not compile); needed by ~25 test files
+    testImplementation("com.google.guava:guava:32.0.1-jre")
+
+    // androidx.annotation — used by ~34 test files for @NonNull etc.
+    testImplementation("androidx.annotation:annotation:1.7.0")
+
+    // kxml2 — used by LayoutInflationDetectorTest
+    testImplementation("net.sf.kxml:kxml2:2.3.0")
+
     // Runtime-only deps pulled in transitively by lint-tests
     // intellij-core promoted to testImplementation for FileUtil (FontDetectorTest)
     testImplementation("com.android.tools.external.com-intellij:intellij-core:$lintVersion")
     testRuntimeOnly("com.android.tools.external.com-intellij:kotlin-compiler:$lintVersion")
     testRuntimeOnly("com.android.tools.external.org-jetbrains:uast:$lintVersion")
     testRuntimeOnly("com.android.tools.layoutlib:layoutlib-api:$lintVersion")
-    testRuntimeOnly("net.sf.kxml:kxml2:2.3.0")
     testRuntimeOnly("org.codehaus.groovy:groovy:3.0.21")
     testRuntimeOnly("org.ow2.asm:asm:9.6")
     testRuntimeOnly("org.ow2.asm:asm-tree:9.6")

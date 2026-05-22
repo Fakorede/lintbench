@@ -66,6 +66,10 @@ COPY src/ src/
 # Pre-compile the test infrastructure
 RUN gradle compileTestKotlin compileTestJava --no-daemon -q 2>&1 | tail -10 || true
 
+# ── Conditional stubs ─────────────────────────────────────────────────────────
+# Stubs that are only injected for specific test files (not pre-compiled).
+COPY templates/ /eval/templates/
+
 # ── Entrypoint ───────────────────────────────────────────────────────────────
 COPY run_inner.sh /usr/local/bin/run_inner.sh
 RUN chmod +x /usr/local/bin/run_inner.sh

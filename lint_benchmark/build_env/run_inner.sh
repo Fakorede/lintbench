@@ -92,6 +92,21 @@ mkdir -p "$TEST_DEST_DIR"
 # Java requires public class Foo to live in Foo.java — use the class simple name
 TEST_CLASS_SIMPLE="${TEST_CLASS##*.}"
 cp "$TEST_FILE" "${TEST_DEST_DIR}/${TEST_CLASS_SIMPLE}.${TEST_EXT}"
+# Strip TestLintTask API calls absent from lint-tests:31.7.0 (added in later AOSP snapshots)
+sed -i \
+    -e 's/\.verifyFixedFileSyntax([^)]*)//g' \
+    -e 's/\.allowManifestMergerErrors([^)]*)//g' \
+    "${TEST_DEST_DIR}/${TEST_CLASS_SIMPLE}.${TEST_EXT}"
+
+# Inject conditional stubs that are needed only for specific test files.
+# GradleDetectorTestStub provides GradleDetectorTest.Companion.createRelativePaths,
+# which ManifestDetectorTest imports. It is NOT injected when the real
+# GradleDetectorTest.kt is the test file (that class defines it already).
+if grep -q "GradleDetectorTest" "${TEST_DEST_DIR}/${TEST_CLASS_SIMPLE}.${TEST_EXT}" 2>/dev/null && \
+   [[ "$TEST_CLASS_SIMPLE" != "GradleDetectorTest" ]]; then
+    cp /eval/templates/GradleDetectorTestStub.kt \
+       /eval/src/instance/kotlin/com/android/tools/lint/checks/GradleDetectorTestStub.kt
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Attempt compilation
