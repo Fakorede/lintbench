@@ -32,7 +32,7 @@ build_env/
 
 ```bash
 # Run from lint_benchmark/ root
-cp ../lint-codebase/base/lint/libs/lint-tests/src/test/java/com/android/tools/lint/checks/AbstractCheckTest.java \
+cp ../lint_codebase/base/lint/libs/lint-tests/src/test/java/com/android/tools/lint/checks/AbstractCheckTest.java \
    build_env/src/test/java/com/android/tools/lint/checks/
 ```
 
@@ -49,7 +49,7 @@ Pre-warms the Gradle dependency cache inside the image (~800MB, ~5 min on first 
 
 ```bash
 # Run from lint_benchmark/ root
-AOSP=../lint-codebase/base/lint/libs
+AOSP=../lint_codebase/base/lint/libs
 docker run --rm \
   -v "$(pwd)/${AOSP}/lint-checks/src/main/java/com/android/tools/lint/checks/AddJavascriptInterfaceDetector.kt":/input/detector.kt:ro \
   -v "$(pwd)/${AOSP}/lint-tests/src/test/java/com/android/tools/lint/checks/AddJavascriptInterfaceDetectorTest.kt":/input/test.kt:ro \

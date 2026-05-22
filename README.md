@@ -24,8 +24,8 @@ implementation and its JUnit test suite for automated pass/fail evaluation.
 
 ```bash
 # 1. Clone the AOSP lint source (sparse checkout, ~200MB)
-git clone --no-checkout https://android.googlesource.com/platform/tools/base lint-codebase/base
-cd lint-codebase/base
+git clone --no-checkout https://android.googlesource.com/platform/tools/base lint_codebase/base
+cd lint_codebase/base
 git sparse-checkout init --cone
 git sparse-checkout set lint
 git checkout mirror-goog-studio-main
@@ -36,7 +36,7 @@ uv sync
 source .venv/bin/activate
 
 # 3. Build the Docker evaluation image (one-time, ~5 min)
-docker build -t lintbench-eval build_env/
+docker build -t lintbench-eval lint_benchmark/build_env/
 ```
 
 ## Project layout
@@ -60,14 +60,19 @@ pyproject.toml          uv/pip package config (repo root)
 Re-run only if updating to a newer AOSP branch.
 
 ```bash
-python curate/01_pair_checks.py
-python curate/02_extract_specs.py
-python curate/03_audit_test_quality.py
-python curate/04_stratify_difficulty.py
-python curate/05_build_benchmark.py
+# Run the full pipeline
+python lint_benchmark/run_curate.py
+
+# Skip steps whose output already exists
+python lint_benchmark/run_curate.py --skip-existing
+
+# Run only specific steps (1–5)
+python lint_benchmark/run_curate.py --only 2 3
 ```
 
-Each script reads from `data/` and writes back to `data/`. Run from `lint_benchmark/` root.
+Each step reads from `data/` and writes back to `data/`. Final outputs:
+- `data/lintbench.jsonl` — one instance per line; used by generate and eval
+- `data/lintbench.json` — full dataset including excluded instances and metadata
 
 ### Step 2 — Generate
 
@@ -156,32 +161,21 @@ instances: [ per-instance detail with per-sample results ]
 
 ## Smoke test
 
-Verify the full pipeline without API keys or Docker:
-
 ```bash
-bash smoke_test.sh
+bash smoke_test.sh            # no API keys or Docker required
+bash smoke_test.sh --docker   # also run real compilation via Docker
 ```
 
-This runs three steps automatically:
-1. **Downloads** `lintbench.json` from HuggingFace
-2. **Inference stub** — writes minimal placeholder detectors for 5 instances (`--stub`), no API calls made
-3. **Eval stub** — runs pass/fail evaluation without Docker (`--stub --stub-mode mixed`), validates the results JSON
+Steps run automatically:
 
-To run the steps individually:
+1. **Benchmark** — uses `data/lintbench.jsonl` if present locally, otherwise downloads from HuggingFace
+2. **Inference stub** — writes minimal placeholder detectors for 5 instances, no API calls
+3. **Eval stub** — fake pass/fail without Docker, validates results JSON
+4. **Docker eval** (`--docker` only) — compiles and tests the 5 generated detectors in the real build harness; builds the image automatically if not found
 
-```bash
-# Inference stub (no API calls)
-python lint_benchmark/run_inference.py \
-    --model smoke-test-model --prompt zero_shot \
-    --out /tmp/smoke/generated --limit 5 --stub
-
-# Eval stub (no Docker)
-python lint_benchmark/run_eval.py \
-    --generated /tmp/smoke/generated/smoke-test-model/zero_shot \
-    --model smoke-test-model --prompt zero_shot \
-    --out /tmp/smoke/results.json \
-    --limit 5 --stub --stub-mode mixed
-```
+Results land in `.smoke/results/`:
+- `smoke_stub.json` — stub eval output
+- `smoke_docker.json` — Docker eval output (with `--docker`)
 
 ## Pinned versions
 
@@ -197,7 +191,7 @@ python lint_benchmark/run_eval.py \
 To update Lint API version after re-running curation against a newer branch:
 1. Update `lintVersion` in `build_env/gradle.properties`
 2. Update `LINT_VERSION` in `build_env/Dockerfile`
-3. Rebuild: `docker build -t lintbench-eval build_env/`
+3. Rebuild: `docker build -t lintbench-eval lint_benchmark/build_env/`
 
 ## License
 

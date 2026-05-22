@@ -293,14 +293,23 @@ def main(args: argparse.Namespace) -> None:
     if build_env and not build_env.exists():
         raise SystemExit(f"ERROR: build env script not found: {build_env}")
 
-    data = json.loads(benchmark_path.read_text())
+    if benchmark_path.suffix == ".jsonl":
+        all_instances = [
+            json.loads(line) for line in benchmark_path.read_text().splitlines() if line.strip()
+        ]
+        if args.split:
+            all_instances = [i for i in all_instances if i.get("benchmark_split") == args.split]
+        benchmark_version = "1.0.0"
+    else:
+        data = json.loads(benchmark_path.read_text())
+        splits_to_run = [args.split] if args.split else ["easy", "medium", "hard"]
+        all_instances = [
+            inst
+            for split in splits_to_run
+            for inst in data["splits"].get(split, [])
+        ]
+        benchmark_version = data.get("version", "1.0.0")
 
-    splits_to_run = [args.split] if args.split else ["easy", "medium", "hard"]
-    all_instances = [
-        inst
-        for split in splits_to_run
-        for inst in data["splits"].get(split, [])
-    ]
     if args.limit:
         all_instances = all_instances[:args.limit]
 
@@ -337,7 +346,7 @@ def main(args: argparse.Namespace) -> None:
     output = {
         "model":              args.model,
         "prompt_variant":     args.prompt,
-        "benchmark_version":  data.get("version", "1.0.0"),
+        "benchmark_version":  benchmark_version,
         "split":              args.split,
         "n_instances":        len(instance_results),
         "n_samples_per_inst": args.samples,
@@ -361,8 +370,8 @@ if __name__ == "__main__":
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--benchmark",  default="data/lintbench.json",
-                        help="Path to lintbench.json")
+    parser.add_argument("--benchmark",  default="data/lintbench.jsonl",
+                        help="Path to benchmark file (.jsonl or .json)")
     parser.add_argument("--generated",  required=True,
                         help="Directory containing generated detector files")
     parser.add_argument("--model",      required=True,

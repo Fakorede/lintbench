@@ -88,14 +88,20 @@ def main(args: argparse.Namespace) -> None:
     if not benchmark_path.exists():
         raise SystemExit(f"ERROR: benchmark not found: {benchmark_path}")
 
-    data = json.loads(benchmark_path.read_text())
-
-    splits = [args.split] if args.split else ["easy", "medium", "hard"]
-    instances = [
-        inst
-        for split in splits
-        for inst in data["splits"].get(split, [])
-    ]
+    if benchmark_path.suffix == ".jsonl":
+        instances = [
+            json.loads(line) for line in benchmark_path.read_text().splitlines() if line.strip()
+        ]
+        if args.split:
+            instances = [i for i in instances if i.get("benchmark_split") == args.split]
+    else:
+        data = json.loads(benchmark_path.read_text())
+        splits = [args.split] if args.split else ["easy", "medium", "hard"]
+        instances = [
+            inst
+            for split in splits
+            for inst in data["splits"].get(split, [])
+        ]
     if args.limit:
         instances = instances[:args.limit]
 
@@ -209,8 +215,8 @@ if __name__ == "__main__":
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--benchmark",   default="data/lintbench.json",
-                        help="Path to benchmark JSON file")
+    parser.add_argument("--benchmark",   default="data/lintbench.jsonl",
+                        help="Path to benchmark file (.jsonl or .json)")
     parser.add_argument("--model",       required=True,
                         help="Model name (e.g. gpt-4o, claude-sonnet-4-5, openai/gpt-4o)")
     parser.add_argument("--provider",    default=None,
