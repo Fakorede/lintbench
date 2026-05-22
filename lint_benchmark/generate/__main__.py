@@ -76,7 +76,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-from .prompts import build_prompt, extract_code
+from .prompts import build_prompt, extract_code, stub_detector
 from .providers import detect_provider, generate_sample
 
 # Load .env from the project root (two levels up from generate/)
@@ -149,16 +149,21 @@ def main(args: argparse.Namespace) -> None:
                 }
 
                 try:
-                    raw, usage = generate_sample(
-                        model=args.model,
-                        provider=provider,
-                        system=system,
-                        user=user,
-                        temperature=temperature,
-                        max_tokens=args.max_tokens,
-                        api_base=api_base,
-                    )
-                    code = extract_code(raw, ext)
+                    if args.stub:
+                        code  = stub_detector(inst)
+                        usage = {"input_tokens": 0, "output_tokens": 0}
+                    else:
+                        raw, usage = generate_sample(
+                            model=args.model,
+                            provider=provider,
+                            system=system,
+                            user=user,
+                            temperature=temperature,
+                            max_tokens=args.max_tokens,
+                            api_base=api_base,
+                        )
+                        code = extract_code(raw, ext)
+
                     out_file.write_text(code, encoding="utf-8")
 
                     log_record["success"]      = True
@@ -232,4 +237,7 @@ if __name__ == "__main__":
                         help="Custom API base URL for local/compatible endpoints")
     parser.add_argument("--force",       action="store_true",
                         help="Regenerate even if output file already exists")
+    parser.add_argument("--stub",        action="store_true",
+                        help="Write minimal placeholder detectors instead of calling APIs "
+                             "(for smoke testing)")
     main(parser.parse_args())

@@ -154,6 +154,35 @@ instances: [ per-instance detail with per-sample results ]
 **Failure modes:** `pass` · `compilation_failed` · `wrong_imports` · `wrong_scanner` ·
 `too_narrow` · `too_broad` · `wrong_logic` · `timeout` · `no_file`
 
+## Smoke test
+
+Verify the full pipeline without API keys or Docker:
+
+```bash
+bash smoke_test.sh
+```
+
+This runs three steps automatically:
+1. **Downloads** `lintbench.json` from HuggingFace
+2. **Inference stub** — writes minimal placeholder detectors for 5 instances (`--stub`), no API calls made
+3. **Eval stub** — runs pass/fail evaluation without Docker (`--stub --stub-mode mixed`), validates the results JSON
+
+To run the steps individually:
+
+```bash
+# Inference stub (no API calls)
+python lint_benchmark/run_inference.py \
+    --model smoke-test-model --prompt zero_shot \
+    --out /tmp/smoke/generated --limit 5 --stub
+
+# Eval stub (no Docker)
+python lint_benchmark/run_eval.py \
+    --generated /tmp/smoke/generated/smoke-test-model/zero_shot \
+    --model smoke-test-model --prompt zero_shot \
+    --out /tmp/smoke/results.json \
+    --limit 5 --stub --stub-mode mixed
+```
+
 ## Pinned versions
 
 | Component   | Version | Reason |
