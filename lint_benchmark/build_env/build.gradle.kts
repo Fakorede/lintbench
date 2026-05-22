@@ -44,7 +44,8 @@ dependencies {
     testImplementation("org.mockito.kotlin:mockito-kotlin:5.3.1")
 
     // Runtime-only deps pulled in transitively by lint-tests
-    testRuntimeOnly("com.android.tools.external.com-intellij:intellij-core:$lintVersion")
+    // intellij-core promoted to testImplementation for FileUtil (FontDetectorTest)
+    testImplementation("com.android.tools.external.com-intellij:intellij-core:$lintVersion")
     testRuntimeOnly("com.android.tools.external.com-intellij:kotlin-compiler:$lintVersion")
     testRuntimeOnly("com.android.tools.external.org-jetbrains:uast:$lintVersion")
     testRuntimeOnly("com.android.tools.layoutlib:layoutlib-api:$lintVersion")

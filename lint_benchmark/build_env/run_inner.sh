@@ -55,7 +55,16 @@ else
     DEST_DIR="/eval/src/generated/java/com/android/tools/lint/checks"
 fi
 mkdir -p "$DEST_DIR"
-cp "$GENERATED_FILE" "${DEST_DIR}/"
+# Java/Kotlin require file name to match public class name — extract it from content
+if [[ "$EXT" == "kt" ]]; then
+    DETECTOR_CLASS=$(grep -m1 'class ' "$GENERATED_FILE" | sed 's/.*class \([A-Za-z_][A-Za-z0-9_]*\).*/\1/')
+else
+    DETECTOR_CLASS=$(grep -m1 'class ' "$GENERATED_FILE" | sed 's/.*class \([A-Za-z_][A-Za-z0-9_]*\).*/\1/')
+fi
+if [[ -z "$DETECTOR_CLASS" ]]; then
+    DETECTOR_CLASS="detector"
+fi
+cp "$GENERATED_FILE" "${DEST_DIR}/${DETECTOR_CLASS}.${EXT}"
 
 # ---------------------------------------------------------------------------
 # 2. Find and place the test file
