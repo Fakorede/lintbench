@@ -123,7 +123,8 @@ set -e
 
 if [[ $COMPILE_EXIT -ne 0 ]]; then
     # Extract meaningful error lines (filter Gradle noise)
-    ERRORS=$({ grep -E "error:|unresolved reference|cannot access|does not contain" "$COMPILE_LOG" || true; } \
+    # Kotlin uses "e: file://..." prefix; Java uses "error:"; both are caught here.
+    ERRORS=$({ grep -iE "^e: |error:|[Uu]nresolved reference|cannot access|does not contain|symbol not found" "$COMPILE_LOG" || true; } \
         | head -20 \
         | python3 -c "
 import sys, json
