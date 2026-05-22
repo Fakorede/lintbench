@@ -47,8 +47,14 @@ COPY settings.gradle.kts  .
 COPY build.gradle.kts     .
 COPY gradle.properties    .
 
-# Pre-warm Gradle dependency cache (run during image build, not at eval time)
-RUN gradle dependencies --no-daemon -q 2>&1 | tail -5 || true
+# Pre-warm Gradle dependency cache including the Kotlin compiler toolchain.
+# A stub Kotlin file is needed to force kotlinCompilerClasspath resolution;
+# without it, compileKotlin exits immediately (no sources) and skips the download.
+RUN mkdir -p src/generated/kotlin/com/android/tools/lint/checks && \
+    echo 'package com.android.tools.lint.checks' \
+         > src/generated/kotlin/com/android/tools/lint/checks/Stub.kt && \
+    gradle dependencies compileKotlin --no-daemon -q 2>&1 | tail -5 || true && \
+    rm -f src/generated/kotlin/com/android/tools/lint/checks/Stub.kt
 
 # ── Test infrastructure ───────────────────────────────────────────────────────
 # Copy the AbstractCheckTest and related test infrastructure from the AOSP

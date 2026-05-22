@@ -29,6 +29,9 @@ dependencies {
     testImplementation("com.android.tools.lint:lint-tests:$lintVersion")
     testImplementation("junit:junit:4.13.2")
 
+    // lint provides LintCliClient (needed for TestLintClient hierarchy resolution)
+    testImplementation("com.android.tools.lint:lint:$lintVersion")
+
     // Runtime deps pulled in transitively by lint-tests
     testRuntimeOnly("com.android.tools.external.com-intellij:intellij-core:$lintVersion")
     testRuntimeOnly("com.android.tools.external.com-intellij:kotlin-compiler:$lintVersion")

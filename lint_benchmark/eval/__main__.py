@@ -45,6 +45,7 @@ See metrics.py — SampleResult, InstanceResult, EvalResults dataclasses.
 import argparse
 import datetime
 import json
+import os
 import subprocess
 import time
 from collections import defaultdict
@@ -131,6 +132,7 @@ def run_build_env(
     test_class_fqn: str,
     tests_to_run: list[str],
     timeout_s: int = 120,
+    log_dir: Optional[Path] = None,
 ) -> dict:
     """
     Call the real build environment subprocess.
@@ -144,8 +146,11 @@ def run_build_env(
         test_class_fqn,
         ",".join(tests_to_run),
     ]
+    env = os.environ.copy()
+    if log_dir:
+        env["LINTBENCH_LOG_DIR"] = str(log_dir)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=env)
         if proc.returncode != 0 and not proc.stdout.strip():
             return {
                 "compiled": False,
@@ -180,6 +185,7 @@ def evaluate_instance(
     build_env_script: Optional[Path],
     stub_mode: str,
     timeout_s: int,
+    log_dir: Optional[Path] = None,
 ) -> InstanceResult:
     instance_id  = instance["instance_id"]
     tests_to_run = instance["tests_to_run"]
@@ -210,7 +216,7 @@ def evaluate_instance(
 
         if build_env_script is not None:
             raw = run_build_env(build_env_script, candidate, test_class_fqn,
-                                tests_to_run, timeout_s)
+                                tests_to_run, timeout_s, log_dir)
         else:
             raw = run_stub(instance_id, candidate, test_class_fqn,
                            tests_to_run, stub_mode)
@@ -285,6 +291,9 @@ def main(args: argparse.Namespace) -> None:
     generated_dir  = Path(args.generated)
     out_path       = Path(args.out)
     build_env      = Path(args.build_env) if args.build_env else None
+    log_dir        = Path(args.log_dir) if args.log_dir else None
+    if log_dir:
+        log_dir.mkdir(parents=True, exist_ok=True)
 
     if not benchmark_path.exists():
         raise SystemExit(f"ERROR: benchmark file not found: {benchmark_path}")
@@ -331,6 +340,7 @@ def main(args: argparse.Namespace) -> None:
                 build_env_script=build_env,
                 stub_mode=args.stub_mode,
                 timeout_s=args.timeout,
+                log_dir=log_dir,
             )
             instance_results.append(result)
             n_pass = sum(1 for r in instance_results if r.n_passed > 0)
@@ -392,6 +402,8 @@ if __name__ == "__main__":
                         help="Cap number of instances (useful for testing)")
     parser.add_argument("--timeout",    type=int, default=120,
                         help="Per-instance timeout in seconds (default: 120)")
+    parser.add_argument("--log-dir",    default=None,
+                        help="Directory to save per-instance compile/test logs from Docker")
     parser.add_argument("--stub",       action="store_true",
                         help="Use stub build environment (no real compilation)")
     parser.add_argument("--stub-mode",  default="all_fail",

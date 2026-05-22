@@ -80,23 +80,26 @@ else
     TEST_DEST_DIR="/eval/src/instance/java/com/android/tools/lint/checks"
 fi
 mkdir -p "$TEST_DEST_DIR"
-cp "$TEST_FILE" "${TEST_DEST_DIR}/"
+# Java requires public class Foo to live in Foo.java — use the class simple name
+TEST_CLASS_SIMPLE="${TEST_CLASS##*.}"
+cp "$TEST_FILE" "${TEST_DEST_DIR}/${TEST_CLASS_SIMPLE}.${TEST_EXT}"
 
 # ---------------------------------------------------------------------------
 # 3. Attempt compilation
 # ---------------------------------------------------------------------------
-COMPILE_LOG=$(mktemp)
+COMPILE_LOG="/output/compile.log"
+mkdir -p /output
 
 set +e
 gradle compileKotlin compileJava compileTestKotlin compileTestJava \
-    --no-daemon -q \
+    --no-daemon --offline -q \
     > "$COMPILE_LOG" 2>&1
 COMPILE_EXIT=$?
 set -e
 
 if [[ $COMPILE_EXIT -ne 0 ]]; then
     # Extract meaningful error lines (filter Gradle noise)
-    ERRORS=$(grep -E "error:|unresolved reference|cannot access|does not contain" "$COMPILE_LOG" \
+    ERRORS=$({ grep -E "error:|unresolved reference|cannot access|does not contain" "$COMPILE_LOG" || true; } \
         | head -20 \
         | python3 -c "
 import sys, json
@@ -105,15 +108,13 @@ print(json.dumps(lines))
 ")
     RAW=$(head -40 "$COMPILE_LOG" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
     echo "{\"compiled\":false,\"compile_errors\":${ERRORS},\"tests_run\":[],\"tests_passed\":[],\"tests_failed\":[],\"failure_output\":${RAW}}"
-    rm -f "$COMPILE_LOG"
     exit 0
 fi
-rm -f "$COMPILE_LOG"
 
 # ---------------------------------------------------------------------------
 # 4. Run targeted test methods
 # ---------------------------------------------------------------------------
-TEST_LOG=$(mktemp)
+TEST_LOG="/output/test.log"
 XML_DIR="/eval/build/test-results/test"
 
 # Convert comma-separated methods to array
@@ -121,7 +122,7 @@ IFS=',' read -ra METHODS <<< "$TEST_METHODS"
 
 set +e
 gradle test \
-    --no-daemon -q \
+    --no-daemon --offline -q \
     --tests "${TEST_CLASS}" \
     -Dlintbench.test.class="${TEST_CLASS}" \
     -Dlintbench.test.methods="${TEST_METHODS}" \
@@ -186,4 +187,7 @@ result = {
 print(json.dumps(result))
 PYEOF
 
-rm -f "$TEST_LOG"
+# Copy JUnit XML results to /output for the host to inspect
+if [[ -d "$XML_DIR" ]]; then
+    cp -r "$XML_DIR" /output/test-results 2>/dev/null || true
+fi
