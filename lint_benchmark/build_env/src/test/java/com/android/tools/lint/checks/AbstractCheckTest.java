@@ -65,7 +65,7 @@ public abstract class AbstractCheckTest extends LintDetectorTest {
     }
 
     @Override
-    public ToolsBaseTestLintClient createClient() {
+    protected TestLintClient createClient() {
         return new ToolsBaseTestLintClient();
     }
 
@@ -80,6 +80,11 @@ public abstract class AbstractCheckTest extends LintDetectorTest {
     protected ProjectDescription project() {
         return new ProjectDescription();
     }
+
+    public static TestMode PLATFORM_ANNOTATIONS_TEST_MODE =
+            new TestMode("Platform Annotations", "PLATFORM_ANNOTATIONS");
+
+    public static TestMode ANDROIDX_TEST_MODE = new TestMode("AndroidX", "ANDROIDX");
 
     @Override
     @NonNull
