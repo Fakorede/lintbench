@@ -32,13 +32,21 @@ dependencies {
     // lint provides LintCliClient (needed for TestLintClient hierarchy resolution)
     testImplementation("com.android.tools.lint:lint:$lintVersion")
 
-    // Runtime deps pulled in transitively by lint-tests
+    // Tools artifacts: promote to testImplementation so test files can import
+    // SdkVersionInfo, FileUtils, Version, FontProviderKt, GoogleMavenRepository etc.
+    // at compile time. These jars were already cached as testRuntimeOnly.
+    testImplementation("com.android.tools:sdklib:$lintVersion")
+    testImplementation("com.android.tools:common:$lintVersion")
+    testImplementation("com.android.tools:sdk-common:$lintVersion")
+
+    // Mockito — used by GradleDetectorTest and AppLinksValidDetectorTest
+    testImplementation("org.mockito:mockito-core:5.11.0")
+    testImplementation("org.mockito.kotlin:mockito-kotlin:5.3.1")
+
+    // Runtime-only deps pulled in transitively by lint-tests
     testRuntimeOnly("com.android.tools.external.com-intellij:intellij-core:$lintVersion")
     testRuntimeOnly("com.android.tools.external.com-intellij:kotlin-compiler:$lintVersion")
     testRuntimeOnly("com.android.tools.external.org-jetbrains:uast:$lintVersion")
-    testRuntimeOnly("com.android.tools:common:$lintVersion")
-    testRuntimeOnly("com.android.tools:sdk-common:$lintVersion")
-    testRuntimeOnly("com.android.tools:sdklib:$lintVersion")
     testRuntimeOnly("com.android.tools.layoutlib:layoutlib-api:$lintVersion")
     testRuntimeOnly("net.sf.kxml:kxml2:2.3.0")
     testRuntimeOnly("org.codehaus.groovy:groovy:3.0.21")
