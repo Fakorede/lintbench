@@ -63,8 +63,12 @@ RUN mkdir -p src/generated/kotlin/com/android/tools/lint/checks && \
 # test files for each benchmark instance.
 COPY src/ src/
 
-# Pre-compile the test infrastructure
-RUN gradle compileTestKotlin compileTestJava --no-daemon -q 2>&1 | tail -10 || true
+# Pre-compile the test infrastructure and warm the full test runtime classpath.
+# Running `test` (even with failure) forces Gradle to resolve and cache all
+# runtime-only transitive deps (ddmlib, groovy, asm-analysis, gson, etc.) so
+# that offline mode works at eval time.
+RUN gradle compileTestKotlin compileTestJava --no-daemon -q 2>&1 | tail -10 || true && \
+    gradle test --no-daemon -q 2>&1 | tail -5 || true
 
 # ── Conditional stubs ─────────────────────────────────────────────────────────
 # Stubs that are only injected for specific test files (not pre-compiled).
