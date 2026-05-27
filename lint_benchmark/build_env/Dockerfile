@@ -1,6 +1,6 @@
 # LintBench evaluation build environment
 #
-# Provides a reproducible environment for compiling LLM-generated Android Lint
+# Provides a reproducible environment for compiling developer and LLM-generated Android Lint
 # detectors against the Lint API and running targeted test methods.
 #
 # Build:
@@ -18,7 +18,7 @@ FROM eclipse-temurin:17-jdk-jammy
 
 # ── System deps ──────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl unzip python3 \
+    curl unzip python3 git \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Gradle ───────────────────────────────────────────────────────────────────
@@ -31,6 +31,32 @@ RUN curl -fsSL \
     -o /tmp/gradle.zip \
     && unzip -q /tmp/gradle.zip -d /opt/gradle \
     && rm /tmp/gradle.zip
+
+# ── Android platform JARs ────────────────────────────────────────────────────
+# Provides android.jar for API levels 3–34 so lint tests can resolve
+# android.* imports in their inline test snippets without needing a full SDK.
+# Uses a sparse blob-filter clone so only the android.jar files are fetched.
+ENV ANDROID_HOME=/opt/android-sdk
+
+RUN mkdir -p ${ANDROID_HOME}/platforms && \
+    git clone --filter=blob:none --no-checkout --depth=1 \
+        https://github.com/sable/android-platforms.git /tmp/android-platforms && \
+    cd /tmp/android-platforms && \
+    git sparse-checkout init --cone && \
+    git sparse-checkout set \
+        android-3  android-4  android-5  android-6  android-7  android-8  android-9 \
+        android-10 android-11 android-12 android-13 android-14 android-15 android-16 \
+        android-17 android-18 android-19 android-21 android-22 android-23 android-24 \
+        android-25 android-26 android-27 android-28 android-29 android-30 android-31 \
+        android-32 android-33 android-34 && \
+    git checkout HEAD && \
+    cp -r android-* ${ANDROID_HOME}/platforms/ && \
+    rm -rf /tmp/android-platforms && \
+    for dir in ${ANDROID_HOME}/platforms/android-*; do \
+        api=$(basename "$dir" | sed 's/android-//'); \
+        printf "AndroidVersion.ApiLevel=%s\nPlatform.Version=%s\nPkg.Revision=1\n" "$api" "$api" \
+            > "${dir}/source.properties"; \
+    done
 
 # ── Lint API version ─────────────────────────────────────────────────────────
 # Pinned to match mirror-goog-studio-main at time of benchmark construction.

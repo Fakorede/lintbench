@@ -7,18 +7,22 @@ implementation and its JUnit test suite for automated pass/fail evaluation.
 
 ## Dataset
 
-439 benchmark instances drawn from the AOSP `tools/base` repository
-(`mirror-goog-studio-main`, May 2026).
+**156 validated instances** in `data/dataset.jsonl`, drawn from the AOSP `tools/base`
+repository (`mirror-goog-studio-main`, May 2026) and filtered through a two-stage
+validation pipeline (see [Dataset validation](#dataset-validation) below).
 
-| Split  | Instances | Criteria |
-|--------|-----------|----------|
-| EASY   | 124       | Score 0–2: simple method-call matching, single scope |
-| MEDIUM | 174       | Score 3–5: type-aware, multi-scope, light data-flow |
-| HARD   | 141       | Score 6+: interprocedural, deep data-flow, CFG-level |
+| Split  | Raw | Validated | Criteria |
+|--------|-----|-----------|----------|
+| easy   | 124 | 65        | Score 0–2: simple method-call matching, single scope |
+| medium | 174 | 56        | Score 3–5: type-aware, multi-scope, light data-flow |
+| hard   | 141 | 35        | Score 6+: interprocedural, deep data-flow, CFG-level |
 
-- **Languages:** 297 Kotlin · 142 Java
-- **Categories:** CORRECTNESS (257), SECURITY (53), PERFORMANCE (40), ICONS (22), others
+- **Languages:** Kotlin · Java
+- **Categories:** CORRECTNESS, SECURITY, PERFORMANCE, ICONS, others
 - **Evaluation:** pass@k — all `tests_to_run` methods must pass in the real Lint test harness
+
+`data/lintbench.jsonl` contains all 439 raw instances including those filtered out
+during validation.
 
 ## Setup
 
@@ -37,6 +41,9 @@ source .venv/bin/activate
 
 # 3. Build the Docker evaluation image (one-time, ~5 min)
 docker build -t lintbench-eval lint_benchmark/build_env/
+
+# 4. Build the stub generator (one-time, ~2 min)
+cd lint_benchmark/stub_generator && ./gradlew shadowJar && cd ../..
 ```
 
 ## Project layout
@@ -47,7 +54,19 @@ lint_benchmark/
   generate/             Model inferencing package
   eval/                 Evaluation package
   build_env/            Docker + Gradle compilation environment
-  data/                 Benchmark artifacts (lintbench.json, intermediates)
+    oracle_eval.py      Run real AOSP detectors as oracle to validate instances
+    stub_eval.py        Run stubbed detectors to confirm tests have discriminating power
+    src/oracle/         Staging dir for oracle detector files (per-instance)
+    src/stub/           Staging dir for stub detector files (per-instance)
+  stub_generator/       JVM tool: generates minimal stubs from real detector sources
+    src/main/kotlin/
+      StubGenerator.kt  Kotlin compiler PSI (.kt) + JavaParser (.java)
+  data/
+    lintbench.jsonl     All 439 raw instances
+    dataset.jsonl       162 validated instances (oracle pass + stub fail)
+  results/
+    oracle/             oracle_eval results and per-instance logs
+    stub/               stub_eval results and per-instance logs
   run_inference.py      Entry point: generate detector files from a model
   run_eval.py           Entry point: compile and test generated detectors
 pyproject.toml          uv/pip package config (repo root)
@@ -55,7 +74,7 @@ pyproject.toml          uv/pip package config (repo root)
 
 ## Pipeline
 
-### Step 1 — Curate (already done; outputs are in `data/`)
+### Step 1 — Curate (outputs are saved in `data/`)
 
 Re-run only if updating to a newer AOSP branch.
 
@@ -73,6 +92,45 @@ python lint_benchmark/run_curate.py --only 2 3
 Each step reads from `data/` and writes back to `data/`. Final outputs:
 - `data/lintbench.jsonl` — one instance per line; used by generate and eval
 - `data/lintbench.json` — full dataset including excluded instances and metadata
+
+### Dataset validation
+
+Two validation passes filter `lintbench.jsonl` down to `dataset.jsonl`.
+Run these if re-curating from a newer AOSP branch; the outputs are already
+committed for the current corpus.
+
+**Oracle eval** — runs the real AOSP detector source through the harness.
+Instances where the real implementation fails to compile or pass its own tests
+are not valid benchmark entries.
+
+```bash
+python3 lint_benchmark/build_env/oracle_eval.py --workers 4 --timeout 180
+# Results → lint_benchmark/results/oracle/oracle_results.json
+# Passing instances → lint_benchmark/data/dataset.jsonl
+```
+
+| Status        | Count | Meaning |
+|---------------|-------|---------|
+| `pass`        | 160   | Real detector compiles and all targeted tests pass → carried forward |
+| `test_fail`   | 45    | Tests fail even with the real implementation (stub/API gap) |
+| `compile_fail`| 233   | Real detector uses AOSP-internal APIs not in the Maven artifact |
+
+**Stub eval** — replaces each detector with a minimal stub (correct class
+structure, `Issue` declarations intact, all method bodies emptied) and re-runs
+the tests. Tests must fail with a stub; a passing test has no discriminating
+power and the instance is dropped from `dataset.jsonl`.
+
+```bash
+python3 lint_benchmark/build_env/stub_eval.py --workers 4 --timeout 180
+# Results → lint_benchmark/results/stub/stub_results.json
+# dataset.jsonl updated in-place (passing-stub instances removed)
+```
+
+The stub generator (called automatically by `stub_eval.py`) uses the Kotlin
+compiler's own PSI for `.kt` files and JavaParser for `.java` files, so stubs
+are syntactically faithful to the original — companion objects and `Issue`
+declarations are preserved verbatim while all method bodies are replaced with
+typed no-op stubs.
 
 ### Step 2 — Generate
 
@@ -195,6 +253,9 @@ To update Lint API version after re-running curation against a newer branch:
 
 ## License
 
-Detector source files and test files are from the Android Open Source Project
-and are licensed under **Apache 2.0**. Include attribution in any published
-benchmark or dataset derived from this work.
+This project is licensed under the **Apache License 2.0** — see [LICENSE](LICENSE) for details.
+
+Detector source files and test files are derived from the Android Open Source Project,
+also licensed under Apache 2.0. 
+
+Copyright 2026 LintBench Authors.

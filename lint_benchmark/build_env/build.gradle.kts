@@ -17,8 +17,12 @@ repositories {
 
 dependencies {
     // ── Lint API (compile against) ────────────────────────────────────────
+    // LLM-generated detectors only need lint-api — they ARE the implementation.
+    // lint-checks is kept as testImplementation so test files that reference
+    // other detector constants/utilities still compile, but the LLM-compiled
+    // class takes precedence at runtime (project classes before external JARs).
     implementation("com.android.tools.lint:lint-api:$lintVersion")
-    implementation("com.android.tools.lint:lint-checks:$lintVersion")
+    testImplementation("com.android.tools.lint:lint-checks:$lintVersion")
 
     // ── Kotlin stdlib ─────────────────────────────────────────────────────
     implementation(kotlin("stdlib"))
