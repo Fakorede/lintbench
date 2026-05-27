@@ -17,8 +17,12 @@ repositories {
 
 dependencies {
     // ── Lint API (compile against) ────────────────────────────────────────
+    // LLM-generated detectors only need lint-api — they ARE the implementation.
+    // lint-checks is kept as testImplementation so test files that reference
+    // other detector constants/utilities still compile, but the LLM-compiled
+    // class takes precedence at runtime (project classes before external JARs).
     implementation("com.android.tools.lint:lint-api:$lintVersion")
-    implementation("com.android.tools.lint:lint-checks:$lintVersion")
+    testImplementation("com.android.tools.lint:lint-checks:$lintVersion")
 
     // ── Kotlin stdlib ─────────────────────────────────────────────────────
     implementation(kotlin("stdlib"))
@@ -29,15 +33,38 @@ dependencies {
     testImplementation("com.android.tools.lint:lint-tests:$lintVersion")
     testImplementation("junit:junit:4.13.2")
 
-    // Runtime deps pulled in transitively by lint-tests
-    testRuntimeOnly("com.android.tools.external.com-intellij:intellij-core:$lintVersion")
+    // lint provides LintCliClient (needed for TestLintClient hierarchy resolution)
+    testImplementation("com.android.tools.lint:lint:$lintVersion")
+
+    // Tools artifacts: promote to testImplementation so test files can import
+    // SdkVersionInfo, FileUtils, Version, FontProviderKt, GoogleMavenRepository etc.
+    // at compile time. These jars were already cached as testRuntimeOnly.
+    testImplementation("com.android.tools:sdklib:$lintVersion")
+    testImplementation("com.android.tools:common:$lintVersion")
+    testImplementation("com.android.tools:sdk-common:$lintVersion")
+
+    // Mockito — used by GradleDetectorTest and AppLinksValidDetectorTest
+    testImplementation("org.mockito:mockito-core:5.11.0")
+    testImplementation("org.mockito.kotlin:mockito-kotlin:5.3.1")
+
+    // Google Truth — used by AppLinksValidDetectorTest, CheckResultDetectorTest, etc.
+    testImplementation("com.google.truth:truth:1.4.2")
+
+    // Guava — runtime dep of lint-api (not compile); needed by ~25 test files
+    testImplementation("com.google.guava:guava:32.0.1-jre")
+
+    // androidx.annotation — used by ~34 test files for @NonNull etc.
+    testImplementation("androidx.annotation:annotation:1.7.0")
+
+    // kxml2 — used by LayoutInflationDetectorTest
+    testImplementation("net.sf.kxml:kxml2:2.3.0")
+
+    // Runtime-only deps pulled in transitively by lint-tests
+    // intellij-core promoted to testImplementation for FileUtil (FontDetectorTest)
+    testImplementation("com.android.tools.external.com-intellij:intellij-core:$lintVersion")
     testRuntimeOnly("com.android.tools.external.com-intellij:kotlin-compiler:$lintVersion")
     testRuntimeOnly("com.android.tools.external.org-jetbrains:uast:$lintVersion")
-    testRuntimeOnly("com.android.tools:common:$lintVersion")
-    testRuntimeOnly("com.android.tools:sdk-common:$lintVersion")
-    testRuntimeOnly("com.android.tools:sdklib:$lintVersion")
     testRuntimeOnly("com.android.tools.layoutlib:layoutlib-api:$lintVersion")
-    testRuntimeOnly("net.sf.kxml:kxml2:2.3.0")
     testRuntimeOnly("org.codehaus.groovy:groovy:3.0.21")
     testRuntimeOnly("org.ow2.asm:asm:9.6")
     testRuntimeOnly("org.ow2.asm:asm-tree:9.6")

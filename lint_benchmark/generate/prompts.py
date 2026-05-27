@@ -275,12 +275,32 @@ class {detector} : Detector(), SourceCodeScanner {{
             priority = 5,
             severity = Severity.WARNING,
             implementation = Implementation({detector}::class.java, Scope.JAVA_FILE_SCOPE)
-        )
+        ){extra_constants}
     }}
 
     override fun getApplicableMethodNames(): List<String> = emptyList()
 }}
 """
+
+# Extra companion object constants that ApiDetectorTest statically imports.
+_APIDETECTOR_EXTRA_KT = """
+
+        // Constants expected by ApiDetectorTest static imports.
+        // @JvmField is required so Kotlin companion vals are Java static fields.
+        @JvmField val UNSUPPORTED: Issue = Issue.create("NewApi", "Stub", "Stub",
+            Category.CORRECTNESS, 6, Severity.ERROR,
+            Implementation(ApiDetector::class.java, Scope.JAVA_FILE_SCOPE))
+        @JvmField val INLINED: Issue = Issue.create("InlinedApi", "Stub", "Stub",
+            Category.CORRECTNESS, 6, Severity.WARNING,
+            Implementation(ApiDetector::class.java, Scope.JAVA_FILE_SCOPE))
+        @JvmField val UNUSED: Issue = Issue.create("UnusedAttribute", "Stub", "Stub",
+            Category.CORRECTNESS, 6, Severity.WARNING,
+            Implementation(ApiDetector::class.java, Scope.JAVA_FILE_SCOPE))
+        @JvmField val OBSOLETE_SDK: Issue = Issue.create("ObsoleteSdkInt", "Stub", "Stub",
+            Category.PERFORMANCE, 6, Severity.WARNING,
+            Implementation(ApiDetector::class.java, Scope.JAVA_FILE_SCOPE))
+        const val KEY_REQUIRES_API = "requiresApi"
+        const val REPEATED_API_ANNOTATION_REQUIRES_ALL = true"""
 
 _STUB_JAVA = """\
 package com.android.tools.lint.checks;
@@ -306,8 +326,14 @@ public class {detector} extends Detector implements SourceCodeScanner {{
 
 def stub_detector(instance: dict) -> str:
     """Return a minimal syntactically valid detector for smoke testing."""
-    template = _STUB_KT if instance["check_lang"] == "kt" else _STUB_JAVA
-    return template.format(
+    if instance["check_lang"] == "kt":
+        extra = _APIDETECTOR_EXTRA_KT if instance["detector"] == "ApiDetector" else ""
+        return _STUB_KT.format(
+            detector=instance["detector"],
+            issue_id=instance["issue_id"],
+            extra_constants=extra,
+        )
+    return _STUB_JAVA.format(
         detector=instance["detector"],
         issue_id=instance["issue_id"],
     )

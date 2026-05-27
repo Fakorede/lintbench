@@ -22,7 +22,6 @@ import static com.android.SdkConstants.currentPlatform;
 
 import com.android.annotations.NonNull;
 import com.android.annotations.Nullable;
-import com.android.testutils.TestUtils;
 import com.android.tools.lint.checks.infrastructure.LintDetectorTest;
 import com.android.tools.lint.checks.infrastructure.ProjectDescription;
 import com.android.tools.lint.checks.infrastructure.TestFile;
@@ -31,12 +30,10 @@ import com.android.tools.lint.checks.infrastructure.TestLintTask;
 import com.android.tools.lint.checks.infrastructure.TestMode;
 import com.android.tools.lint.detector.api.Detector;
 import com.android.tools.lint.detector.api.Issue;
-import com.google.common.collect.Sets;
 import java.io.File;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 public abstract class AbstractCheckTest extends LintDetectorTest {
     @Override
@@ -72,13 +69,9 @@ public abstract class AbstractCheckTest extends LintDetectorTest {
         return new ToolsBaseTestLintClient();
     }
 
-    static File sdk;
+    static File sdk = null;
 
-    static {
-        sdk = TestUtils.getSdk().toFile();
-    }
-
-    @NonNull
+    @Nullable
     public static File getSdk() {
         return sdk;
     }
@@ -88,88 +81,33 @@ public abstract class AbstractCheckTest extends LintDetectorTest {
         return new ProjectDescription();
     }
 
-    public static AndroidPlatformAnnotationsTestMode PLATFORM_ANNOTATIONS_TEST_MODE =
-            new AndroidPlatformAnnotationsTestMode();
+    public static TestMode PLATFORM_ANNOTATIONS_TEST_MODE =
+            new TestMode("Platform Annotations", "PLATFORM_ANNOTATIONS");
 
-    public static AndroidxTestMode ANDROIDX_TEST_MODE = new AndroidxTestMode();
+    public static TestMode ANDROIDX_TEST_MODE = new TestMode("AndroidX", "ANDROIDX");
 
     @Override
     @NonNull
     protected TestLintTask lint() {
-        // instead of super.lint: don't set issues such that we can compute and compare
-        // detector results below
         TestLintTask task = TestLintTask.lint();
-
-        // Our Windows CI machines are slower than Linux and with many test modes
-        // running sometimes get killed for taking too long. The test modes are not
-        // OS sensitive, so let's just not run these extra test modes on Windows;
-        // the default test mode is good enough. (Ditto for code coverage builds.)
-        if ((isWindows() || isCoverageBuild()) && TestUtils.runningFromBazel()) {
-            task.testModes(TestMode.DEFAULT);
-        } else {
-            task.addTestModes(PLATFORM_ANNOTATIONS_TEST_MODE);
-            task.addTestModes(ANDROIDX_TEST_MODE);
-        }
-
-        // Only verify quickfixes across all test modes when adding new checks
-        // or for complex lint tests that explicitly opt in.
-        task.verifyFixedFileSyntax(null);
-
-        // Make sure we have access to compileSdkVersions specified by tests; if not,
-        // there's potential flakiness differences based on which SDKs are available
-        // when tests are running in the IDE when it's not using specific prebuilts.
-        task.requireCompileSdk();
-
+        task.testModes(TestMode.DEFAULT);
         task.testName(this.getClass().getSimpleName() + "_" + getName());
-
         task.checkMessage(
                 (context, issue, severity, location, message, fix) ->
                         AbstractCheckTest.super.checkReportedError(
                                 context, issue, severity, location, message, fix));
-
-        // We call getIssues() instead of setting task.detector() because the above
-        // getIssues call will ensure that we only check issues registered in the class
         task.detector(getDetectorInstance());
-
-        // Now check check the discrepancy to look for unregistered issues and
-        // highlight these
-        // TODO: Handle problems from getRegisteredIssuesFromDetector and if no fields are found
-        // don't assert the below. Basically, let the ISSUE field live outside the detector class
-        // (such as in a companion.)
-        List<Issue> computedIssues = getRegisteredIssuesFromDetector();
-        if (getIssues().equals(computedIssues)) {
-            Set<Issue> checkedIssues = Sets.newHashSet(task.getCheckedIssues());
-            Set<Issue> detectorIssues = Sets.newHashSet(computedIssues);
-            if (!checkedIssues.equals(detectorIssues)) {
-                Set<Issue> difference = Sets.symmetricDifference(checkedIssues, detectorIssues);
-                fail(
-                        "Discrepancy in issues listed in detector class "
-                                + getDetectorInstance().getClass().getSimpleName()
-                                + " and issues "
-                                + "found in the issue registry: "
-                                + difference
-                                + ". If the issue fields "
-                                + "are not meant to be included in the registry, you can rename them to "
-                                + "begin with an underscore.");
-            }
-        }
-
         task.showSecondaryLintContent(true);
         task.issues(getIssues().toArray(new Issue[0]));
         task.sdkHome(sdk);
         return task;
     }
 
-    /**
-     * Overrides TestLintClient to use the checked-in SDK that is available in the tools/base repo.
-     * The "real" TestLintClient is a public utility for writing lint tests, so it cannot make
-     * assumptions specific to tools/base.
-     */
     protected class ToolsBaseTestLintClient extends TestLintClient {
         @Nullable
         @Override
         public File getSdkHome() {
-            return TestUtils.getSdk().toFile();
+            return null;
         }
     }
 

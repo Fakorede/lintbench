@@ -166,11 +166,9 @@ if ${RUN_DOCKER}; then
     BUILD_ENV="${LB}/build_env/run.sh"
     [[ -f "${BUILD_ENV}" ]] || fail "Build env script not found: ${BUILD_ENV}"
 
-    if ! docker image inspect lintbench-eval &>/dev/null; then
-        warn "Docker image 'lintbench-eval' not found — building now..."
-        docker build -t lintbench-eval "${LB}/build_env/" \
-            || fail "Docker build failed. See output above."
-    fi
+    echo "  Building Docker image (lintbench-eval)..."
+    docker build -t lintbench-eval "${LB}/build_env/" \
+        || fail "Docker build failed. See output above."
 
     python "${LB}/run_eval.py" \
         --benchmark "${BENCHMARK}" \
@@ -179,6 +177,7 @@ if ${RUN_DOCKER}; then
         --prompt    zero_shot \
         --out       "${TMP}/results/smoke_docker.json" \
         --build-env "${BUILD_ENV}" \
+        --log-dir   "${TMP}/logs" \
         --limit     5
 
     DOCKER_RESULTS="${TMP}/results/smoke_docker.json"
@@ -214,6 +213,9 @@ fi
 # ---------------------------------------------------------------------------
 echo
 echo "=== Smoke test passed ==="
-echo "  Stub results:   ${TMP}/results/smoke_stub.json"
-${RUN_DOCKER} && echo "  Docker results: ${TMP}/results/smoke_docker.json"
+echo "  Stub results:    ${TMP}/results/smoke_stub.json"
+if ${RUN_DOCKER}; then
+    echo "  Docker results:  ${TMP}/results/smoke_docker.json"
+    echo "  Docker logs:     ${TMP}/logs/<instance_id>/{compile.log,test.log,test-results/}"
+fi
 echo "  Generated files: ${GENERATED_DIR}"

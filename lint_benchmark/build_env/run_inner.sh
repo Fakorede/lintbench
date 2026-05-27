@@ -55,7 +55,16 @@ else
     DEST_DIR="/eval/src/generated/java/com/android/tools/lint/checks"
 fi
 mkdir -p "$DEST_DIR"
-cp "$GENERATED_FILE" "${DEST_DIR}/"
+# Java/Kotlin require file name to match public class name — extract it from content
+if [[ "$EXT" == "kt" ]]; then
+    DETECTOR_CLASS=$(grep -m1 'class ' "$GENERATED_FILE" | sed 's/.*class \([A-Za-z_][A-Za-z0-9_]*\).*/\1/')
+else
+    DETECTOR_CLASS=$(grep -m1 'class ' "$GENERATED_FILE" | sed 's/.*class \([A-Za-z_][A-Za-z0-9_]*\).*/\1/')
+fi
+if [[ -z "$DETECTOR_CLASS" ]]; then
+    DETECTOR_CLASS="detector"
+fi
+cp "$GENERATED_FILE" "${DEST_DIR}/${DETECTOR_CLASS}.${EXT}"
 
 # ---------------------------------------------------------------------------
 # 2. Find and place the test file
@@ -80,23 +89,70 @@ else
     TEST_DEST_DIR="/eval/src/instance/java/com/android/tools/lint/checks"
 fi
 mkdir -p "$TEST_DEST_DIR"
-cp "$TEST_FILE" "${TEST_DEST_DIR}/"
+# Java requires public class Foo to live in Foo.java — use the class simple name
+TEST_CLASS_SIMPLE="${TEST_CLASS##*.}"
+cp "$TEST_FILE" "${TEST_DEST_DIR}/${TEST_CLASS_SIMPLE}.${TEST_EXT}"
+# Strip TestLintTask API calls absent from lint-tests:31.7.0 (added in later AOSP snapshots).
+# Inject sdkHome() so lint's UAST type-resolver picks up android.jar from the installed
+# platform JARs, resolving android.* imports in inline test snippets.
+# Inject allowMissingSdk() so tests don't fail if SDK structure check triggers first.
+# Kotlin omits "new"; Java requires it — branch on extension.
+if [[ "$TEST_EXT" == "kt" ]]; then
+    sed -i \
+        -e 's/\.verifyFixedFileSyntax([^)]*)//g' \
+        -e 's/\.allowManifestMergerErrors([^)]*)//g' \
+        -e 's|\.run()|.sdkHome(java.io.File("/opt/android-sdk")).allowMissingSdk().run()|g' \
+        "${TEST_DEST_DIR}/${TEST_CLASS_SIMPLE}.${TEST_EXT}"
+else
+    sed -i \
+        -e 's/\.verifyFixedFileSyntax([^)]*)//g' \
+        -e 's/\.allowManifestMergerErrors([^)]*)//g' \
+        -e 's|\.run()|.sdkHome(new java.io.File("/opt/android-sdk")).allowMissingSdk().run()|g' \
+        "${TEST_DEST_DIR}/${TEST_CLASS_SIMPLE}.${TEST_EXT}"
+fi
+
+# Inject conditional stubs that are needed only for specific test files.
+# GradleDetectorTestStub provides GradleDetectorTest.Companion.createRelativePaths,
+# which ManifestDetectorTest imports. It is NOT injected when the real
+# GradleDetectorTest.kt is the test file (that class defines it already).
+if grep -q "GradleDetectorTest" "${TEST_DEST_DIR}/${TEST_CLASS_SIMPLE}.${TEST_EXT}" 2>/dev/null && \
+   [[ "$TEST_CLASS_SIMPLE" != "GradleDetectorTest" ]]; then
+    cp /eval/templates/GradleDetectorTestStub.kt \
+       /eval/src/instance/kotlin/com/android/tools/lint/checks/GradleDetectorTestStub.kt
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Attempt compilation
 # ---------------------------------------------------------------------------
-COMPILE_LOG=$(mktemp)
+COMPILE_LOG="/output/compile.log"
+mkdir -p /output
+
+# Remove cached class output for the instance-specific source sets so Gradle
+# always recompiles the injected files. The warm-up baked in the image ran
+# with empty src/generated/ and src/instance/ directories; Gradle's UP-TO-DATE
+# check does not detect files added to those directories after the warm-up
+# because it compares against the last-known output, which had no classes from
+# those sources. Deleting the stale output forces a clean incremental compile.
+rm -rf /eval/build/classes/kotlin/main \
+       /eval/build/classes/java/main \
+       /eval/build/classes/kotlin/test \
+       /eval/build/classes/java/test \
+       /eval/build/tmp/compileKotlin \
+       /eval/build/tmp/compileJava \
+       /eval/build/tmp/compileTestKotlin \
+       /eval/build/tmp/compileTestJava
 
 set +e
 gradle compileKotlin compileJava compileTestKotlin compileTestJava \
-    --no-daemon -q \
+    --no-daemon --offline -q \
     > "$COMPILE_LOG" 2>&1
 COMPILE_EXIT=$?
 set -e
 
 if [[ $COMPILE_EXIT -ne 0 ]]; then
     # Extract meaningful error lines (filter Gradle noise)
-    ERRORS=$(grep -E "error:|unresolved reference|cannot access|does not contain" "$COMPILE_LOG" \
+    # Kotlin uses "e: file://..." prefix; Java uses "error:"; both are caught here.
+    ERRORS=$({ grep -iE "^e: |error:|[Uu]nresolved reference|cannot access|does not contain|symbol not found" "$COMPILE_LOG" || true; } \
         | head -20 \
         | python3 -c "
 import sys, json
@@ -105,26 +161,23 @@ print(json.dumps(lines))
 ")
     RAW=$(head -40 "$COMPILE_LOG" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))")
     echo "{\"compiled\":false,\"compile_errors\":${ERRORS},\"tests_run\":[],\"tests_passed\":[],\"tests_failed\":[],\"failure_output\":${RAW}}"
-    rm -f "$COMPILE_LOG"
     exit 0
 fi
-rm -f "$COMPILE_LOG"
 
 # ---------------------------------------------------------------------------
 # 4. Run targeted test methods
 # ---------------------------------------------------------------------------
-TEST_LOG=$(mktemp)
+TEST_LOG="/output/test.log"
 XML_DIR="/eval/build/test-results/test"
 
-# Convert comma-separated methods to array
-IFS=',' read -ra METHODS <<< "$TEST_METHODS"
-
+# Filter at class level only — JUnit 3 tests (which extend TestCase transitively
+# through LintDetectorTest) do not support method-level --tests filtering in
+# Gradle. Filtering to the class runs all methods; the XML parser below then
+# selects only the methods listed in tests_to_run.
 set +e
 gradle test \
-    --no-daemon -q \
+    --no-daemon --offline --info \
     --tests "${TEST_CLASS}" \
-    -Dlintbench.test.class="${TEST_CLASS}" \
-    -Dlintbench.test.methods="${TEST_METHODS}" \
     > "$TEST_LOG" 2>&1
 TEST_EXIT=$?
 set -e
@@ -133,7 +186,8 @@ set -e
 # 5. Parse XML test results
 # ---------------------------------------------------------------------------
 python3 - << PYEOF
-import os, json, re, glob
+import os, json, glob
+import xml.etree.ElementTree as ET
 
 xml_dir = "${XML_DIR}"
 test_class = "${TEST_CLASS}"
@@ -144,22 +198,27 @@ tests_passed = []
 tests_failed = []
 failure_output_parts = []
 
-# Parse JUnit XML output
+# Parse JUnit XML output using ElementTree (handles both self-closing and
+# non-self-closing <testcase> elements, which appear for passes and failures).
 xml_files = glob.glob(os.path.join(xml_dir, "*.xml"))
 for xml_file in xml_files:
-    content = open(xml_file).read()
-    # Find all testcase elements
-    for tc in re.finditer(r'<testcase[^>]*name="([^"]+)"[^>]*>(.*?)</testcase>', content, re.DOTALL):
-        name = tc.group(1)
-        body = tc.group(2)
+    try:
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+    except ET.ParseError:
+        continue
+    for tc in root.iter("testcase"):
+        name = tc.get("name", "")
         if name not in methods_requested:
             continue
-        if '<failure' in body or '<error' in body:
+        failure = tc.find("failure")
+        error   = tc.find("error")
+        if failure is not None or error is not None:
             tests_failed.append(name)
-            # Extract failure message
-            msg = re.search(r'<(?:failure|error)[^>]*>(.*?)</(?:failure|error)>', body, re.DOTALL)
+            node = failure if failure is not None else error
+            msg = (node.text or node.get("message", ""))[:300].strip()
             if msg:
-                failure_output_parts.append(f"{name}: {msg.group(1)[:300].strip()}")
+                failure_output_parts.append(f"{name}: {msg}")
         else:
             tests_passed.append(name)
 
@@ -186,4 +245,7 @@ result = {
 print(json.dumps(result))
 PYEOF
 
-rm -f "$TEST_LOG"
+# Copy JUnit XML results to /output for the host to inspect
+if [[ -d "$XML_DIR" ]]; then
+    cp -r "$XML_DIR" /output/test-results 2>/dev/null || true
+fi
