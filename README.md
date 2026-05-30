@@ -132,11 +132,29 @@ are syntactically faithful to the original — companion objects and `Issue`
 declarations are preserved verbatim while all method bodies are replaced with
 typed no-op stubs.
 
-### Step 2 — Generate
+### Step 2 — Rn Inference
 
 Send benchmark instances to an LLM and save generated detector files.
 
 ```bash
+# dry run
+python run_inference.py \
+    --model  claude-sonnet-4-5 \
+    --prompt zero_shot \
+    --stub \
+    --limit  5 \
+    --out    generated/
+
+# generate sample prompts
+python3 -c "
+from inference.prompts import build_prompt
+import json
+
+inst = json.loads(open('data/dataset.jsonl').readline())
+sys_p, usr_p = build_prompt(inst, 'api_hint')
+print(usr_p)
+"
+
 # Pass@1, greedy
 python run_inference.py \
     --model  claude-sonnet-4-5 \
@@ -161,7 +179,7 @@ python run_inference.py \
 python run_inference.py --model gpt-4o --split easy --limit 10 --out generated/
 ```
 
-**Prompt variants:** `zero_shot` · `few_shot` · `cot`
+**Prompt variants:** `zero_shot` · `api_hint` · `skeleton` · `few_shot_surface_matched` · `few_shot_surface_matched_cot` · `compile_repair_1`
 
 **API keys** (set whichever provider you use):
 ```bash
