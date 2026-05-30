@@ -35,6 +35,9 @@ Options:
     --workers N         Parallel Docker containers (default: 4)
     --timeout SECS      Per-instance timeout (default: 180)
     --no-docker         Dry-run: print what would be run, no containers
+    --rebuild-dataset   Reconstruct dataset.jsonl from lintbench.jsonl using
+                        existing passing IDs — no Docker. Use after re-running
+                        curate steps 4 and 5 to propagate metadata fixes.
 """
 
 import argparse
@@ -282,6 +285,52 @@ def save_results(results: "list[dict]", out_path: Path) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def rebuild_dataset(out_path: Path) -> None:
+    """
+    Reconstruct dataset.jsonl from the current lintbench.jsonl without
+    re-running any Docker containers.
+
+    Reads the instance IDs already in dataset.jsonl (the oracle-passing set),
+    then pulls the corresponding records from lintbench.jsonl — which may have
+    updated fields (e.g. scanner_interfaces fixed by re-running curate steps
+    4 and 5).  Overwrites dataset.jsonl in-place.
+
+    Use this after:
+      python run_curate.py --only 4 5
+    to propagate metadata fixes without re-running oracle/stub eval.
+    """
+    if not out_path.exists():
+        raise SystemExit(f"ERROR: {out_path} not found — run oracle_eval first")
+    if not BENCHMARK.exists():
+        raise SystemExit(f"ERROR: {BENCHMARK} not found")
+
+    # Read the instance IDs that already passed oracle eval
+    passing_ids: set[str] = set()
+    with open(out_path) as f:
+        for line in f:
+            inst = json.loads(line)
+            passing_ids.add(inst["instance_id"])
+
+    print(f"  Rebuilding dataset.jsonl from {len(passing_ids)} passing instance IDs")
+    print(f"  Source: {BENCHMARK}")
+
+    written = 0
+    tmp = out_path.with_suffix(".tmp")
+    with open(BENCHMARK) as src, open(tmp, "w") as dst:
+        for line in src:
+            inst = json.loads(line)
+            if inst.get("instance_id") in passing_ids:
+                dst.write(line)
+                written += 1
+    tmp.replace(out_path)
+    print(f"  dataset.jsonl rebuilt: {written} instances → {out_path}")
+
+    # Warn if the counts differ (instance was in dataset but not in lintbench)
+    if written != len(passing_ids):
+        missing = len(passing_ids) - written
+        print(f"  WARNING: {missing} instance ID(s) in dataset.jsonl not found in lintbench.jsonl")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -303,7 +352,17 @@ def main() -> None:
                     help="Per-instance timeout in seconds (default: 180)")
     ap.add_argument("--no-docker",  action="store_true",
                     help="Dry-run: print what would run, skip containers")
+    ap.add_argument("--rebuild-dataset", action="store_true",
+                    help="Reconstruct dataset.jsonl from the current lintbench.jsonl "
+                         "using the instance IDs already in dataset.jsonl. "
+                         "No Docker containers are started. Use after re-running "
+                         "curate steps 4 and 5 to propagate metadata fixes.")
     args = ap.parse_args()
+
+    # --rebuild-dataset: metadata-only refresh, no Docker
+    if args.rebuild_dataset:
+        rebuild_dataset(DATASET_OUT)
+        return
 
     # Load and filter instances
     instances = []
