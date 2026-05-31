@@ -66,6 +66,15 @@ if [[ -z "$DETECTOR_CLASS" ]]; then
 fi
 cp "$GENERATED_FILE" "${DEST_DIR}/${DETECTOR_CLASS}.${EXT}"
 
+# Inject stub @JvmField Issue declarations for any fields that
+# BuiltinIssueRegistry (pre-compiled in lint-checks.jar) references but
+# the generated file does not define. Without this, multi-issue detectors
+# cause NoSuchFieldError -> ExceptionInInitializerError -> NoClassDefFoundError
+# at test setup, masking the actual detector logic under evaluation.
+python3 /eval/inject_stubs.py \
+    "${DEST_DIR}/${DETECTOR_CLASS}.${EXT}" \
+    "${DETECTOR_CLASS}" || true
+
 # ---------------------------------------------------------------------------
 # 2. Find and place the test file
 # ---------------------------------------------------------------------------

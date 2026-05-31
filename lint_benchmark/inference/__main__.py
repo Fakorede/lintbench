@@ -65,7 +65,7 @@ COMPILE REPAIR (compile_repair_1)
   --repair-from RESULTS_JSON   path to eval results JSON
   --generated   GENERATED_DIR  directory containing the original samples
 
-  Reads instances with status=compilation_failed, sends the original code
+  Reads instances with failure_mode=compilation_failed, sends the original code
   + compiler errors back to the model, overwrites the sample file in-place.
   Logged separately in generation_log.jsonl with "repair_round": 1.
 
@@ -127,10 +127,14 @@ def run_generation(args: argparse.Namespace) -> None:
             for inst in data["splits"].get(split, [])
         ]
 
+    if args.instance_id:
+        id_filter = set(args.instance_id)
+        instances = [i for i in instances if i["instance_id"] in id_filter]
     if args.limit:
         instances = instances[: args.limit]
 
-    out_root = Path(args.out) / args.model / args.prompt
+    run_id   = args.run_id or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    out_root = Path(args.out) / run_id / args.model / args.prompt
     out_root.mkdir(parents=True, exist_ok=True)
     log_path = out_root / "generation_log.jsonl"
 
@@ -150,7 +154,8 @@ def run_generation(args: argparse.Namespace) -> None:
         f"temperature={temperature}"
         + (f" | thinking_budget={thinking_budget}" if thinking_budget else "")
     )
-    print(f"Output: {out_root}\n")
+    print(f"Run ID : {run_id}")
+    print(f"Output : {out_root}\n")
 
     completed = skipped = errors = 0
     total_cost_usd: float = 0.0
@@ -251,9 +256,14 @@ def run_generation(args: argparse.Namespace) -> None:
 
 def run_repair(args: argparse.Namespace) -> None:
     """
-    Compile-repair pass: for every instance with compilation_failed in the
-    eval results, load the original generated file, send it back with the
-    compiler errors, and overwrite the sample file in-place.
+    Compile-repair pass: for every instance with failure_mode=compilation_failed
+    in the eval results, load the original generated file, send it back with the
+    compiler errors, and write the repaired file to a separate output directory.
+
+    Output layout:
+      <generated>_repair1/
+        <instance_id>/sample_N.<ext>   ← repaired files only
+        generation_log.jsonl
     """
     results_path   = Path(args.repair_from)
     generated_root = Path(args.generated)
@@ -278,21 +288,24 @@ def run_repair(args: argparse.Namespace) -> None:
 
     # Collect repair targets: instances with at least one compile-failed sample
     repair_targets: list[tuple[dict, int, list[str], Path]] = []
+    instance_filter = set(args.instance) if args.instance else None
     for inst_result in instances_results:
         iid = inst_result.get("instance_id", "")
         if iid not in dataset:
             continue
+        if instance_filter and iid not in instance_filter:
+            continue
         for sample in inst_result.get("samples", []):
-            if sample.get("status") != "compilation_failed":
+            if sample.get("failure_mode") != "compilation_failed":
                 continue
             sample_id      = sample.get("sample_id", 0)
             compile_errors = sample.get("compile_errors", [])
             ext            = dataset[iid]["check_lang"]
-            sample_file    = generated_root / iid / f"sample_{sample_id}.{ext}"
-            if not sample_file.exists():
-                tqdm.write(f"WARN: sample file not found: {sample_file}", file=sys.stderr)
+            src_file = generated_root / iid / f"sample_{sample_id}.{ext}"
+            if not src_file.exists():
+                tqdm.write(f"WARN: sample file not found: {src_file}", file=sys.stderr)
                 continue
-            repair_targets.append((dataset[iid], sample_id, compile_errors, sample_file))
+            repair_targets.append((dataset[iid], sample_id, compile_errors, src_file))
 
     if not repair_targets:
         print("No compilation failures found in results — nothing to repair.")
@@ -303,25 +316,31 @@ def run_repair(args: argparse.Namespace) -> None:
     thinking_budget = args.thinking_budget or None
     temperature     = args.temperature if args.temperature is not None else 0.0
 
-    # Log alongside the original generation log
-    log_path = generated_root / "generation_log.jsonl"
+    # Output directory: <generated>_repair1/ (sibling of original, never overwrites originals)
+    repair_root = Path(str(generated_root).rstrip("/") + "_repair1")
+    repair_root.mkdir(parents=True, exist_ok=True)
+    log_path = repair_root / "generation_log.jsonl"
 
     print(
         f"Compile repair: {len(repair_targets)} samples | "
         f"model={args.model} | provider={provider} | temperature={temperature}"
     )
     print(f"Results source: {results_path}")
-    print(f"Overwriting files in: {generated_root}\n")
+    print(f"Original files: {generated_root}")
+    print(f"Repaired files: {repair_root}\n")
 
     completed = errors = 0
     total_cost_usd: float = 0.0
 
     with open(log_path, "a") as log_f, \
          tqdm(total=len(repair_targets), unit="sample", desc="repairing") as pbar:
-        for inst, sample_id, compile_errors, sample_file in repair_targets:
+        for inst, sample_id, compile_errors, src_file in repair_targets:
             instance_id   = inst["instance_id"]
             ext           = inst["check_lang"]
-            original_code = sample_file.read_text(encoding="utf-8")
+            original_code = src_file.read_text(encoding="utf-8")
+
+            out_file = repair_root / instance_id / f"sample_{sample_id}.{ext}"
+            out_file.parent.mkdir(parents=True, exist_ok=True)
 
             system, user = build_repair_prompt(inst, original_code, compile_errors)
 
@@ -346,11 +365,11 @@ def run_repair(args: argparse.Namespace) -> None:
                     thinking_budget=thinking_budget,
                 )
                 code = extract_code(raw, ext)
-                sample_file.write_text(code, encoding="utf-8")
+                out_file.write_text(code, encoding="utf-8")
 
                 log_record["success"]      = True
                 log_record["output_chars"] = len(code)
-                log_record["output_file"]  = str(sample_file)
+                log_record["output_file"]  = str(out_file)
                 log_record["usage"]        = usage
                 if reasoning is not None:
                     log_record["reasoning_content"] = reasoning
@@ -381,7 +400,12 @@ def run_repair(args: argparse.Namespace) -> None:
     print(f"\nRepair done. Fixed: {completed} | Errors: {errors}")
     if total_cost_usd > 0:
         print(f"Cost:  ${total_cost_usd:.4f} USD")
-    print("Re-run eval on the same generated directory to measure compile_repair_1 pass rate.")
+    print(f"Log: {log_path}")
+    print(f"\nRe-run eval on the repair directory to measure compile_repair_1 pass rate:")
+    print(f"  python run_eval.py \\")
+    print(f"    --generated {repair_root} \\")
+    print(f"    --model     {args.model} \\")
+    print(f"    --out       results/... \\")
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +440,11 @@ def main() -> None:
         help="Root output directory (default: generated/)",
     )
     parser.add_argument(
+        "--run-id", default=None,
+        help="Run identifier inserted between --out and model path "
+             "(e.g. 'run_001'). Auto-generates a UTC timestamp if omitted.",
+    )
+    parser.add_argument(
         "--samples", type=int, default=1,
         help="Samples per instance for pass@k (default: 1)",
     )
@@ -434,6 +463,10 @@ def main() -> None:
             "For anthropic/* models via OpenRouter, forces temperature=1 as required. "
             "For openai/* reasoning models, thinking is always on; this arg is ignored."
         ),
+    )
+    parser.add_argument(
+        "--instance-id", action="append", default=None, metavar="INSTANCE_ID",
+        help="Run only this instance. Repeatable: --instance-id A --instance-id B",
     )
     parser.add_argument(
         "--split", choices=["easy", "medium", "hard"],
@@ -469,6 +502,10 @@ def main() -> None:
     repair_group.add_argument(
         "--generated", default=None, metavar="GENERATED_DIR",
         help="Directory containing original generated samples (required with --repair-from)",
+    )
+    repair_group.add_argument(
+        "--instance", action="append", default=None, metavar="INSTANCE_ID",
+        help="Restrict repair to specific instance(s). Repeatable: --instance A --instance B",
     )
 
     args = parser.parse_args()

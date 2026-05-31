@@ -26,6 +26,7 @@ FAILURE_MODES: dict[str, str] = {
     "too_narrow":         "Only positive tests failed (under-detection)",
     "too_broad":          "Only negative/clean tests failed (over-detection)",
     "wrong_logic":        "Mixed test failures (logic error)",
+    "init_error":         "JVM class-init failure (missing Issue fields in multi-issue detector)",
     "timeout":            "Build or test timed out",
     "harness_error":      "Internal harness error",
     "no_file":            "Generated file not found for this instance",
@@ -134,6 +135,11 @@ def classify_failure(
 
     if not tests_failed:
         return "pass"
+
+    # JVM class-init cascade — registry couldn't initialize due to missing
+    # Issue fields in a multi-issue detector (inject_stubs failed or was skipped).
+    if "NoClassDefFoundError" in failure_output or "ExceptionInInitializerError" in failure_output:
+        return "init_error"
 
     failed_negative = [t for t in tests_failed if _NEGATIVE_PATTERN.search(t)]
     failed_positive = [t for t in tests_failed if not _NEGATIVE_PATTERN.search(t)]
