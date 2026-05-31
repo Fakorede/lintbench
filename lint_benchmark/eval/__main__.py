@@ -319,6 +319,19 @@ def main(args: argparse.Namespace) -> None:
         ]
         benchmark_version = data.get("version", "1.0.0")
 
+    if args.instance:
+        instance_filter = set(args.instance)
+        all_instances = [i for i in all_instances if i["instance_id"] in instance_filter]
+
+    # Skip instances with no generated files on disk (partial runs)
+    all_instances = [
+        i for i in all_instances
+        if any(
+            (generated_dir / i["instance_id"] / f"sample_{s}.{i['check_lang']}").exists()
+            for s in range(args.samples)
+        )
+    ]
+
     if args.limit:
         all_instances = all_instances[:args.limit]
 
@@ -398,6 +411,8 @@ if __name__ == "__main__":
     parser.add_argument("--split",      default=None,
                         choices=["easy", "medium", "hard"],
                         help="Restrict evaluation to one difficulty split")
+    parser.add_argument("--instance",   action="append", default=None, metavar="INSTANCE_ID",
+                        help="Restrict eval to specific instance(s). Repeatable.")
     parser.add_argument("--limit",      type=int, default=None,
                         help="Cap number of instances (useful for testing)")
     parser.add_argument("--timeout",    type=int, default=120,

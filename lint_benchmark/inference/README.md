@@ -31,23 +31,26 @@ COMMANDS
 
 
 ```sh
-bash run_sample.sh --limit 1
+bash run_sample.sh --run-id run_001 --limit 1
 
-python run_eval.py \
-    --generated generated/anthropic/claude-sonnet-4.6/few_shot_surface_matched \
-    --model     anthropic/claude-sonnet-4.6 \
-    --prompt    few_shot_surface_matched \
-    --out       results/anthropic/claude-sonnet-4.6_few_shot_surface_matched.json \
-    --build-env build_env/run.sh \
-    --samples   1
+OR
 
-python run_eval.py \
-    --generated generated/openai/gpt-5.5/api_hint \
-    --model     openai/gpt-5.5 \
-    --prompt    api_hint \
-    --out       results/openai/gpt-5.5_api_hint.json \
-    --build-env build_env/run.sh \
-    --samples   1
+bash run_sample.sh --run-id run_001 --instance-id "RestrictionsDetector:ValidRestrictions"
+bash run_sample.sh --run-id run_002 --instance-id "ScrollViewChildDetector:ScrollViewSize"
+bash run_sample.sh --run-id run_003 --instance-id "DataBindingDetector:XmlEscapeNeeded"
+
+OR
+
+python run_inference.py \
+    --model           anthropic/claude-sonnet-4.6 \
+    --provider        openrouter \
+    --prompt          zero_shot \
+    --benchmark       data/dataset.jsonl \
+    --out             generated/ \
+    --max-tokens      32768 \
+    --thinking-budget 10000 \
+    --instance-id     "RestrictionsDetector:ValidRestrictions" \
+    --run-id run_001
 ```
 
 
@@ -71,7 +74,7 @@ python -m inference \
 
 # Step 2 — evaluate, get results JSON with compile failures flagged
 python run_eval.py \
-    --generated generated/claude-sonnet-4-5/skeleton/ \
+    --generated generated/run_001/claude-sonnet-4-5/skeleton/ \
     --model     claude-sonnet-4-5 \
     --prompt    skeleton \
     --out       results/sonnet_skeleton.json
@@ -80,12 +83,12 @@ python run_eval.py \
 python -m inference \
     --model        claude-sonnet-4-5 \
     --repair-from  results/sonnet_skeleton.json \
-    --generated    generated/claude-sonnet-4-5/skeleton/ \
+    --generated    generated/run_001/claude-sonnet-4-5/skeleton/ \
     --out          generated/
 
 # Step 4 — re-eval the repaired files
 python run_eval.py \
-    --generated generated/claude-sonnet-4-5/skeleton/ \
+    --generated generated/run_001/claude-sonnet-4-5/skeleton/ \
     --model     claude-sonnet-4-5 \
     --prompt    skeleton_repair1 \
     --out       results/sonnet_skeleton_repair1.json
@@ -98,26 +101,55 @@ The repair step overwrites the compile-failed `sample_N.{kt,java}` files in-plac
 
 You need to run eval first — compile_repair_1 reads the eval results JSON to find which instances have `compilation_failed` status, then feeds the compiler errors back to the model.
 
-**Step 1 — run eval:**
+**Step 2 — run eval:**
 ```bash
 python run_eval.py \
-    --generated generated/anthropic/claude-sonnet-4.6/few_shot_surface_matched_cot/ \
+    --generated generated/run_001/anthropic/claude-sonnet-4.6/few_shot_surface_matched_cot/ \
     --model     anthropic/claude-sonnet-4.6 \
     --prompt    few_shot_surface_matched_cot \
     --out       results/claude-sonnet-4.6_few_shot_surface_matched_cot.json \
     --build-env build_env/run.sh \
+    --benchmark data/dataset.jsonl \
     --samples   1
+
+OR
+
+bash run_eval_all.sh --generated generated/run_001 --run-id run_001_eval
+
+OR
+
+bash run_eval_all.sh --generated generated/run_000 --run-id run_000_eval --instance-id "IconDetector:ConvertToWebp"
+
+bash run_eval_all.sh --generated generated/run_001 --run-id run_001_eval --instance-id "NamespaceDetector:UnusedNamespace"
+
+bash run_eval_all.sh --generated generated/run_002 --run-id run_002_eval --instance-id "ScrollViewChildDetector:ScrollViewSize"
+
+bash run_eval_all.sh --generated generated/run_003 --run-id run_003_eval --instance-id "DataBindingDetector:XmlEscapeNeeded"
 ```
 
-**Step 2 — run compile_repair_1:**
+**Step 3 — run compile_repair_1:**
 ```bash
 python run_inference.py \
-    --model       anthropic/claude-sonnet-4.6 \
-    --provider    openrouter \
-    --repair-from results/claude-sonnet-4.6_few_shot_surface_matched_cot.json \
-    --generated   generated/anthropic/claude-sonnet-4.6/few_shot_surface_matched_cot/ \
-    --max-tokens  32768 \
+    --model           anthropic/claude-sonnet-4.6 \
+    --provider        openrouter \
+    --repair-from     results/claude-sonnet-4.6_few_shot_surface_matched_cot.json \
+    --generated       generated/run_001/anthropic/claude-sonnet-4.6/few_shot_surface_matched_cot/ \
+    --instance        "IconDetector:ConvertToWebp" \
+    --max-tokens      32768 \
     --thinking-budget 10000
+```
+
+**Step 4 - rerun eval:**
+```bash
+python run_eval.py \
+    --generated generated/run_001/anthropic/claude-sonnet-4.6/few_shot_surface_matched_cot/ \
+    --model     anthropic/claude-sonnet-4.6 \
+    --prompt    few_shot_surface_matched_cot \
+    --out       results/claude-sonnet-4.6_few_shot_surface_matched_cot_repair1.json \
+    --build-env build_env/run.sh \
+    --benchmark data/dataset.jsonl \
+    --instance  "IconDetector:ConvertToWebp" \
+    --samples   1
 ```
 
 This overwrites the failing `sample_0.java` files in-place, so you can re-run the same eval command afterwards to measure the repaired pass rate.

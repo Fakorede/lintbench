@@ -7,7 +7,7 @@
 # --model can be repeated to override the default model list, e.g.:
 #   bash run_sample.sh --model anthropic/claude-sonnet-4.6 --model google/gemini-2.5-flash
 
-set -euo pipefail
+set -eo pipefail
 
 # ---------------------------------------------------------------------------
 # Defaults (override via flags or env)
@@ -15,11 +15,12 @@ set -euo pipefail
 LIMIT=""
 OUT="generated"
 BENCHMARK="data/dataset.jsonl"
+RUN_ID=""
 
 DEFAULT_MODELS=(
     "anthropic/claude-sonnet-4.6"
-    # "openai/gpt-5.5"
-    # "google/gemini-3.5-flash"
+    "openai/gpt-5.5"
+    "google/gemini-3.5-flash"
 )
 
 PROMPTS=(
@@ -34,21 +35,35 @@ PROMPTS=(
 # Parse flags
 # ---------------------------------------------------------------------------
 MODELS=()
+INSTANCE_IDS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --model)     MODELS+=("$2"); shift 2 ;;
-        --limit)     LIMIT="$2";     shift 2 ;;
-        --out)       OUT="$2";       shift 2 ;;
-        --benchmark) BENCHMARK="$2"; shift 2 ;;
+        --model)       MODELS+=("$2");       shift 2 ;;
+        --limit)       LIMIT="$2";           shift 2 ;;
+        --out)         OUT="$2";             shift 2 ;;
+        --benchmark)   BENCHMARK="$2";       shift 2 ;;
+        --run-id)      RUN_ID="$2";          shift 2 ;;
+        --instance-id) INSTANCE_IDS+=("$2"); shift 2 ;;
         *) echo "Unknown flag: $1" >&2; exit 1 ;;
     esac
 done
+
+# Auto-generate a run ID from timestamp if not provided
+if [[ -z "$RUN_ID" ]]; then
+    RUN_ID=$(date -u +"%Y%m%dT%H%M%SZ")
+fi
+echo "Run ID: $RUN_ID"
 
 # Fall back to default model list if none specified
 [[ ${#MODELS[@]} -eq 0 ]] && MODELS=("${DEFAULT_MODELS[@]}")
 
 LIMIT_ARGS=()
 [[ -n "$LIMIT" ]] && LIMIT_ARGS=(--limit "$LIMIT")
+
+INSTANCE_ARGS=()
+for iid in "${INSTANCE_IDS[@]+"${INSTANCE_IDS[@]}"}"; do
+    INSTANCE_ARGS+=(--instance-id "$iid")
+done
 
 # ---------------------------------------------------------------------------
 # Run
@@ -69,9 +84,11 @@ for MODEL in "${MODELS[@]}"; do
             --prompt          "$PROMPT" \
             --benchmark       "$BENCHMARK" \
             --out             "$OUT" \
+            --run-id          "$RUN_ID" \
             --max-tokens      32768 \
             --thinking-budget 10000 \
-            "${LIMIT_ARGS[@]}"
+            "${LIMIT_ARGS[@]}" \
+            "${INSTANCE_ARGS[@]}"
     done
 done
 
@@ -79,17 +96,17 @@ echo ""
 echo "======================================================================"
 echo "All $TOTAL runs complete."
 echo ""
-python - "$OUT" "${MODELS[@]}" <<'EOF'
+python - "$OUT" "$RUN_ID" "${MODELS[@]}" <<'EOF'
 import sys, json, glob, os
 from pathlib import Path
 
-out_dir   = sys.argv[1]
-models    = sys.argv[2:]
+out_dir  = sys.argv[1]
+run_id   = sys.argv[2]
+models   = sys.argv[3:]
 
 for model in models:
-    # generation logs live at <out>/<model>/<prompt>/generation_log.jsonl
-    model_slug = model  # e.g. anthropic/claude-sonnet-4.6
-    logs = glob.glob(str(Path(out_dir) / model_slug / "*" / "generation_log.jsonl"))
+    # generation logs live at <out>/<run_id>/<model>/<prompt>/generation_log.jsonl
+    logs = glob.glob(str(Path(out_dir) / run_id / model / "*" / "generation_log.jsonl"))
     if not logs:
         continue
     in_tok = out_tok = cost = 0.0
