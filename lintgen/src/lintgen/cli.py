@@ -22,15 +22,41 @@ def main() -> None:
 
     # ── generate ──────────────────────────────────────────────────────────────
     gen = sub.add_parser("generate", help="Run RAG-augmented inference on benchmark instances")
-    gen.add_argument("--benchmark",  default="../lintbench/data/dataset.jsonl")
-    gen.add_argument("--model",      required=True, help="Model name or HPC served-model-name")
-    gen.add_argument("--prompt",     default="api_hint_rag",
+    gen.add_argument("--benchmark",   default="../lintbench/data/dataset.jsonl")
+    gen.add_argument("--model",       required=True,
+                     help="Model name (e.g. anthropic/claude-sonnet-4.6, "
+                          "openai/gpt-4o, meta-llama/llama-3.3-70b-instruct). "
+                          "provider/model syntax is routed via OpenRouter automatically.")
+    gen.add_argument("--provider",    default=None,
+                     choices=["openai", "anthropic", "google", "openrouter"],
+                     help="Force provider (auto-detected from model name if omitted). "
+                          "Use 'openrouter' to access any model with a single OPENROUTER_API_KEY.")
+    gen.add_argument("--prompt",      default="api_hint_rag",
                      choices=["api_hint_rag", "zero_shot", "api_hint", "skeleton",
                                "few_shot_surface_matched"])
-    gen.add_argument("--out",        default="generated/")
-    gen.add_argument("--limit",      type=int, default=None)
+    gen.add_argument("--out",         default="generated/")
+    gen.add_argument("--run-id",      default=None,
+                     help="Run identifier inserted into the output path. "
+                          "Auto-generates a UTC timestamp if omitted.")
+    gen.add_argument("--samples",     type=int, default=1,
+                     help="Samples per instance for pass@k (default: 1)")
+    gen.add_argument("--temperature", type=float, default=None,
+                     help="Sampling temperature. Default: 0.0 for k=1, 0.8 for k>1")
+    gen.add_argument("--max-tokens",  type=int, default=32768)
+    gen.add_argument("--thinking-budget", type=int, default=None,
+                     help="Enable extended thinking (OpenRouter reasoning models). "
+                          "Sets budget_tokens; forces temperature=1 for Anthropic models.")
+    gen.add_argument("--split",       choices=["easy", "hard"], default=None)
+    gen.add_argument("--limit",       type=int, default=None)
     gen.add_argument("--instance-id", action="append", dest="instance_ids")
-    gen.add_argument("--no-rag",     action="store_true", help="Disable RAG (ablation baseline)")
+    gen.add_argument("--delay",       type=float, default=0.5,
+                     help="Seconds between API calls (default: 0.5)")
+    gen.add_argument("--api-base",    default=None,
+                     help="Custom API base URL (local vLLM or other OpenAI-compatible endpoint)")
+    gen.add_argument("--force",       action="store_true",
+                     help="Regenerate even if output file already exists")
+    gen.add_argument("--no-rag",      action="store_true",
+                     help="Disable RAG retrieval (ablation baseline)")
 
     # ── build-index ───────────────────────────────────────────────────────────
     idx = sub.add_parser("build-index", help="Build / rebuild the Lint API FAISS index")
