@@ -53,9 +53,10 @@ Tier 1 targets the most common failure mode — wrong or missing scanner interfa
 uv sync
 
 # Build the FAISS index (run once; re-run if corpus changes)
-# Parses android-custom-lint-rules/ to auto-construct the Tier 2 index
-cd lintbench/
-lintgen build-index --source ../android-custom-lint-rules/ --out-dir ../lintgen/src/lintgen/rag/index/
+# Parses base/lint/libs/lint-api/ (the AOSP sparse checkout
+# already required by lintbench) to auto-construct the Tier 2 index.
+# --source defaults to that path; only override if your checkout is elsewhere.
+lintgen build-index
 ```
 
 > **HPC note:** build the index on a login node (no GPU needed — embedding runs on CPU in ~2 min for the full corpus), then copy `rag/index/` to your working directory before submitting inference jobs.

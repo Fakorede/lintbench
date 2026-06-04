@@ -60,9 +60,10 @@ def main() -> None:
 
     # ── build-index ───────────────────────────────────────────────────────────
     idx = sub.add_parser("build-index", help="Build / rebuild the Lint API FAISS index")
-    idx.add_argument("--source",  default="../android-custom-lint-rules/",
-                     help="Path to android-custom-lint-rules source for Tier 2 auto-construction")
-    idx.add_argument("--out-dir", default="src/lintgen/rag/index/")
+    idx.add_argument("--docs-dir", default=None,
+                     help="Path to android-custom-lint-rules/docs/ for Tier 3 guide chunking "
+                          "(default: auto-detected)")
+    idx.add_argument("--out-dir",  default="src/lintgen/rag/index/")
 
     # ── eval ──────────────────────────────────────────────────────────────────
     ev = sub.add_parser("eval", help="Evaluate generated detectors")
