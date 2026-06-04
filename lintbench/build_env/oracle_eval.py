@@ -18,10 +18,10 @@ This audit identifies which instances are:
   • hard by construction / LLM must use public-API equivalent (compile_fail)
 
 Usage (from repo root):
-    python lint_benchmark/build_env/oracle_eval.py [options]
+    python lintbench/build_env/oracle_eval.py [options]
 
     # Full run — all 439 instances, 4 parallel workers
-    python lint_benchmark/build_env/oracle_eval.py \
+    python lintbench/build_env/oracle_eval.py \
         --out validation/oracle_results.json \
         --log-dir validation/oracle_logs \
         --workers 4

@@ -4,7 +4,7 @@ run_inference.py — LintBench model inferencing entry point.
 
 Thin shim that invokes the inference package. All logic lives in inference/__main__.py.
 
-Run from lint_benchmark/ root:
+Run from lintbench/ root:
 
     python run_inference.py \\
         --model gpt-4o --prompt zero_shot \\

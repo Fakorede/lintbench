@@ -39,7 +39,7 @@ build_env/
 
 ```bash
 # From repo root
-docker build -t lintbench-eval lint_benchmark/build_env/
+docker build -t lintbench-eval lintbench/build_env/
 ```
 
 Pre-warms the Gradle dependency cache and Android platform JARs inside the
@@ -51,10 +51,10 @@ Required only for `stub_eval.py`. Needs a local JDK 17+ and Gradle (or uses
 the wrapper).
 
 ```bash
-cd lint_benchmark/stub_generator && ./gradlew shadowJar
+cd lintbench/stub_generator && ./gradlew shadowJar
 ```
 
-Produces `lint_benchmark/stub_generator/build/libs/stub-generator.jar`.
+Produces `lintbench/stub_generator/build/libs/stub-generator.jar`.
 
 ---
 
@@ -67,14 +67,14 @@ instances are valid benchmark entries.
 
 ```bash
 # From repo root — runs all instances, 4 parallel workers
-python3 lint_benchmark/build_env/oracle_eval.py --workers 4 --timeout 180
+python3 lintbench/build_env/oracle_eval.py --workers 4 --timeout 180
 
 # Filter by split or difficulty
-python3 lint_benchmark/build_env/oracle_eval.py --split easy --workers 4
+python3 lintbench/build_env/oracle_eval.py --split easy --workers 4
 
-# Results → lint_benchmark/results/oracle/oracle_results.json
-# Logs    → lint_benchmark/results/oracle/logs/<instance_id>/
-# Passing instances written to lint_benchmark/data/dataset.jsonl
+# Results → lintbench/results/oracle/oracle_results.json
+# Logs    → lintbench/results/oracle/logs/<instance_id>/
+# Passing instances written to lintbench/data/dataset.jsonl
 ```
 
 | Status        | Meaning |
@@ -92,10 +92,10 @@ discriminating power and the instance is dropped from `dataset.jsonl`.
 
 ```bash
 # From repo root
-python3 lint_benchmark/build_env/stub_eval.py --workers 4 --timeout 180
+python3 lintbench/build_env/stub_eval.py --workers 4 --timeout 180
 
-# Results → lint_benchmark/results/stub/stub_results.json
-# Logs    → lint_benchmark/results/stub/logs/<instance_id>/
+# Results → lintbench/results/stub/stub_results.json
+# Logs    → lintbench/results/stub/logs/<instance_id>/
 # dataset.jsonl updated in-place (stub-passing instances removed)
 ```
 
@@ -159,7 +159,7 @@ caller reads JSON stdout, aggregates results
 To update the Lint API version after re-running curation against a newer AOSP branch:
 1. Update `lintVersion` in `gradle.properties`
 2. Update `LINT_VERSION` in `Dockerfile`
-3. Rebuild: `docker build -t lintbench-eval lint_benchmark/build_env/`
+3. Rebuild: `docker build -t lintbench-eval lintbench/build_env/`
 
 ---
 

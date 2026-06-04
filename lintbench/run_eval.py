@@ -4,7 +4,7 @@ run_eval.py — LintBench evaluation runner entry point.
 
 Thin shim that invokes the eval package. All logic lives in eval/__main__.py.
 
-Run from lint_benchmark/ root:
+Run from lintbench/ root:
 
     python run_eval.py \\
         --benchmark data/lintbench.json \\

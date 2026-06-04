@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run_hpc_inference.sh — run LintBench inference against a local vLLM server
 #
-# This script is the HPC counterpart of lint_benchmark/run_sample.sh.
+# This script is the HPC counterpart of lintbench/run_sample.sh.
 # It points the existing inference pipeline at an OpenAI-compatible vLLM
 # endpoint instead of a cloud API.
 #
@@ -29,7 +29,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # - The model name passed here must match --served-model-name in the SLURM script.
 # - No API key is needed for local vLLM (OPENAI_API_KEY defaults to "local").
-# - Run this script from the lint_benchmark/ directory.
+# - Run this script from the lintbench/ directory.
 
 set -eo pipefail
 
@@ -175,6 +175,6 @@ echo "======================================================================"
 echo "All $TOTAL runs complete for $MODEL."
 echo ""
 echo "Next step — eval:"
-echo "  bash lint_benchmark/run_eval_all.sh \\"
+echo "  bash lintbench/run_eval_all.sh \\"
 echo "    --generated ${OUT}/${RUN_ID} \\"
 echo "    --run-id    $RUN_ID"

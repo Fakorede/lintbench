@@ -15,10 +15,10 @@ Results:
 
 Usage (from repo root):
     # 1. Build the stub generator (once):
-    #    cd lint_benchmark/stub_generator && ./gradlew shadowJar
+    #    cd lintbench/stub_generator && ./gradlew shadowJar
 
     # 2. Run stub eval:
-    python lint_benchmark/build_env/stub_eval.py [options]
+    python lintbench/build_env/stub_eval.py [options]
 
 Options:
     --out PATH      Write JSON results (default: results/stub/stub_results.json)
