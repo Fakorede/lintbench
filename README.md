@@ -40,16 +40,16 @@ uv sync
 source .venv/bin/activate
 
 # 3. Build the Docker evaluation image (one-time, ~5 min)
-docker build -t lintbench-eval lint_benchmark/build_env/
+docker build -t lintbench-eval lintbench/build_env/
 
 # 4. Build the stub generator (one-time, ~2 min)
-cd lint_benchmark/stub_generator && ./gradlew shadowJar && cd ../..
+cd lintbench/stub_generator && ./gradlew shadowJar && cd ../..
 ```
 
 ## Project layout
 
 ```
-lint_benchmark/
+lintbench/
   curate/               Dataset construction pipeline (01–05)
   generate/             Model inferencing package
   eval/                 Evaluation package
@@ -80,13 +80,13 @@ Re-run only if updating to a newer AOSP branch.
 
 ```bash
 # Run the full pipeline
-python lint_benchmark/run_curate.py
+python lintbench/run_curate.py
 
 # Skip steps whose output already exists
-python lint_benchmark/run_curate.py --skip-existing
+python lintbench/run_curate.py --skip-existing
 
 # Run only specific steps (1–5)
-python lint_benchmark/run_curate.py --only 2 3
+python lintbench/run_curate.py --only 2 3
 ```
 
 Each step reads from `data/` and writes back to `data/`. Final outputs:
@@ -104,9 +104,9 @@ Instances where the real implementation fails to compile or pass its own tests
 are not valid benchmark entries.
 
 ```bash
-python3 lint_benchmark/build_env/oracle_eval.py --workers 4 --timeout 180
-# Results → lint_benchmark/results/oracle/oracle_results.json
-# Passing instances → lint_benchmark/data/dataset.jsonl
+python3 lintbench/build_env/oracle_eval.py --workers 4 --timeout 180
+# Results → lintbench/results/oracle/oracle_results.json
+# Passing instances → lintbench/data/dataset.jsonl
 ```
 
 | Status        | Count | Meaning |
@@ -121,8 +121,8 @@ the tests. Tests must fail with a stub; a passing test has no discriminating
 power and the instance is dropped from `dataset.jsonl`.
 
 ```bash
-python3 lint_benchmark/build_env/stub_eval.py --workers 4 --timeout 180
-# Results → lint_benchmark/results/stub/stub_results.json
+python3 lintbench/build_env/stub_eval.py --workers 4 --timeout 180
+# Results → lintbench/results/stub/stub_results.json
 # dataset.jsonl updated in-place (passing-stub instances removed)
 ```
 
@@ -267,7 +267,7 @@ Results land in `.smoke/results/`:
 To update Lint API version after re-running curation against a newer branch:
 1. Update `lintVersion` in `build_env/gradle.properties`
 2. Update `LINT_VERSION` in `build_env/Dockerfile`
-3. Rebuild: `docker build -t lintbench-eval lint_benchmark/build_env/`
+3. Rebuild: `docker build -t lintbench-eval lintbench/build_env/`
 
 ## License
 

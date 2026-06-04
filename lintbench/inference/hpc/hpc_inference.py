@@ -2,7 +2,7 @@
 """
 hpc_inference.py — programmatic interface for HPC / local-vLLM inference
 -------------------------------------------------------------------------
-Wraps the lint_benchmark.inference pipeline so you can call it from Python
+Wraps the lintbench.inference pipeline so you can call it from Python
 or a Jupyter notebook without subprocess indirection.
 
 Supported models (--served-model-name in vLLM):
@@ -13,7 +13,7 @@ Supported models (--served-model-name in vLLM):
 
 Usage (CLI)
 -----------
-  # From lint_benchmark/:
+  # From lintbench/:
   python -m inference.hpc.hpc_inference \\
       --model  qwen3-coder-30b \\
       --host   gpu-node-01 \\
@@ -25,7 +25,7 @@ Usage (CLI)
 
 Usage (library)
 ---------------
-  from lint_benchmark.inference.hpc.hpc_inference import HPCInferenceConfig, run_hpc_inference
+  from lintbench.inference.hpc.hpc_inference import HPCInferenceConfig, run_hpc_inference
 
   cfg = HPCInferenceConfig(model="qwen3-coder-30b", host="gpu-node-01", port=8000)
   run_hpc_inference(cfg)

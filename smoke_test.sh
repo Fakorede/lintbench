@@ -20,7 +20,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LB="${REPO_ROOT}/lint_benchmark"
+LB="${REPO_ROOT}/lintbench"
 TMP="${REPO_ROOT}/.smoke"
 HF_REPO="lintbench/lintbench"   # TODO: update to real HuggingFace repo path
 RUN_DOCKER=false
@@ -78,7 +78,7 @@ except RepositoryNotFoundError:
     print(f"ERROR: HuggingFace repo '{HF_REPO}' not found.", file=sys.stderr)
     print("  The dataset has not been published yet.", file=sys.stderr)
     print("  Run the curate pipeline first to generate it locally:", file=sys.stderr)
-    print("    python lint_benchmark/run_curate.py", file=sys.stderr)
+    print("    python lintbench/run_curate.py", file=sys.stderr)
     sys.exit(1)
 except EntryNotFoundError:
     print(f"ERROR: 'lintbench.jsonl' not found in repo '{HF_REPO}'.", file=sys.stderr)

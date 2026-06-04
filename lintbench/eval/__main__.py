@@ -8,7 +8,7 @@ structured results.
 
 USAGE
 ─────────────────────────────────────────────────────────────────────────
-# Run from lint_benchmark/ root:
+# Run from lintbench/ root:
 
 # Stub mode (no compilation — for testing the pipeline):
 python -m eval \\

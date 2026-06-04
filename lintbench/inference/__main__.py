@@ -7,7 +7,7 @@ in the layout expected by the eval module.
 
 USAGE
 ─────────────────────────────────────────────────────────────────────────
-# Run from lint_benchmark/ root:
+# Run from lintbench/ root:
 
 # Pass@1 (greedy):
 python -m inference \\
