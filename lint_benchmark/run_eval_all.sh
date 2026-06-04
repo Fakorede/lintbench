@@ -20,6 +20,7 @@ BENCHMARK="data/dataset.jsonl"
 RESULTS="results"
 RUN_ID=""
 INSTANCE_ARGS=()
+STRICT_FLAG=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -28,6 +29,13 @@ while [[ $# -gt 0 ]]; do
         --results)    RESULTS="$2";                          shift 2 ;;
         --run-id)     RUN_ID="$2";                           shift 2 ;;
         --instance|--instance-id)   INSTANCE_ARGS+=(--instance "$2");      shift 2 ;;
+        --instance-file)
+            while IFS= read -r line; do
+                [[ -z "$line" || "$line" == \#* ]] && continue
+                INSTANCE_ARGS+=(--instance "$line")
+            done < "$2"
+            shift 2 ;;
+        --strict)     STRICT_FLAG="--strict";                shift ;;
         *) echo "Unknown flag: $1" >&2; exit 1 ;;
     esac
 done
@@ -85,6 +93,7 @@ for DIR in "${DIRS[@]}"; do
         --build-env build_env/run.sh \
         --samples   1 \
         --log-dir   "${LOG_DIR}/${SAFE_MODEL}_${PROMPT}" \
+        ${STRICT_FLAG} \
         "${INSTANCE_ARGS[@]}" || {
             echo "ERROR: eval failed for $MODEL / $PROMPT" >&2
             failed+=("$MODEL/$PROMPT")
