@@ -133,12 +133,18 @@ def run_build_env(
     tests_to_run: list[str],
     timeout_s: int = 120,
     log_dir: Optional[Path] = None,
+    loose: bool = True,
 ) -> dict:
     """
     Call the real build environment subprocess.
 
     Interface: run.sh <generated_file> <test_class_fqn> <comma_methods>
     Returns the JSON dict written to stdout by run_inner.sh.
+
+    loose=True (default) sets LINTBENCH_LOOSE=1, causing run.sh to patch the
+    test file before Docker: .expect(exactString) → .expectContains("[IssueId]")
+    so message-format mismatches don't fail the test.
+    loose=False uses exact string matching (strict mode).
     """
     cmd = [
         str(build_env_script),
@@ -149,6 +155,8 @@ def run_build_env(
     env = os.environ.copy()
     if log_dir:
         env["LINTBENCH_LOG_DIR"] = str(log_dir)
+    if not loose:
+        env["LINTBENCH_STRICT"] = "1"
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s, env=env)
         if proc.returncode != 0 and not proc.stdout.strip():
@@ -186,6 +194,7 @@ def evaluate_instance(
     stub_mode: str,
     timeout_s: int,
     log_dir: Optional[Path] = None,
+    loose: bool = True,
 ) -> InstanceResult:
     instance_id  = instance["instance_id"]
     tests_to_run = instance["tests_to_run"]
@@ -216,7 +225,7 @@ def evaluate_instance(
 
         if build_env_script is not None:
             raw = run_build_env(build_env_script, candidate, test_class_fqn,
-                                tests_to_run, timeout_s, log_dir)
+                                tests_to_run, timeout_s, log_dir, loose=loose)
         else:
             raw = run_stub(instance_id, candidate, test_class_fqn,
                            tests_to_run, stub_mode)
@@ -233,6 +242,8 @@ def evaluate_instance(
         failure_mode = classify_failure(
             compiled, compile_errors, tests_passed, tests_failed,
             tests_to_run, failure_output,
+            issue_id=instance.get("issue_id"),
+            loose=loose,
         )
 
         sample_results.append(SampleResult(
@@ -354,6 +365,7 @@ def main(args: argparse.Namespace) -> None:
                 stub_mode=args.stub_mode,
                 timeout_s=args.timeout,
                 log_dir=log_dir,
+                loose=not args.strict,
             )
             instance_results.append(result)
             n_pass = sum(1 for r in instance_results if r.n_passed > 0)
@@ -419,6 +431,10 @@ if __name__ == "__main__":
                         help="Per-instance timeout in seconds (default: 120)")
     parser.add_argument("--log-dir",    default=None,
                         help="Directory to save per-instance compile/test logs from Docker")
+    parser.add_argument("--strict",     action="store_true",
+                        help="Strict eval: use exact .expect(string) matching (default is loose: "
+                             ".expect() replaced with .expectContains('[IssueId]') so "
+                             "message-format differences don't fail tests).")
     parser.add_argument("--stub",       action="store_true",
                         help="Use stub build environment (no real compilation)")
     parser.add_argument("--stub-mode",  default="all_fail",

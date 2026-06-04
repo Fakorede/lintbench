@@ -23,7 +23,8 @@ FAILURE_MODES: dict[str, str] = {
     "compilation_failed": "Generated file did not compile",
     "wrong_imports":      "Missing or wrong Lint API imports",
     "wrong_scanner":      "Wrong Lint scanner interface implemented",
-    "too_narrow":         "Only positive tests failed (under-detection)",
+    "too_narrow":         "Only positive tests failed (under-detection — issue not detected)",
+    "message_mismatch":   "Only positive tests failed (issue detected, wrong message text)",
     "too_broad":          "Only negative/clean tests failed (over-detection)",
     "wrong_logic":        "Mixed test failures (logic error)",
     "init_error":         "JVM class-init failure (missing Issue fields in multi-issue detector)",
@@ -115,7 +116,10 @@ def estimate_pass_at_k(n: int, c: int, k: int) -> float:
 # ---------------------------------------------------------------------------
 
 _NEGATIVE_PATTERN = re.compile(
-    r"(?i)(clean|correct|nowarning|nowarn|noerror|valid|ok|pass|negative)"
+    # Match test names that are negative/clean (no warnings expected).
+    # "valid" uses a negative lookbehind to exclude "invalid" (e.g. testInvalidResourceValue
+    # is a positive test, not a negative one).
+    r"(?i)(clean|correct|nowarning|nowarn|noerror|(?<!in)valid|ok|pass|negative)"
 )
 
 
@@ -126,6 +130,8 @@ def classify_failure(
     tests_failed: list[str],
     all_tests: list[str],
     failure_output: str,
+    issue_id: Optional[str] = None,
+    loose: bool = True,
 ) -> str:
     if not compiled:
         joined = "\n".join(compile_errors)
@@ -138,14 +144,29 @@ def classify_failure(
 
     # JVM class-init cascade — registry couldn't initialize due to missing
     # Issue fields in a multi-issue detector (inject_stubs failed or was skipped).
-    if "NoClassDefFoundError" in failure_output or "ExceptionInInitializerError" in failure_output:
+    # NoSuchFieldError fires first (before ExceptionInInitializerError wraps it)
+    # and is often the only thing visible in the 300-char truncated output.
+    if (
+        "NoClassDefFoundError" in failure_output
+        or "ExceptionInInitializerError" in failure_output
+        or ("NoSuchFieldError" in failure_output and "BuiltinIssueRegistry" in failure_output)
+    ):
         return "init_error"
 
     failed_negative = [t for t in tests_failed if _NEGATIVE_PATTERN.search(t)]
     failed_positive = [t for t in tests_failed if not _NEGATIVE_PATTERN.search(t)]
 
     if failed_positive and not failed_negative:
+        # message_mismatch only applies in strict mode: [IssueId] in the failure
+        # output means the detector fired but reported the wrong message text.
+        # In loose mode the .expectContains("[IssueId]") assertion itself puts
+        # [IssueId] in the error text even when the detector didn't fire at all,
+        # so the presence of [IssueId] is uninformative — all such failures are
+        # genuine under-detection (too_narrow).
+        if not loose and issue_id and f"[{issue_id}]" in failure_output:
+            return "message_mismatch"
         return "too_narrow"
+
     if failed_negative and not failed_positive:
         return "too_broad"
 
@@ -169,7 +190,7 @@ def aggregate_metrics(instance_results: list[InstanceResult], k: int) -> dict:
     overall_compile = round(sum(r.compilation_rate for r in instance_results) / n, 4)
 
     by_diff: dict[str, dict] = {}
-    for tier in ("EASY", "MEDIUM", "HARD"):
+    for tier in ("EASY", "HARD"):
         subset = [r for r in instance_results if r.difficulty == tier]
         if subset:
             by_diff[tier] = {
@@ -232,7 +253,7 @@ def print_summary(metrics: dict, model: str, prompt: str, k: int) -> None:
     print(f"  compilation rate:  {metrics['compilation_rate']:.1%}")
 
     print(f"\nStratified pass@1:")
-    for tier in ("EASY", "MEDIUM", "HARD"):
+    for tier in ("EASY", "HARD"):
         d = metrics["by_difficulty"].get(tier, {})
         if d:
             print(f"  {tier:<8} n={d['n']:<4}  pass@1={d['pass_at_1']:.1%}  "

@@ -1107,6 +1107,7 @@ def _build_skeleton(instance: dict) -> str:
     priority   = instance.get("priority") or 5
     interfaces = instance.get("scanner_interfaces", ["SourceCodeScanner"])
     methods    = instance.get("methods_to_generate", [])
+    base_class = instance.get("base_class", "Detector")
 
     scope      = _infer_scope(interfaces)
     iface_str  = ", ".join(interfaces)
@@ -1175,12 +1176,20 @@ def _build_skeleton(instance: dict) -> str:
             "    }",
         ])
 
+        # If the base class already provides the scanner interface (e.g. LayoutDetector
+        # implements XmlScanner), omit the redundant interface list.
+        _BASE_PROVIDES_IFACE = {"LayoutDetector", "ResourceXmlDetector"}
+        if base_class in _BASE_PROVIDES_IFACE:
+            class_header = f"class {detector} : {base_class}()"
+        else:
+            class_header = f"class {detector} : {base_class}(), {iface_str}"
+
         sections = [
             f"package com.android.tools.lint.checks",
             "",
             imports,
             "",
-            f"class {detector} : Detector(), {iface_str} {{",
+            f"{class_header} {{",
             "",
             companion,
         ]
@@ -1238,12 +1247,18 @@ def _build_skeleton(instance: dict) -> str:
         extra = _collect_imports(all_stubs, _JAVA_TYPE_IMPORTS)
         imports = "\n".join(sorted(set(_BASE_JAVA_IMPORTS + extra)))
 
+        _BASE_PROVIDES_IFACE = {"LayoutDetector", "ResourceXmlDetector"}
+        if base_class in _BASE_PROVIDES_IFACE:
+            java_class_header = f"public class {detector} extends {base_class} {{"
+        else:
+            java_class_header = f"public class {detector} extends {base_class} implements {iface_str} {{"
+
         header = [
             f"package com.android.tools.lint.checks;",
             "",
             imports,
             "",
-            f"public class {detector} extends Detector implements {iface_str} {{",
+            java_class_header,
             "",
             f"    private static final Implementation IMPLEMENTATION =",
             f"            new Implementation({detector}.class, {scope});",
@@ -1286,19 +1301,12 @@ Rules:
 # ── zero_shot ────────────────────────────────────────────────────────────────
 
 ZERO_SHOT_TEMPLATE = """\
-Implement an Android Lint Detector in {lang} for the following issue.
-
-Issue ID: {issue_id}
-Detector class name: {detector}
-Language: {lang}
-Category: {category}
-Severity: {severity}
-Scanner interfaces to implement: {scanner_interfaces}
+Implement an Android Lint Detector for the following issue.
 
 Specification:
 {nl_spec}
 {more_info}
-Generate the complete {detector}.{ext} source file now.\
+Generate the complete source file now.\
 """
 
 # ── api_hint (merged with structured_zero_shot) ───────────────────────────────
@@ -1311,6 +1319,7 @@ Detector class name: {detector}
 Language: {lang}
 Category: {category}
 Severity: {severity}
+Base class to extend: {base_class}
 Scanner interfaces to implement: {scanner_interfaces}
 
 Specification:
@@ -1340,6 +1349,7 @@ Detector class name: {detector}
 Language: {lang}
 Category: {category}
 Severity: {severity}
+Base class to extend: {base_class}
 
 Specification:
 {nl_spec}
@@ -1368,6 +1378,7 @@ Detector class name: {detector}
 Language: {lang}
 Category: {category}
 Severity: {severity}
+Base class to extend: {base_class}
 Scanner interfaces to implement: {scanner_interfaces}
 
 Specification:
@@ -1380,38 +1391,6 @@ Generate the complete {detector}.{ext} source file now.\
 """
 
 # ── few_shot_surface_matched — reuses FEW_SHOT_TEMPLATE with surface-picked example ──
-
-# ── few_shot_surface_matched_cot ─────────────────────────────────────────────
-
-FEW_SHOT_SURFACE_MATCHED_COT_TEMPLATE = """\
-{example_header}
-
-{example}
-
----
-
-Now implement a NEW Android Lint Detector in {lang} for the following issue.
-
-Issue ID: {issue_id}
-Detector class name: {detector}
-Language: {lang}
-Category: {category}
-Severity: {severity}
-Scanner interfaces to implement: {scanner_interfaces}
-
-Specification:
-{nl_spec}
-
-Lint API methods to override:
-{methods_list}
-{more_info}
-Before writing the code, briefly reason through:
-1. Which Lint API entry point to use (following the pattern from the example above)
-2. What AST nodes or patterns to match for this specific issue
-3. What condition triggers the report and what to include in the message
-
-Then output the complete {detector}.{ext} source file in a single ```{ext}``` code block.\
-"""
 
 # ── compile_repair ───────────────────────────────────────────────────────────
 
@@ -1452,7 +1431,6 @@ ALL_VARIANTS = [
     "api_hint",
     "skeleton",
     "few_shot_surface_matched",
-    "few_shot_surface_matched_cot",
 ]
 
 
@@ -1476,6 +1454,8 @@ def build_prompt(instance: dict, variant: str) -> tuple[str, str]:
         urls = "\n".join(f"  - {u}" for u in instance["more_info_urls"])
         more_info = f"\nReference documentation:\n{urls}\n"
 
+    base_class = instance.get("base_class", "Detector")
+
     common = dict(
         lang=lang,
         ext=ext,
@@ -1483,6 +1463,7 @@ def build_prompt(instance: dict, variant: str) -> tuple[str, str]:
         detector=detector,
         category=instance["category"],
         severity=instance["severity"],
+        base_class=base_class,
         scanner_interfaces=", ".join(instance["scanner_interfaces"]) or "SourceCodeScanner",
         nl_spec=instance["nl_spec"],
         methods_list=methods_list,
@@ -1512,19 +1493,6 @@ def build_prompt(instance: dict, variant: str) -> tuple[str, str]:
             f"({common['scanner_interfaces']}):"
         )
         user = FEW_SHOT_TEMPLATE.format(example=examples, example_header=header, **common)
-
-    elif variant == "few_shot_surface_matched_cot":
-        examples = _pick_examples(instance, ext)
-        n = examples.count("\n\n---\n\n") + 1
-        header = (
-            f"Here {'are' if n > 1 else 'is'} {n} example{'s' if n > 1 else ''} "
-            f"of complete Android Lint Detector{'s' if n > 1 else ''} in {lang} "
-            f"using the same scanner interface{'s' if n > 1 else ''} "
-            f"({common['scanner_interfaces']}):"
-        )
-        user = FEW_SHOT_SURFACE_MATCHED_COT_TEMPLATE.format(
-            example=examples, example_header=header, **common
-        )
 
     else:
         raise ValueError(

@@ -35,28 +35,32 @@ REGISTRY_FIELDS_JSON = Path(__file__).parent / "registry_fields.json"
 
 
 def find_defined_issue_fields(source: str) -> list[str]:
-    """Return @JvmField val names whose value is an Issue in the source.
+    """Return val names whose value is an Issue in the source.
 
-    Handles both explicit and inferred types:
-      @JvmField val FOO: Issue = ...      (explicit)
-      @JvmField val FOO = Issue.create(   (inferred)
+    Handles both explicit and inferred types, with or without @JvmField:
+      @JvmField val FOO: Issue = ...      (explicit + annotated)
+      @JvmField val FOO = Issue.create(   (inferred + annotated)
+      val FOO: Issue = ...                (explicit, model forgot @JvmField)
+      val FOO = Issue.create(             (inferred, model forgot @JvmField)
+
+    Fields without @JvmField are still valid alias targets — the injected
+    stub adds @JvmField and references the property by name.
     """
-    # Explicit type annotation: val FOO: Issue =
-    explicit = re.findall(
+    patterns = [
+        # With @JvmField — preferred (checked first so they sort to front)
         r'@JvmField\s+val\s+([A-Z_][A-Z_0-9]*)[\s\n]*:[\s\n]*Issue\s*=',
-        source,
-    )
-    # Inferred type: val FOO = Issue.create(
-    inferred = re.findall(
         r'@JvmField\s+val\s+([A-Z_][A-Z_0-9]*)\s*=\s*Issue\s*\.',
-        source,
-    )
-    seen = set()
-    result = []
-    for f in explicit + inferred:
-        if f not in seen:
-            seen.add(f)
-            result.append(f)
+        # Without @JvmField — fallback
+        r'\bval\s+([A-Z_][A-Z_0-9]*)[\s\n]*:[\s\n]*Issue\s*=',
+        r'\bval\s+([A-Z_][A-Z_0-9]*)\s*=\s*Issue\s*\.',
+    ]
+    seen: set[str] = set()
+    result: list[str] = []
+    for pat in patterns:
+        for f in re.findall(pat, source):
+            if f not in seen:
+                seen.add(f)
+                result.append(f)
     return result
 
 

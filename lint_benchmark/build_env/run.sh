@@ -19,6 +19,9 @@
 #   LINTBENCH_MEMORY     Docker memory limit (default: 3g)
 #   LINTBENCH_CPUS       Docker CPU limit (default: 2)
 #   LINTBENCH_LOG_DIR    Directory to write per-instance logs (default: none)
+#   LINTBENCH_STRICT     If set to "1", use exact .expect() matching (strict mode).
+#                        Default is loose: .expect(exactString) → .expectContains("[IssueId]")
+#                        .expectClean() is always preserved (enforces no false positives).
 
 set -euo pipefail
 
@@ -88,6 +91,20 @@ trap "rm -rf ${TMP_INPUT} ${TMP_OUTPUT}" EXIT
 
 cp "$GENERATED_FILE"  "${TMP_INPUT}/detector.${GENERATED_EXT}"
 cp "$TEST_FILE"       "${TMP_INPUT}/test.${TEST_EXT}"
+
+# Loose mode (default): patch .expect(exactString) → .expectContains("[IssueId]")
+# Preserves .expectClean() so negative tests still enforce no false positives.
+# Pass LINTBENCH_STRICT=1 to skip patching and use exact string matching.
+if [[ "${LINTBENCH_STRICT:-}" != "1" ]]; then
+    PATCH_SCRIPT="$(dirname "${BASH_SOURCE[0]}")/patch_test_loose.py"
+    if [[ -f "$PATCH_SCRIPT" ]]; then
+        python3 "$PATCH_SCRIPT" \
+            "${TMP_INPUT}/test.${TEST_EXT}" \
+            "${TEST_METHODS}" || true
+    else
+        echo "patch_test_loose: WARNING — patch script not found: ${PATCH_SCRIPT}" >&2
+    fi
+fi
 
 # Per-instance log directory (optional)
 INSTANCE_LABEL="$(basename "$(dirname "$GENERATED_FILE")")"

@@ -28,7 +28,6 @@ PROMPTS=(
     "api_hint"
     "skeleton"
     "few_shot_surface_matched"
-    "few_shot_surface_matched_cot"
 )
 
 # ---------------------------------------------------------------------------
@@ -38,12 +37,18 @@ MODELS=()
 INSTANCE_IDS=()
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --model)       MODELS+=("$2");       shift 2 ;;
-        --limit)       LIMIT="$2";           shift 2 ;;
-        --out)         OUT="$2";             shift 2 ;;
-        --benchmark)   BENCHMARK="$2";       shift 2 ;;
-        --run-id)      RUN_ID="$2";          shift 2 ;;
-        --instance-id) INSTANCE_IDS+=("$2"); shift 2 ;;
+        --model)         MODELS+=("$2");       shift 2 ;;
+        --limit)         LIMIT="$2";           shift 2 ;;
+        --out)           OUT="$2";             shift 2 ;;
+        --benchmark)     BENCHMARK="$2";       shift 2 ;;
+        --run-id)        RUN_ID="$2";          shift 2 ;;
+        --instance-id)   INSTANCE_IDS+=("$2"); shift 2 ;;
+        --instance-file)
+            while IFS= read -r line; do
+                [[ -z "$line" || "$line" == \#* ]] && continue
+                INSTANCE_IDS+=("$line")
+            done < "$2"
+            shift 2 ;;
         *) echo "Unknown flag: $1" >&2; exit 1 ;;
     esac
 done

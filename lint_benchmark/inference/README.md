@@ -17,12 +17,12 @@ from inference.prompts import build_prompt
 import json
 
 inst = json.loads(open('data/dataset.jsonl').readline())
-sys_p, usr_p = build_prompt(inst, 'compile_repair_1')
+sys_p, usr_p = build_prompt(inst, 'few_shot_surface_matched')
 print(usr_p)
 "
 ```
 
-**Prompt variants:** `zero_shot` · `api_hint` · `skeleton` · `few_shot_surface_matched` · `few_shot_surface_matched_cot` · `compile_repair_1`
+**Prompt variants:** `zero_shot` · `api_hint` · `skeleton` · `few_shot_surface_matched` · `compile_repair_1`
 
 
 ---
@@ -38,6 +38,9 @@ OR
 bash run_sample.sh --run-id run_001 --instance-id "RestrictionsDetector:ValidRestrictions"
 bash run_sample.sh --run-id run_002 --instance-id "ScrollViewChildDetector:ScrollViewSize"
 bash run_sample.sh --run-id run_003 --instance-id "DataBindingDetector:XmlEscapeNeeded"
+bash run_sample.sh --run-id run_004 --instance-id "WrongConstructorDetector:NotConstructor"
+bash run_sample.sh --run-id run_005 --instance-id "InvalidImeActionIdDetector:InvalidImeActionId"
+bash run_sample.sh --run-id run_006 --instance-id "WebViewDetector:WebViewLayout"
 
 OR
 
@@ -124,7 +127,19 @@ bash run_eval_all.sh --generated generated/run_001 --run-id run_001_eval --insta
 
 bash run_eval_all.sh --generated generated/run_002 --run-id run_002_eval --instance-id "ScrollViewChildDetector:ScrollViewSize"
 
+bash run_eval_all.sh --generated generated/run_002-strict --run-id run_002_eval-loose --instance-id "ScrollViewChildDetector:ScrollViewSize"
+
+bash run_eval_all.sh --generated generated/run_002-strict --run-id run_002_eval-strict --instance-id "ScrollViewChildDetector:ScrollViewSize" --strict
+
 bash run_eval_all.sh --generated generated/run_003 --run-id run_003_eval --instance-id "DataBindingDetector:XmlEscapeNeeded"
+
+bash run_eval_all.sh --generated generated/run_003 --run-id run_003_eval-v2 --instance-id "DataBindingDetector:XmlEscapeNeeded"
+
+bash run_eval_all.sh --generated generated/run_004 --run-id run_004_eval --instance-id "WrongConstructorDetector:NotConstructor"
+
+bash run_eval_all.sh --generated generated/run_005 --run-id run_005_eval --instance-id "InvalidImeActionIdDetector:InvalidImeActionId"
+
+bash run_eval_all.sh --generated generated/run_006 --run-id run_006_eval --instance-id "WebViewDetector:WebViewLayout"
 ```
 
 **Step 3 — run compile_repair_1:**
@@ -154,4 +169,21 @@ python run_eval.py \
 
 This overwrites the failing `sample_0.java` files in-place, so you can re-run the same eval command afterwards to measure the repaired pass rate.
 
+
+---
+
+Pilot Run:
+
+```sh
+# 1. Generate — all 3 models × 5 prompts × 30 instances
+bash run_sample.sh \
+    --run-id pilot_001 \
+    --instance-file data/pilot_instances.txt
+
+# 2. Evaluate
+bash run_eval_all.sh \
+    --generated generated/pilot_001 \
+    --run-id pilot_001_eval \
+    --instance-file data/pilot_instances.txt
+```sh
 
