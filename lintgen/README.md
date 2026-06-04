@@ -65,11 +65,32 @@ lintgen build-index --source ../android-custom-lint-rules/ --out-dir ../lintgen/
 ## Usage
 
 ```bash
-# RAG-augmented generation (api_hint_rag prompt)
+# RAG-augmented generation via OpenRouter (single key, any model)
 lintgen generate \
     --model  anthropic/claude-sonnet-4.6 \
     --prompt api_hint_rag \
     --out    generated/
+
+# Open-source model via OpenRouter
+lintgen generate \
+    --model  meta-llama/llama-3.3-70b-instruct \
+    --prompt api_hint_rag \
+    --out    generated/
+
+# Reasoning model with thinking budget
+lintgen generate \
+    --model           deepseek/deepseek-r1 \
+    --thinking-budget 8000 \
+    --prompt          api_hint_rag \
+    --out             generated/
+
+# Pass@5 with temperature
+lintgen generate \
+    --model       openai/gpt-4o \
+    --samples     5 \
+    --temperature 0.8 \
+    --prompt      api_hint_rag \
+    --out         generated/
 
 # Ablation — same model, no RAG
 lintgen generate \
@@ -84,7 +105,17 @@ lintgen eval \
     --out        results/
 
 # Smoke-test on 5 instances
-lintgen generate --model <model> --limit 5
+lintgen generate --model anthropic/claude-sonnet-4.6 --limit 5
+```
+
+**API key** (OpenRouter covers all models with one key):
+```bash
+export OPENROUTER_API_KEY=...
+
+# Or use provider-specific keys
+export OPENAI_API_KEY=...
+export ANTHROPIC_API_KEY=...
+export GOOGLE_API_KEY=...
 ```
 
 ### Available prompt variants
