@@ -1,44 +1,55 @@
 """
 lintgen.rag.knowledge_base — LintAPIKnowledgeBase
 
-Two-tier retrieval:
-  Tier 1 — Interface index (hand-curated, ~50 entries)
+Three-tier retrieval:
+  Tier 1 — Interface index (hand-curated, ~40 entries)
             Exact-match on scanner_interfaces first; semantic search fallback.
-  Tier 2 — Full Lint API index (auto-constructed from source, ~500-1000 entries)
-            FAISS dense retrieval, top-k, parent-child swap.
+  Tier 2 — Full Lint API index (~150 entries: Context, JavaContext, LintFix, etc.)
+            FAISS dense retrieval, top-k.
+  Tier 3 — API guide docs (97 section chunks from the official Lint API guide)
+            FAISS dense retrieval, top-k.
 
 Index is built once by build_corpus.py and persisted under rag/index/.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Optional
 
 # Populated by get_knowledge_base() on first call.
 _KB_SINGLETON: Optional["LintAPIKnowledgeBase"] = None
 
-INDEX_DIR = Path(__file__).parent / "index"
+INDEX_DIR  = Path(__file__).parent / "index"
 CORPUS_DIR = Path(__file__).parent / "corpus"
 
-EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
-DEFAULT_TOP_K = 5
-SCORE_THRESHOLD = 0.4
+EMBEDDING_MODEL  = "BAAI/bge-large-en-v1.5"
+DEFAULT_TOP_K    = 5
+SCORE_THRESHOLD  = 0.4
 
 
 class LintAPIKnowledgeBase:
     """
-    Retrieves relevant Lint API methods and imports for a given benchmark instance.
+    Retrieves relevant Lint API methods, utility calls, and guide sections
+    for a given benchmark instance.
 
     Usage:
         kb = LintAPIKnowledgeBase.load()
         context = kb.format_context(instance)
     """
 
-    def __init__(self, tier1_store, tier2_store, tier1_entries: list[dict]) -> None:
-        self._tier1_store    = tier1_store     # FAISS vectorstore for interface methods
-        self._tier2_store    = tier2_store     # FAISS vectorstore for full API
-        self._tier1_entries  = tier1_entries   # raw list for exact-match lookup
+    def __init__(
+        self,
+        tier1_store,
+        tier2_store,
+        tier3_store,
+        tier1_entries: list[dict],
+    ) -> None:
+        self._tier1_store   = tier1_store    # FAISS: interface methods
+        self._tier2_store   = tier2_store    # FAISS: full API (Context, LintFix, …)
+        self._tier3_store   = tier3_store    # FAISS: API guide doc sections
+        self._tier1_entries = tier1_entries  # raw list for exact-match on scanner_interfaces
 
     # ------------------------------------------------------------------
     # Construction
@@ -49,14 +60,17 @@ class LintAPIKnowledgeBase:
         """Load a pre-built index from disk. Raises FileNotFoundError if not built yet."""
         tier1_path = index_dir / "tier1"
         tier2_path = index_dir / "tier2"
-        if not tier1_path.exists() or not tier2_path.exists():
-            raise FileNotFoundError(
-                f"FAISS index not found at {index_dir}. "
-                "Run: lintgen build-index"
-            )
+        tier3_path = index_dir / "tier3"
+
+        for path in (tier1_path, tier2_path, tier3_path):
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"FAISS index not found at {path}. "
+                    "Run: lintgen build-index"
+                )
 
         try:
-            from langchain_community.embeddings import HuggingFaceEmbeddings
+            from langchain_huggingface import HuggingFaceEmbeddings
             from langchain_community.vectorstores import FAISS
         except ImportError:
             raise SystemExit(
@@ -71,10 +85,12 @@ class LintAPIKnowledgeBase:
         tier2_store = FAISS.load_local(
             str(tier2_path), embeddings, allow_dangerous_deserialization=True
         )
+        tier3_store = FAISS.load_local(
+            str(tier3_path), embeddings, allow_dangerous_deserialization=True
+        )
 
-        import json
         tier1_entries = json.loads((CORPUS_DIR / "lint_interfaces.json").read_text())
-        return cls(tier1_store, tier2_store, tier1_entries)
+        return cls(tier1_store, tier2_store, tier3_store, tier1_entries)
 
     # ------------------------------------------------------------------
     # Retrieval
@@ -87,10 +103,11 @@ class LintAPIKnowledgeBase:
         score_threshold: float = SCORE_THRESHOLD,
     ) -> dict[str, list[dict]]:
         """
-        Return {"tier1": [...], "tier2": [...]} of retrieved API entries for instance.
+        Return {"tier1": [...], "tier2": [...], "tier3": [...]} for instance.
 
         Tier 1: exact-match on scanner_interfaces, semantic fallback.
-        Tier 2: dense search on nl_spec + scanner_interfaces query.
+        Tier 2: dense search — API methods and utilities.
+        Tier 3: dense search — API guide doc sections.
         """
         scanner_ifaces = instance.get("scanner_interfaces", [])
         nl_spec        = instance.get("nl_spec", "")
@@ -99,10 +116,9 @@ class LintAPIKnowledgeBase:
         # Tier 1 — exact match first
         tier1_exact = [
             e for e in self._tier1_entries
-            if e.get("interface") in scanner_ifaces
+            if e.get("interface", "").split(".")[-1] in scanner_ifaces
         ]
-
-        # Tier 1 — semantic fallback if exact match is empty
+        # Tier 1 — semantic fallback
         if not tier1_exact and self._tier1_store:
             raw = self._tier1_store.similarity_search_with_relevance_scores(query, k=k)
             tier1_exact = [
@@ -119,7 +135,16 @@ class LintAPIKnowledgeBase:
                 if score >= score_threshold
             ]
 
-        return {"tier1": tier1_exact, "tier2": tier2_docs}
+        # Tier 3 — guide doc sections
+        tier3_docs = []
+        if self._tier3_store:
+            raw3 = self._tier3_store.similarity_search_with_relevance_scores(query, k=k)
+            tier3_docs = [
+                doc.metadata for doc, score in raw3
+                if score >= score_threshold
+            ]
+
+        return {"tier1": tier1_exact, "tier2": tier2_docs, "tier3": tier3_docs}
 
     def format_context(
         self,
@@ -129,21 +154,17 @@ class LintAPIKnowledgeBase:
         """
         Return a formatted string ready for prompt injection.
 
-        Format:
-          Relevant Lint API methods:
-          ─────────────────────────
-          [Tier 1: interface methods to override]
-
-          [Tier 2: context/utility methods]
-
-          Required imports:
-          [deduplicated import list]
+        Sections:
+          [Tier 1] Scanner interface methods to override
+          [Tier 2] Available context / utility API methods + required imports
+          [Tier 3] Relevant API guide excerpts
         """
         results = self.retrieve(instance, k=k)
         tier1   = results["tier1"]
         tier2   = results["tier2"]
+        tier3   = results["tier3"]
 
-        if not tier1 and not tier2:
+        if not tier1 and not tier2 and not tier3:
             return ""
 
         lines: list[str] = ["Relevant Lint API methods:", "─" * 42]
@@ -152,21 +173,22 @@ class LintAPIKnowledgeBase:
             lines.append("\n// Scanner interface methods to override:")
             for entry in tier1:
                 lines.append(f"  {entry.get('signature', '')}")
-                if entry.get("description"):
-                    lines.append(f"  // {entry['description']}")
-                if entry.get("example"):
-                    lines.append(f"  // e.g. {entry['example']}")
+                if entry.get("method_description"):
+                    # First sentence only to keep it concise
+                    desc = entry["method_description"].split(".")[0] + "."
+                    lines.append(f"  // {desc}")
                 lines.append("")
 
         if tier2:
             lines.append("// Available context / utility methods:")
             for entry in tier2:
                 lines.append(f"  {entry.get('signature', '')}")
-                if entry.get("description"):
-                    lines.append(f"  // {entry['description']}")
+                if entry.get("method_description"):
+                    desc = entry["method_description"].split(".")[0] + "."
+                    lines.append(f"  // {desc}")
                 lines.append("")
 
-        # Deduplicated import list
+        # Deduplicated import list from tier1 + tier2
         all_imports: list[str] = []
         seen: set[str] = set()
         for entry in tier1 + tier2:
@@ -180,6 +202,18 @@ class LintAPIKnowledgeBase:
             lines.append("Required imports:")
             for imp in sorted(all_imports):
                 lines.append(f"  import {imp}")
+
+        if tier3:
+            lines.append("\n" + "─" * 42)
+            lines.append("Relevant API guide excerpts:")
+            lines.append("─" * 42)
+            for entry in tier3:
+                lines.append(f"\n### {entry.get('title', '')} ({entry.get('file', '')})")
+                # Truncate long sections to keep the prompt manageable
+                content = entry.get("content", "")
+                if len(content) > 800:
+                    content = content[:800] + "\n... (truncated)"
+                lines.append(content)
 
         return "\n".join(lines)
 

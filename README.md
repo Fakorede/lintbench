@@ -110,7 +110,8 @@ docker build -t lintbench-eval lintbench/build_env/
 cd lintbench/stub_generator && ./gradlew shadowJar && cd ../..
 
 # Build FAISS index (lintgen) — run once, ~2 min on CPU
-lintgen build-index --source android-custom-lint-rules/
+# Source defaults to base/lint/libs/lint-api/ (already cloned above)
+lintgen build-index
 ```
 
 **API keys** — set whichever provider you use:
