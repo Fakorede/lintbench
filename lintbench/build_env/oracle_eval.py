@@ -63,7 +63,7 @@ RESULTS_DIR = HERE.parent / "results" / "oracle"
 DATASET_OUT = HERE.parent / "data" / "dataset.jsonl"
 CHECKS_SRC  = (
     REPO_ROOT
-    / "lint_codebase/base/lint/libs/lint-checks/src/main/java"
+    / "base/lint/libs/lint-checks/src/main/java"
     / "com/android/tools/lint/checks"
 )
 

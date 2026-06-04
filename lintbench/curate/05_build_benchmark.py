@@ -182,7 +182,7 @@ STRATIFIED_FILE = Path("data/lint_stratified.json")
 SPECS_FILE      = Path("data/lint_specs.json")
 OUT_FILE        = Path("data/lintbench.json")
 
-_REPO_ROOT  = Path(__file__).resolve().parent.parent.parent / "lint_codebase" / "base"
+_REPO_ROOT  = Path(__file__).resolve().parent.parent.parent / "base"
 CHECKS_DIR  = _REPO_ROOT / "lint/libs/lint-checks/src/main/java/com/android/tools/lint/checks"
 TESTS_DIR   = _REPO_ROOT / "lint/libs/lint-tests/src/test/java/com/android/tools/lint/checks"
 

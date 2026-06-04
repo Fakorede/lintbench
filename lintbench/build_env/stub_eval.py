@@ -51,7 +51,7 @@ RESULTS_DIR = HERE.parent / "results" / "stub"
 STUB_JAR    = HERE.parent / "stub_generator" / "build" / "libs" / "stub-generator.jar"
 CHECKS_SRC  = (
     REPO_ROOT
-    / "lint_codebase/base/lint/libs/lint-checks/src/main/java"
+    / "base/lint/libs/lint-checks/src/main/java"
     / "com/android/tools/lint/checks"
 )
 

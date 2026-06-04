@@ -45,9 +45,9 @@ LOG_DIR="${LINTBENCH_LOG_DIR:-}"
 # AOSP lint-tests source — needed to locate the test file
 TESTS_SRC="${LINTBENCH_TESTS_DIR:-}"
 if [[ -z "$TESTS_SRC" ]]; then
-    # Default: build_env/ → lintbench/ → lintbench/ → lint_codebase/base/
+    # Default: build_env/ → lintbench/ → lintbench/ → base/
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    TESTS_SRC="${SCRIPT_DIR}/../../lint_codebase/base/lint/libs/lint-tests/src/test/java/com/android/tools/lint/checks"
+    TESTS_SRC="${SCRIPT_DIR}/../../base/lint/libs/lint-tests/src/test/java/com/android/tools/lint/checks"
 fi
 
 # ---------------------------------------------------------------------------
