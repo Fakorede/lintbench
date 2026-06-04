@@ -30,7 +30,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-REPO_ROOT  = Path(__file__).resolve().parent.parent.parent / "lint_codebase" / "base"
+REPO_ROOT  = Path(__file__).resolve().parent.parent.parent / "base"
 TESTS_DIR  = REPO_ROOT / "lint/libs/lint-tests/src/test/java/com/android/tools/lint/checks"
 SPECS_FILE = Path("data/lint_specs.json")
 PAIRS_FILE = Path("data/lint_pairs.json")

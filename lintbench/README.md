@@ -28,8 +28,8 @@ during validation.
 
 ```bash
 # 1. Clone the AOSP lint source (sparse checkout, ~200MB)
-git clone --no-checkout https://android.googlesource.com/platform/tools/base lint_codebase/base
-cd lint_codebase/base
+git clone --no-checkout https://android.googlesource.com/platform/tools/base base
+cd base
 git sparse-checkout init --cone
 git sparse-checkout set lint
 git checkout mirror-goog-studio-main

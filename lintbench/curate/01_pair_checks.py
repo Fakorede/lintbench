@@ -25,7 +25,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Defaults (relative to repo root; override with --checks-dir / --tests-dir)
 # ---------------------------------------------------------------------------
-REPO_ROOT   = Path(__file__).resolve().parent.parent.parent / "lint_codebase" / "base"
+REPO_ROOT   = Path(__file__).resolve().parent.parent.parent / "base"
 CHECKS_DIR  = REPO_ROOT / "lint/libs/lint-checks/src/main/java/com/android/tools/lint/checks"
 TESTS_DIR   = REPO_ROOT / "lint/libs/lint-tests/src/test/java/com/android/tools/lint/checks"
 

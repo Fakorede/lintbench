@@ -28,7 +28,7 @@ import re
 import textwrap
 from pathlib import Path
 
-REPO_ROOT  = Path(__file__).resolve().parent.parent.parent / "lint_codebase" / "base"
+REPO_ROOT  = Path(__file__).resolve().parent.parent.parent / "base"
 CHECKS_DIR = REPO_ROOT / "lint/libs/lint-checks/src/main/java/com/android/tools/lint/checks"
 PAIRS_FILE = Path("data/lint_pairs.json")
 OUT_FILE   = Path("data/lint_specs.json")
