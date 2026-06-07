@@ -16,12 +16,12 @@ Benchmark instance (nl_spec + scanner_interfaces)
   encodes the query
         │
         ▼
-  FAISS vector store       ← local, file-based index built from the Lint API corpus
+  Five-tier FAISS index    ← local, file-based index built from the Lint API corpus
   retrieves top-k docs
         │
         ▼
-  RAG context injected     ← API method signatures + required imports
-  into the prompt
+  RAG context injected     ← interface declarations + API signatures + imports
+  into the prompt           (+ guide excerpts for base+apis+docs)
         │
         ▼
   LLM generates detector   ← any model via lintbench providers
@@ -31,21 +31,35 @@ Benchmark instance (nl_spec + scanner_interfaces)
   returns pass/fail + errors
         │
         ├── all pass → done
-        └── fail → repair prompt (last code + error feedback) → LLM → repeat
+        └── fail → error-augmented re-retrieval → repair prompt → LLM → repeat
 ```
 
 ### Vector store and embedding model
 
-**FAISS** runs entirely in-process — the index is a pair of files on disk (`rag/index/`) loaded at startup. No external database needed.
+**FAISS** runs entirely in-process — the index is a set of files on disk (`rag/index/`) loaded at startup. No external database needed.
 
 **`BAAI/bge-large-en-v1.5`** (via `sentence-transformers`) embeds the corpus at index-build time and each instance's `nl_spec + scanner_interfaces` at query time.
 
-### Two-tier retrieval
+### Five-tier retrieval
 
 | Tier | Corpus | Match strategy |
 |---|---|---|
-| **Tier 1** — Interface index | Hand-curated scanner interface methods (`rag/corpus/lint_interfaces.json`) | Exact-match on `scanner_interfaces`; semantic fallback |
-| **Tier 2** — Full API index | Auto-extracted from AOSP + hand-written entries (`rag/corpus/lint_fullapi.json`) | Dense FAISS retrieval, top-5, score ≥ 0.4 |
+| **Tier 1** — Scanner interface index | Hand-curated interface method signatures (`lint_interfaces.json`, ~43 entries) | Exact-match on `scanner_interfaces`; semantic fallback |
+| **Tier 2** — Full API index | Context utilities, `LintFix`, etc. (`lint_fullapi.json`, ~153 entries) | Dense FAISS retrieval, top-5, score ≥ 0.4 |
+| **Tier 3** — API guide docs | 223 section chunks from the official Lint API guide | Dense FAISS retrieval |
+| **Tier 4** — UAST/PSI method index | Method signatures auto-extracted from IntelliJ Community source | Dense FAISS retrieval |
+| **Tier 5** — SdkConstants index | String constants used in ground-truth detectors | Dense FAISS retrieval |
+
+Tiers 1–2 and 4–5 are included in all RAG prompt variants. Tier 3 (guide docs) is only added by `base+apis+docs`.
+
+### Error-augmented re-retrieval (agent only)
+
+Before each repair generation, the agent re-queries the RAG index with an **error-augmented query** rather than reusing the initial retrieval:
+
+- **Compile failure** — unresolved symbol names (e.g. `cannot find symbol: ResourceFolderDetector`) are extracted from the compiler log and appended to the query, biasing retrieval toward the correct API signatures.
+- **Test failure** (compiled but no warnings) — the scanner interface and scope constants used in the previous attempt are extracted from the generated code and appended, retrieving docs on the correct callback lifecycle and scope registration.
+
+Each repair iteration gets only the new error-targeted context, not a stack of prior retrievals.
 
 ---
 
@@ -87,48 +101,65 @@ All commands are run from the **repo root** (`/Users/researchlab/dev/research/li
 ### `lintgen generate` — single-shot generation
 
 ```bash
-# RAG-augmented (default)
+# All tiers — interface signatures + API methods + guide docs (default)
 lintgen generate \
     --model  anthropic/claude-sonnet-4.6 \
-    --prompt api_hint_rag \
-    --out    lintgen/generated/
+    --prompt base+apis+docs
 
-# Specific instance only
+# Interface signatures + API methods only (no guide docs)
+lintgen generate \
+    --model  anthropic/claude-sonnet-4.6 \
+    --prompt base+apis
+
+# No RAG
+lintgen generate \
+    --model  anthropic/claude-sonnet-4.6 \
+    --prompt zero_shot
+
+# Specific instance
 lintgen generate \
     --model       anthropic/claude-sonnet-4.6 \
-    --prompt      api_hint_rag \
-    --instance-id "LogDetector:LongLogTag" \
-    --out         generated/
+    --prompt      base+apis+docs \
+    --instance-id "LogDetector:LongLogTag"
 
 # Pass@5
 lintgen generate \
     --model       openai/gpt-4o \
     --samples     5 \
     --temperature 0.8 \
-    --prompt      api_hint_rag \
-    --out         generated/
+    --prompt      base+apis+docs
 
 # Reasoning model with thinking budget
 lintgen generate \
     --model           deepseek/deepseek-r1 \
     --thinking-budget 8000 \
-    --prompt          api_hint_rag \
-    --out             generated/
+    --prompt          base+apis+docs
 
-# Ablation — no RAG
+# Ablation — disable RAG retrieval
 lintgen generate \
     --model  anthropic/claude-sonnet-4.6 \
-    --prompt api_hint_rag \
-    --no-rag \
-    --out    lintgen/generated_norag/
+    --prompt base+apis+docs \
+    --no-rag
 ```
 
 ### `lintgen agent` — iterative repair loop
 
-Generates a detector, compiles and tests it via the Docker build harness, then feeds compile errors or test failure output back to the model for repair. Repeats up to `--max-iter` times. Tests are never shown to the model — only execution output is fed back.
+Generates a detector, compiles and tests it via the Docker build harness, then feeds compile errors or test failure output back to the model for repair. Repeats up to `--max-iter` times. Tests are never shown to the model — only execution output is fed back. RAG context is re-retrieved at each repair iteration using an error-augmented query.
 
 ```bash
-# Full dataset, up to 10 repair rounds per instance
+# Full dataset, all tiers (default)
+lintgen agent \
+    --model     anthropic/claude-sonnet-4.6 \
+    --prompt    base+apis+docs \
+    --build-env lintbench/build_env/run.sh
+
+# Interface signatures + API methods only (no guide docs)
+lintgen agent \
+    --model     anthropic/claude-sonnet-4.6 \
+    --prompt    base+apis \
+    --build-env lintbench/build_env/run.sh
+
+# No RAG
 lintgen agent \
     --model     anthropic/claude-sonnet-4.6 \
     --prompt    zero_shot \
@@ -137,44 +168,38 @@ lintgen agent \
 # Single instance
 lintgen agent \
     --model       anthropic/claude-sonnet-4.6 \
-    --prompt      zero_shot \
+    --prompt      base+apis+docs \
     --build-env   lintbench/build_env/run.sh \
-    --instance-id "LogDetector:LongLogTag"
+    --instance-id "WrongConstructorDetector:NotConstructor"
 
 # Multiple instances
 lintgen agent \
     --model       anthropic/claude-sonnet-4.6 \
-    --prompt      few_shot_surface_matched \
+    --prompt      base+apis+docs \
     --build-env   lintbench/build_env/run.sh \
     --instance-id "LogDetector:LongLogTag" \
     --instance-id "IconDetector:ConvertToWebp"
 
-# Custom output dir
-lintgen agent \
-    --model     anthropic/claude-sonnet-4.6 \
-    --prompt    zero_shot \
-    --build-env lintbench/build_env/run.sh \
-    --out       lintgen/generated/
-
 # Dry-run (no Docker — stub mode for testing the loop)
 lintgen agent \
     --model    anthropic/claude-sonnet-4.6 \
-    --prompt   zero_shot \
+    --prompt   base+apis+docs \
     --max-iter 3
 ```
 
 **Trajectory output** (per instance, default `--out lintgen/generated/`):
 
 ```
-lintgen/generated/<run_id>/<model>/zero_shot_agent/<instance_id>/
-  iter_0.kt              ← initial generation
-  iter_0_prompt.txt      ← exact prompt sent (system + user)
-  iter_0_raw.txt         ← raw model response
-  iter_1.kt              ← first repair attempt
+lintgen/generated/<run_id>/<model>/<prompt>_agent/<instance_id>/
+  iter_0.kt                ← initial generation
+  iter_0_prompt.txt        ← exact prompt sent (system + user, including RAG context)
+  iter_0_raw.txt           ← raw model response
+  iter_0_logs/             ← Docker harness logs for this iteration
+  iter_1.kt                ← first repair attempt
+  iter_1_prompt.txt        ← repair prompt (error-augmented RAG + prev code + errors)
   ...
-  final.kt               ← best result (last passing, else last attempt)
-  trajectory.jsonl       ← per-iteration record: compiled, tests_passed/failed, cost_usd
-  <test logs>            ← Docker harness logs copied here (LINTBENCH_LOG_DIR)
+  final.kt                 ← best result (last passing, else last attempt)
+  trajectory.jsonl         ← per-iteration record: compiled, tests_passed/failed, cost_usd
 ```
 
 ### `lintgen eval` — evaluate generated detectors
@@ -191,12 +216,21 @@ Delegates to `lintbench/run_eval_all.sh`.
 
 ## Prompt variants
 
-| Variant | Knowledge added | Paper condition |
-|---|---|---|
-| `zero_shot` | NL description only | C0 |
-| `few_shot_surface_matched` | k worked Detector examples matched by scanner interface | C1 |
-| `skeleton` | Pre-filled class skeleton (base class, scanner, Issue/Implementation boilerplate) | C2 |
-| `api_hint_rag` | RAG-retrieved Lint/UAST/PSI API signatures + doc comments | C3 |
+| Variant | RAG tiers | Knowledge added | Paper condition |
+|---|---|---|---|
+| `zero_shot` | none | NL description only | C0 |
+| `few_shot_surface_matched` | none | k worked Detector examples matched by scanner interface | C1 |
+| `skeleton` | none | Pre-filled class skeleton (base class, scanner, Issue/Implementation boilerplate) | C2 |
+| `base+apis` | 1, 2, 4, 5 | Interface declaration + scanner method signatures + Lint/UAST/PSI API methods + SdkConstants + required imports | C3 |
+| `base+apis+docs` | 1, 2, 3, 4, 5 | All of the above + API guide doc excerpts (Tier 3) | C4 |
+| `base+docs` | 3 | API guide doc excerpts only, top-k=20 | C5 |
+
+**Tier breakdown:**
+- **Tier 1** — Scanner interface declaration hint + method signatures (exact-match on `scanner_interfaces`)
+- **Tier 2** — Full Lint API methods (`JavaContext`, `LintFix`, etc.)
+- **Tier 3** — API guide doc excerpts (top-k=20 for `base+docs`; top-k=5 otherwise)
+- **Tier 4** — UAST/PSI method signatures
+- **Tier 5** — `SdkConstants` string values used in ground-truth detectors
 
 ---
 
@@ -208,15 +242,15 @@ lintgen/
 └── src/lintgen/
     ├── cli.py                  # lintgen generate | agent | build-index | eval
     ├── agent/
-    │   └── runner.py           # iterative repair loop with trajectory saving
+    │   └── runner.py           # iterative repair loop with error-augmented re-retrieval
     ├── inference/
     │   └── runner.py           # single-shot generation with RAG injection
     ├── rag/
-    │   ├── knowledge_base.py   # LintAPIKnowledgeBase — FAISS retrieval + format_context()
+    │   ├── knowledge_base.py   # LintAPIKnowledgeBase — five-tier FAISS retrieval
     │   ├── build_corpus.py     # index builder (Tiers 1–5)
     │   ├── corpus/
     │   │   ├── lint_interfaces.json  # Tier 1: hand-curated interface methods
-    │   │   └── lint_fullapi.json     # Tier 2: additional hand-written entries
+    │   │   └── lint_fullapi.json     # Tier 2: additional API entries
     │   └── index/              # persisted FAISS index (gitignored)
     └── eval/
         └── runner.py           # thin wrapper over lintbench/run_eval_all.sh

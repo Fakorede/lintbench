@@ -2,7 +2,7 @@
 lintgen.cli — command-line entry point.
 
 Usage:
-  lintgen generate --instance <id> --model <model> --prompt api_hint_rag
+  lintgen generate --instance <id> --model <model> --prompt base+apis+docs
   lintgen agent   --model <model> --build-env <path/to/run.sh>
   lintgen build-index
   lintgen eval --generated <dir>
@@ -47,9 +47,9 @@ def main() -> None:
                      choices=["openai", "anthropic", "google", "openrouter"],
                      help="Force provider (auto-detected from model name if omitted). "
                           "Use 'openrouter' to access any model with a single OPENROUTER_API_KEY.")
-    gen.add_argument("--prompt",      default="api_hint_rag",
-                     choices=["api_hint_rag", "zero_shot", "skeleton",
-                               "few_shot_surface_matched"])
+    gen.add_argument("--prompt",      default="base+apis+docs",
+                     choices=["base+apis", "base+apis+docs", "base+docs",
+                              "zero_shot", "skeleton", "few_shot_surface_matched"])
     gen.add_argument("--out",         default=_DEFAULT_OUT)
     gen.add_argument("--run-id",      default=None,
                      help="Run identifier inserted into the output path. "
@@ -84,9 +84,9 @@ def main() -> None:
                     help="Model name (same syntax as 'generate')")
     ag.add_argument("--provider",    default=None,
                     choices=["openai", "anthropic", "google", "openrouter"])
-    ag.add_argument("--prompt",      default="api_hint_rag",
-                    choices=["api_hint_rag", "zero_shot", "skeleton",
-                             "few_shot_surface_matched"])
+    ag.add_argument("--prompt",      default="base+apis+docs",
+                    choices=["base+apis", "base+apis+docs",
+                             "zero_shot", "skeleton", "few_shot_surface_matched"])
     ag.add_argument("--build-env",   default=None,
                     help="Path to build_env/run.sh. Omit to use stub mode (dry-run).")
     ag.add_argument("--max-iter",    type=int, default=10,
