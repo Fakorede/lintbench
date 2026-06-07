@@ -333,6 +333,7 @@ def _build_skeleton(instance: dict) -> str:
 # ---------------------------------------------------------------------------
 # Prompt templates
 # ---------------------------------------------------------------------------
+# - Implement every method listed in the required methods.
 
 SYSTEM_PROMPT = """\
 You are an expert Android developer specialising in Android Lint custom checks.
@@ -342,21 +343,31 @@ and compile cleanly against the Android Lint API.
 Rules:
 - Output ONLY the detector source file. No explanation, no markdown fences.
 - Use the exact package: com.android.tools.lint.checks
-- The class name must match the detector name derived from the issue ID.
-- Implement every method listed in the required methods.
+- The class name must be: {detector}
 - Import only from: com.android.tools.lint.*, com.intellij.psi.*, org.jetbrains.uast.*
 - Do NOT include a main() method or any test code.
+"""
+
+# Minimal system prompt for zero_shot (C0): no structural hints, no method lists.
+ZERO_SHOT_SYSTEM_PROMPT = """\
+You are an expert Android developer specialising in Android Lint custom checks.
+You write Lint Detector implementations in {lang} that are correct, idiomatic,
+and compile cleanly against the Android Lint API.
+
+- Output ONLY the detector source file. No explanation, no markdown fences.
+- Use the exact package: com.android.tools.lint.checks
+- The class name must be: {detector}
 """
 
 # ── zero_shot ────────────────────────────────────────────────────────────────
 
 ZERO_SHOT_TEMPLATE = """\
-Implement an Android Lint Detector for the following issue.
+Implement an Android Lint Detector named {detector} in {lang} for the following issue.
 
 Specification:
 {nl_spec}
 {more_info}
-Generate the complete source file now.\
+Generate the complete {detector}.{ext} source file now.\
 """
 
 # ── skeleton ─────────────────────────────────────────────────────────────────
@@ -489,9 +500,10 @@ def build_prompt(instance: dict, variant: str) -> tuple[str, str]:
         more_info=more_info,
     )
 
-    system = SYSTEM_PROMPT.format(lang=lang)
+    system = SYSTEM_PROMPT.format(lang=lang, detector=detector)
 
     if variant == "zero_shot":
+        system = ZERO_SHOT_SYSTEM_PROMPT.format(lang=lang, detector=detector)
         user = ZERO_SHOT_TEMPLATE.format(**common)
 
     elif variant == "skeleton":

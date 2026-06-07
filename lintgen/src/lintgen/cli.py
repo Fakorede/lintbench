@@ -12,6 +12,21 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
+
+# Load .env from the repo root (parent of lintgen/) before any subcommand runs.
+# This makes OPENROUTER_API_KEY / ANTHROPIC_API_KEY / etc. available without
+# the user having to export them in the shell.
+try:
+    from dotenv import load_dotenv
+    _env = Path(__file__).resolve().parents[3] / ".env"
+    load_dotenv(_env)
+except ImportError:
+    pass
+
+# Repo root — cli.py lives at lintgen/src/lintgen/cli.py → parents[3] = repo root
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_OUT = str(_REPO_ROOT / "lintgen" / "generated")
 
 
 def main() -> None:
@@ -23,7 +38,7 @@ def main() -> None:
 
     # ── generate ──────────────────────────────────────────────────────────────
     gen = sub.add_parser("generate", help="Run RAG-augmented inference on benchmark instances")
-    gen.add_argument("--benchmark",   default="../lintbench/data/dataset.jsonl")
+    gen.add_argument("--benchmark",   default="lintbench/data/dataset.jsonl")
     gen.add_argument("--model",       required=True,
                      help="Model name (e.g. anthropic/claude-sonnet-4.6, "
                           "openai/gpt-4o, meta-llama/llama-3.3-70b-instruct). "
@@ -35,7 +50,7 @@ def main() -> None:
     gen.add_argument("--prompt",      default="api_hint_rag",
                      choices=["api_hint_rag", "zero_shot", "skeleton",
                                "few_shot_surface_matched"])
-    gen.add_argument("--out",         default="generated/")
+    gen.add_argument("--out",         default=_DEFAULT_OUT)
     gen.add_argument("--run-id",      default=None,
                      help="Run identifier inserted into the output path. "
                           "Auto-generates a UTC timestamp if omitted.")
@@ -64,7 +79,7 @@ def main() -> None:
         "agent",
         help="Iterative repair loop: generate → compile+test → repair (up to --max-iter times)",
     )
-    ag.add_argument("--benchmark",   default="../lintbench/data/dataset.jsonl")
+    ag.add_argument("--benchmark",   default="lintbench/data/dataset.jsonl")
     ag.add_argument("--model",       required=True,
                     help="Model name (same syntax as 'generate')")
     ag.add_argument("--provider",    default=None,
@@ -76,7 +91,7 @@ def main() -> None:
                     help="Path to build_env/run.sh. Omit to use stub mode (dry-run).")
     ag.add_argument("--max-iter",    type=int, default=10,
                     help="Maximum repair iterations per instance (default: 10)")
-    ag.add_argument("--out",         default="generated/")
+    ag.add_argument("--out",         default=_DEFAULT_OUT)
     ag.add_argument("--run-id",      default=None,
                     help="Run identifier. Auto-generates a UTC timestamp if omitted.")
     ag.add_argument("--temperature", type=float, default=0.2,
@@ -113,7 +128,7 @@ def main() -> None:
     # ── eval ──────────────────────────────────────────────────────────────────
     ev = sub.add_parser("eval", help="Evaluate generated detectors")
     ev.add_argument("--generated", required=True)
-    ev.add_argument("--benchmark", default="../lintbench/data/dataset.jsonl")
+    ev.add_argument("--benchmark", default="lintbench/data/dataset.jsonl")
     ev.add_argument("--out",       default="results/")
 
     args = parser.parse_args()

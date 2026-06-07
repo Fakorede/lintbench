@@ -41,6 +41,13 @@ from typing import Optional
 
 from tqdm import tqdm
 
+# Ensure the repo root is on sys.path so `lintbench` is importable regardless
+# of which Python interpreter is active (uv venv, conda, system, etc.).
+# runner.py lives at lintgen/src/lintgen/agent/runner.py → parents[4] = repo root.
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 
 # ---------------------------------------------------------------------------
 # Feedback extraction
@@ -58,7 +65,7 @@ def _extract_feedback(result: dict) -> str:
         failure = result.get("failure_output", "")
         parts = []
         if errors:
-            parts.append("Compilation failed:\n" + "\n".join(errors[:20]))
+            parts.append("Compilation failed:\n" + "\n".join(errors))
         if failure and not errors:
             # Docker / harness-level failure, no structured errors
             parts.append("Build error:\n" + failure[:800])
@@ -217,7 +224,8 @@ def run_agent(args: argparse.Namespace) -> None:
     max_iter        = getattr(args, "max_iter", 10)
     timeout_s       = getattr(args, "timeout", 180)
     stub_mode       = getattr(args, "stub_mode", "all_fail")
-    lintbench_prompt = args.prompt if args.prompt != "api_hint_rag" else "api_hint"
+    # api_hint_rag: RAG context is injected by the agent loop; base template is zero_shot
+    lintbench_prompt = args.prompt if args.prompt != "api_hint_rag" else "zero_shot"
 
     # ── Output layout ─────────────────────────────────────────────────────────
     run_id   = getattr(args, "run_id", None) or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -294,7 +302,9 @@ def run_agent(args: argparse.Namespace) -> None:
                     )
 
                 # ── Generate ─────────────────────────────────────────────────
-                iter_file = inst_dir / f"iter_{iteration}.{ext}"
+                iter_file      = inst_dir / f"iter_{iteration}.{ext}"
+                iter_prompt    = inst_dir / f"iter_{iteration}_prompt.txt"
+                iter_raw       = inst_dir / f"iter_{iteration}_raw.txt"
                 gen_record: dict = {
                     "instance_id": instance_id,
                     "iteration":   iteration,
@@ -302,7 +312,16 @@ def run_agent(args: argparse.Namespace) -> None:
                     "provider":    provider,
                     "prompt":      args.prompt,
                     "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "prompt_file": str(iter_prompt),
+                    "raw_file":    str(iter_raw),
                 }
+
+                # Save prompt to disk for inspection
+                iter_prompt.write_text(
+                    f"=== SYSTEM ===\n{system}\n\n=== USER ===\n{user}",
+                    encoding="utf-8",
+                )
+
                 try:
                     raw, usage, reasoning = generate_sample(
                         model=args.model,
@@ -314,6 +333,7 @@ def run_agent(args: argparse.Namespace) -> None:
                         api_base=api_base,
                         thinking_budget=thinking_budget,
                     )
+                    iter_raw.write_text(raw, encoding="utf-8")
                     code = extract_code(raw, ext)
                     iter_file.write_text(code, encoding="utf-8")
                     prev_code = last_code = code
@@ -330,6 +350,7 @@ def run_agent(args: argparse.Namespace) -> None:
                 except Exception as exc:
                     gen_record["generated"] = False
                     gen_record["error"] = str(exc)
+                    iter_raw.write_text(str(exc), encoding="utf-8")
                     total_errors += 1
                     tqdm.write(f"ERROR [{instance_id} iter{iteration}]: {exc}", file=sys.stderr)
                     if "rate" in str(exc).lower() or "429" in str(exc):
@@ -346,26 +367,37 @@ def run_agent(args: argparse.Namespace) -> None:
                 from lintbench.eval.metrics import TEST_PACKAGE
                 test_class_fqn  = f"{TEST_PACKAGE}.{test_class}"
 
+                iter_log_dir = inst_dir / f"iter_{iteration}_logs"
                 if build_env_script is not None:
                     last_result = run_build_env(
                         build_env_script, iter_file, test_class_fqn,
-                        tests_to_run, timeout_s=timeout_s,
+                        tests_to_run, timeout_s=timeout_s, log_dir=iter_log_dir,
                     )
+                    # Replace sparse compile_errors list with the full compile.log
+                    # so the model sees the exact symbol names, not just "cannot find symbol".
+                    _compile_log = iter_log_dir / instance_id / "compile.log"
+                    if _compile_log.exists():
+                        full_log = _compile_log.read_text(encoding="utf-8", errors="replace").strip()
+                        if full_log:
+                            last_result = dict(last_result)
+                            last_result["compile_errors"] = full_log.splitlines()
                 else:
                     last_result = run_stub(instance_id, iter_file, test_class_fqn,
                                           tests_to_run, stub_mode)
 
-                compiled     = last_result.get("compiled", False)
-                tests_passed = last_result.get("tests_passed", [])
-                tests_failed = last_result.get("tests_failed", [])
-                all_pass     = compiled and set(tests_to_run).issubset(set(tests_passed))
+                compiled       = last_result.get("compiled", False)
+                compile_errors = last_result.get("compile_errors", [])
+                tests_passed   = last_result.get("tests_passed", [])
+                tests_failed   = last_result.get("tests_failed", [])
+                all_pass       = compiled and set(tests_to_run).issubset(set(tests_passed))
 
                 gen_record.update({
-                    "compiled":     compiled,
-                    "tests_passed": tests_passed,
-                    "tests_failed": tests_failed,
-                    "all_pass":     all_pass,
-                    "failure_output": last_result.get("failure_output", "")[:500],
+                    "compiled":        compiled,
+                    "compile_errors":  compile_errors,
+                    "tests_passed":    tests_passed,
+                    "tests_failed":    tests_failed,
+                    "all_pass":        all_pass,
+                    "failure_output":  last_result.get("failure_output", ""),
                 })
                 traj_records.append(gen_record)
 
