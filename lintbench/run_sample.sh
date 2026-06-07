@@ -5,7 +5,7 @@
 #   bash run_sample.sh [--model MODEL]... [--limit N] [--out DIR] [--benchmark PATH]
 #
 # --model can be repeated to override the default model list, e.g.:
-#   bash run_sample.sh --model anthropic/claude-sonnet-4.6 --model google/gemini-2.5-flash
+#   bash run_sample.sh --model openai/gpt-4o --model google/gemini-3.5-flash
 
 set -eo pipefail
 

@@ -23,18 +23,28 @@ from typing import Optional
 # Update when models are added or repriced.
 # ---------------------------------------------------------------------------
 _PRICING: dict[str, tuple[float, float]] = {
-    # (input $/token, output $/token)
-    "anthropic/claude-sonnet-4.6":  (0.000003,   0.000015),
-    "openai/gpt-5.5":               (0.000005,   0.00003),
-    "google/gemini-3.5-flash":      (0.0000015,  0.000009),
-    # Additional models
-    "anthropic/claude-sonnet-4.5":  (0.000003,   0.000015),
-    "anthropic/claude-sonnet-4":    (0.000003,   0.000015),
-    "openai/gpt-4.1":               (0.000002,   0.000008),
-    "openai/gpt-4o":                (0.0000025,  0.00001),
-    "openai/gpt-5":                 (0.00000125, 0.00001),
-    "openai/gpt-5.1":               (0.00000125, 0.00001),
-    "openai/gpt-5.4":               (0.0000025,  0.000015),
+    # (input $/token, output $/token) — OpenRouter prices as of 2026-06
+    # Anthropic
+    "anthropic/claude-sonnet-4.6":          (0.000003,   0.000015),
+    "anthropic/claude-opus-4.5":            (0.000015,   0.000075),
+    "anthropic/claude-haiku-3.5":           (0.0000008,  0.000004),
+    # OpenAI
+    "openai/gpt-5.5":                        (0.000005,   0.00003),
+    "openai/gpt-4o":                        (0.0000025,  0.00001),
+    "openai/gpt-4o-mini":                   (0.00000015, 0.0000006),
+    "openai/o3":                            (0.00001,    0.00004),
+    "openai/o4-mini":                       (0.0000011,  0.0000044),
+    # Google
+    "google/gemini-3.5-flash":              (0.00000015, 0.0000006),
+    "google/gemini-2.5-flash":              (0.00000015, 0.0000006),
+    "google/gemini-2.5-pro":               (0.00000125, 0.00001),
+    # DeepSeek
+    "deepseek/deepseek-r1":                 (0.0000005,  0.00000215),
+    "deepseek/deepseek-chat-v3-0324":       (0.00000027, 0.0000011),
+    # Meta
+    "meta-llama/llama-3.3-70b-instruct":   (0.00000012, 0.0000003),
+    # Qwen
+    "qwen/qwen-2.5-coder-32b-instruct":    (0.00000006, 0.00000015),
 }
 
 
@@ -42,6 +52,8 @@ def compute_cost(model: str, input_tokens: int, output_tokens: int) -> float | N
     """Return estimated cost in USD, or None if model is not in the price table."""
     prices = _PRICING.get(model)
     if prices is None:
+        import sys
+        print(f"WARNING: no pricing entry for model {model!r} — cost_usd will be missing", file=sys.stderr)
         return None
     in_price, out_price = prices
     return in_price * input_tokens + out_price * output_tokens
@@ -194,7 +206,7 @@ def call_openrouter(
     Call any model via OpenRouter's OpenAI-compatible API.
 
     Requires OPENROUTER_API_KEY. Model names use provider/model syntax:
-      openai/gpt-4o, anthropic/claude-opus-4-5, google/gemini-2.5-pro,
+      openai/gpt-4o, anthropic/claude-opus-4.5, google/gemini-2.5-pro,
       meta-llama/llama-3.3-70b-instruct, mistralai/mistral-large, …
 
     thinking_budget: if set, enables extended thinking for anthropic/* models

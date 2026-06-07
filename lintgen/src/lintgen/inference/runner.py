@@ -23,6 +23,13 @@ import sys
 import time
 from pathlib import Path
 
+# Ensure repo root is on sys.path so `lintbench` is importable regardless of
+# which Python interpreter is active. runner.py is at
+# lintgen/src/lintgen/inference/runner.py → parents[4] = repo root.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from tqdm import tqdm
 
 

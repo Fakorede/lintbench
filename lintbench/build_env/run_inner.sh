@@ -225,7 +225,7 @@ for xml_file in xml_files:
         if failure is not None or error is not None:
             tests_failed.append(name)
             node = failure if failure is not None else error
-            msg = (node.text or node.get("message", ""))[:300].strip()
+            msg = (node.text or node.get("message", ""))[:800].strip()
             if msg:
                 failure_output_parts.append(f"{name}: {msg}")
         else:
