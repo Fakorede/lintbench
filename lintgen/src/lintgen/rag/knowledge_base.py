@@ -30,7 +30,46 @@ CORPUS_DIR = Path(__file__).parent / "corpus"
 
 EMBEDDING_MODEL  = "BAAI/bge-large-en-v1.5"
 DEFAULT_TOP_K    = 5
-SCORE_THRESHOLD  = 0.4
+SCORE_THRESHOLD  = 0.6
+_TIER3_CHAR_LIMIT = 1600
+
+
+def _smart_truncate(content: str, limit: int = _TIER3_CHAR_LIMIT) -> str:
+    """
+    Truncate a Tier-3 guide chunk at a logical boundary rather than a hard
+    character cut.
+
+    Priority:
+      1. No truncation needed          — return as-is.
+      2. End of a code fence           — break after the closing fence line
+                                         (Lint guide uses ~~~ fences).
+      3. End of a paragraph            — break at the last blank line.
+      4. End of a sentence             — break at the last ". " or ".\n".
+      5. Hard cut                      — fall back to the character limit.
+    """
+    if len(content) <= limit:
+        return content
+
+    window = content[:limit]
+
+    # 1. Code fence boundary (~~~~~~...kotlin or plain ~~~)
+    fence_pos = window.rfind("~~~~~~~~~~~~~~~~~~")
+    if fence_pos > limit // 2:
+        end = fence_pos + window[fence_pos:].find("\n") + 1
+        return content[:end].rstrip() + "\n... (truncated)"
+
+    # 2. Paragraph boundary
+    para_pos = window.rfind("\n\n")
+    if para_pos > limit // 2:
+        return content[:para_pos] + "\n... (truncated)"
+
+    # 3. Sentence boundary
+    sent_pos = max(window.rfind(". "), window.rfind(".\n"))
+    if sent_pos > limit // 2:
+        return content[:sent_pos + 1] + "\n... (truncated)"
+
+    # 4. Hard cut
+    return window + "\n... (truncated)"
 
 
 class LintAPIKnowledgeBase:
@@ -189,21 +228,31 @@ class LintAPIKnowledgeBase:
         self,
         instance: dict,
         k: int = DEFAULT_TOP_K,
+        include_tiers: frozenset[int] = frozenset({1, 2, 3, 4, 5}),
     ) -> str:
         """
         Return a formatted string ready for prompt injection.
 
+        include_tiers controls which retrieval tiers are rendered:
+          {1,2,4,5}       → base+apis:      interface signatures + API methods +
+                                             UAST/PSI methods + SdkConstants + imports
+          {1,2,3,4,5}     → base+apis+docs: all tiers, additionally including
+                                             guide doc excerpts (Tier 3)
+          {3}             → base+docs:      guide doc excerpts only (use k=20)
+
         Sections:
-          [Tier 1] Scanner interface methods to override
+          [Tier 1] Scanner interface methods to override (with interface declaration hint)
           [Tier 2] Available context / utility API methods + required imports
-          [Tier 3] Relevant API guide excerpts
+          [Tier 3] Relevant API guide excerpts          (omitted for base+apis)
+          [Tier 4] UAST / PSI methods
+          [Tier 5] SdkConstants
         """
         results = self.retrieve(instance, k=k)
-        tier1   = results["tier1"]
-        tier2   = results["tier2"]
-        tier3   = results["tier3"]
-        tier4   = results["tier4"]
-        tier5   = results["tier5"]
+        tier1   = results["tier1"] if 1 in include_tiers else []
+        tier2   = results["tier2"] if 2 in include_tiers else []
+        tier3   = results["tier3"] if 3 in include_tiers else []
+        tier4   = results["tier4"] if 4 in include_tiers else []
+        tier5   = results["tier5"] if 5 in include_tiers else []
 
         if not tier1 and not tier2 and not tier3 and not tier4 and not tier5:
             return ""
@@ -211,11 +260,37 @@ class LintAPIKnowledgeBase:
         lines: list[str] = ["Relevant Lint API methods:", "─" * 42]
 
         if tier1:
-            lines.append("\n// Scanner interface methods to override:")
+            # Group by interface so the declaration hint and description are
+            # shown once per interface, then its methods listed beneath.
+            seen_ifaces: dict[str, bool] = {}
             for entry in tier1:
+                iface_fqn  = entry.get("interface", "")
+                iface_name = iface_fqn.split(".")[-1]
+
+                if iface_fqn not in seen_ifaces:
+                    seen_ifaces[iface_fqn] = True
+                    lines.append(f"\n// Implement: class YourDetector : Detector(), {iface_name}")
+                    # Interface description: first two sentences
+                    iface_desc = entry.get("interface_description", "")
+                    if iface_desc:
+                        # Cap at 400 chars, breaking at a word boundary
+                        if len(iface_desc) > 400:
+                            window = iface_desc[:400]
+                            # Try sentence-like boundaries first
+                            for sep in (". ", ".) ", ".\n", "; "):
+                                cut = window.rfind(sep)
+                                if cut > 200:
+                                    iface_desc = iface_desc[:cut + len(sep)].strip()
+                                    break
+                            else:
+                                # Fall back to last word boundary
+                                cut = window.rfind(" ")
+                                iface_desc = iface_desc[:cut].strip() if cut > 0 else window
+                        lines.append(f"// {iface_desc.strip()}")
+                    lines.append(f"// Scanner interface methods to override:")
+
                 lines.append(f"  {entry.get('signature', '')}")
                 if entry.get("method_description"):
-                    # First sentence only to keep it concise
                     desc = entry["method_description"].split(".")[0] + "."
                     lines.append(f"  // {desc}")
                 lines.append("")
@@ -265,11 +340,7 @@ class LintAPIKnowledgeBase:
             lines.append("─" * 42)
             for entry in tier3:
                 lines.append(f"\n### {entry.get('title', '')} ({entry.get('file', '')})")
-                # Truncate long sections to keep the prompt manageable
-                content = entry.get("content", "")
-                if len(content) > 800:
-                    content = content[:800] + "\n... (truncated)"
-                lines.append(content)
+                lines.append(_smart_truncate(entry.get("content", "")))
 
         return "\n".join(lines)
 

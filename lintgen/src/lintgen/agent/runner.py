@@ -10,8 +10,9 @@ Pipeline (per instance, inspired by AutoChecker TDCD):
        - Compile failure  → compile_errors (up to 20 lines)
        - Test failure     → failure_output (assertion messages from the harness)
   5. Build repair prompt: original user message + last code + feedback.
-     RAG context is re-retrieved each iteration so the query can be
-     augmented with error-salient API names that surfaced in the feedback.
+     RAG context is re-retrieved each iteration with an error-augmented
+     query: unresolved symbols for compile failures; scanner interface +
+     scope constants extracted from the generated code for test failures.
   6. Generate repaired detector.
   7. Goto 2, up to --max-iter times.
 
@@ -134,26 +135,52 @@ _UNRESOLVED_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Extracts scanner interface names and Scope constants from generated code.
+# Used when the detector compiles but produces no warnings — the error signal
+# contains no symbol names, so we use what the model already tried as the query.
+_SCANNER_RE = re.compile(
+    r"implements\s+((?:[\w]+Scanner)(?:\s*,\s*[\w]+Scanner)*)"  # Java: implements BinaryResourceScanner
+    r"|:\s*Detector\(\),\s*([\w]+Scanner)"                       # Kotlin: : Detector(), SourceCodeScanner
+    r"|Scope\.([\w_]+)"                                          # Scope.BINARY_RESOURCE_FILE etc.
+)
 
-def _augment_rag_query(instance: dict, feedback: str) -> dict:
-    """
-    Return a copy of instance with api_hint_query augmented by unresolved
-    symbol names extracted from compile/test feedback.
 
-    The RAG KB uses instance['nl_spec'] (or similar) as the retrieval query.
-    Appending unresolved API names biases retrieval towards the correct
-    signatures, mimicking AutoChecker's per-sub-operation retrieval.
+def _augment_rag_query(instance: dict, feedback: str, prev_code: str = "") -> dict:
     """
-    extra_terms = set()
+    Return a copy of instance with nl_spec augmented by error-salient terms
+    so that RAG re-retrieval is biased toward relevant API entries.
+
+    Two strategies:
+      1. Compile failure: extract unresolved symbol names from the error log.
+         These name exactly what the model got wrong; retrieving their docs
+         gives the model the correct signatures on the next attempt.
+      2. Test failure (compiled but no warnings): extract the scanner interface
+         and Scope constants the model already used from prev_code. Retrieving
+         docs for those surfaces correct usage — appliesTo contracts, callback
+         lifecycle, scope registration — which is what silent failures require.
+    """
+    extra_terms: set[str] = set()
+
+    # Strategy 1: unresolved symbols from compile errors
     for m in _UNRESOLVED_RE.finditer(feedback):
         term = next(filter(None, m.groups()), None)
         if term:
             extra_terms.add(term)
+
+    # Strategy 2: scanner interface + scope from generated code (test failures)
+    if not extra_terms and prev_code:
+        for m in _SCANNER_RE.finditer(prev_code):
+            for group in m.groups():
+                if group:
+                    # Split comma-separated interface lists (Java multi-implements)
+                    for term in re.split(r"\s*,\s*", group.strip()):
+                        if term:
+                            extra_terms.add(term)
+
     if not extra_terms:
         return instance
+
     augmented = dict(instance)
-    # The KB uses nl_spec as the primary query field; append extra terms so
-    # cosine retrieval is biased toward relevant API entries.
     augmented["nl_spec"] = (
         instance.get("nl_spec", "") + " " + " ".join(sorted(extra_terms))
     )
@@ -191,8 +218,20 @@ def run_agent(args: argparse.Namespace) -> None:
             raise SystemExit(f"build_env script not found: {build_env_script}")
 
     # ── RAG knowledge base (optional) ─────────────────────────────────────────
+    _RAG_PROMPTS = {"base+apis", "base+apis+docs", "base+docs"}
+    _RAG_TIERS = {
+        "base+apis":      frozenset({1, 2, 4, 5}),
+        "base+apis+docs": frozenset({1, 2, 3, 4, 5}),
+        "base+docs":      frozenset({3}),
+    }
+    _RAG_K = {
+        "base+apis":      5,
+        "base+apis+docs": 5,
+        "base+docs":      20,
+    }
+
     kb = None
-    if args.prompt in ("api_hint_rag",) and not getattr(args, "no_rag", False):
+    if args.prompt in _RAG_PROMPTS and not getattr(args, "no_rag", False):
         try:
             from lintgen.rag import get_knowledge_base
             kb = get_knowledge_base()
@@ -224,8 +263,10 @@ def run_agent(args: argparse.Namespace) -> None:
     max_iter        = getattr(args, "max_iter", 10)
     timeout_s       = getattr(args, "timeout", 180)
     stub_mode       = getattr(args, "stub_mode", "all_fail")
-    # api_hint_rag: RAG context is injected by the agent loop; base template is zero_shot
-    lintbench_prompt = args.prompt if args.prompt != "api_hint_rag" else "zero_shot"
+    # RAG prompts use zero_shot as the base template; RAG context is injected by the loop
+    lintbench_prompt = "zero_shot" if args.prompt in _RAG_PROMPTS else args.prompt
+    rag_tiers = _RAG_TIERS.get(args.prompt, frozenset({1, 2, 3, 4, 5}))
+    rag_k     = _RAG_K.get(args.prompt, 5)
 
     # ── Output layout ─────────────────────────────────────────────────────────
     run_id   = getattr(args, "run_id", None) or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
@@ -262,13 +303,16 @@ def run_agent(args: argparse.Namespace) -> None:
                 continue
 
             # ── Build initial prompt ──────────────────────────────────────────
-            system, original_user = build_prompt(inst, lintbench_prompt)
+            system, raw_user = build_prompt(inst, lintbench_prompt)
 
-            # Inject RAG context (initial retrieval)
+            # Inject RAG context (initial retrieval).
+            # raw_user is kept without RAG so repair iterations can substitute
+            # (not stack) the error-augmented context.
             if kb is not None:
-                rag_context = kb.format_context(inst)
-                if rag_context:
-                    original_user = f"{rag_context}\n\n{original_user}"
+                rag_context = kb.format_context(inst, k=rag_k, include_tiers=rag_tiers)
+                original_user = f"{rag_context}\n\n{raw_user}" if rag_context else raw_user
+            else:
+                original_user = raw_user
 
             # ── Repair loop ───────────────────────────────────────────────────
             prev_code:  Optional[str] = None
@@ -286,13 +330,15 @@ def run_agent(args: argparse.Namespace) -> None:
                 else:
                     feedback = _extract_feedback(last_result)  # type: ignore[name-defined]
 
-                    # Re-retrieve RAG with error-augmented query if available
+                    # Re-retrieve RAG with error-augmented query if available.
+                    # Use raw_user (without any prior RAG context) as the base
+                    # so the new context replaces rather than stacks on iter_0's.
                     if kb is not None:
-                        augmented_inst = _augment_rag_query(inst, feedback)
-                        rag_context = kb.format_context(augmented_inst)
-                        aug_base = f"{rag_context}\n\n{original_user}" if rag_context else original_user
+                        augmented_inst = _augment_rag_query(inst, feedback, prev_code or "")
+                        rag_context = kb.format_context(augmented_inst, k=rag_k, include_tiers=rag_tiers)
+                        aug_base = f"{rag_context}\n\n{raw_user}" if rag_context else raw_user
                     else:
-                        aug_base = original_user
+                        aug_base = raw_user
 
                     user = _build_repair_user(
                         original_user=aug_base,

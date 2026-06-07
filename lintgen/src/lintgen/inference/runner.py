@@ -53,15 +53,26 @@ def run_generation(args: argparse.Namespace) -> None:
         instances = instances[: args.limit]
 
     # ── Load RAG knowledge base (optional) ───────────────────────────────────
+    _RAG_PROMPTS = {"base+apis", "base+apis+docs", "base+docs"}
+    _RAG_TIERS = {
+        "base+apis":      frozenset({1, 2, 4, 5}),
+        "base+apis+docs": frozenset({1, 2, 3, 4, 5}),
+        "base+docs":      frozenset({3}),
+    }
+    _RAG_K = {
+        "base+apis":      5,
+        "base+apis+docs": 5,
+        "base+docs":      20,
+    }
+
     kb = None
-    if args.prompt == "api_hint_rag" and not getattr(args, "no_rag", False):
+    if args.prompt in _RAG_PROMPTS and not getattr(args, "no_rag", False):
         try:
             from lintgen.rag import get_knowledge_base
             kb = get_knowledge_base()
             print("RAG knowledge base loaded.")
         except FileNotFoundError as e:
-            print(f"WARNING: {e}\nFalling back to static api_hint.", file=sys.stderr)
-            args.prompt = "api_hint"
+            print(f"WARNING: {e}\nFalling back without RAG.", file=sys.stderr)
 
     # ── Import lintbench inference primitives ─────────────────────────────────
     try:
@@ -92,7 +103,9 @@ def run_generation(args: argparse.Namespace) -> None:
     force      = getattr(args, "force", False)
 
     # ── Output layout ─────────────────────────────────────────────────────────
-    lintbench_prompt = args.prompt if args.prompt != "api_hint_rag" else "api_hint"
+    lintbench_prompt = "zero_shot" if args.prompt in _RAG_PROMPTS else args.prompt
+    rag_tiers = _RAG_TIERS.get(args.prompt, frozenset({1, 2, 3, 4, 5}))
+    rag_k     = _RAG_K.get(args.prompt, 5)
     run_id   = getattr(args, "run_id", None) or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     out_root = Path(args.out) / run_id / args.model / args.prompt
     out_root.mkdir(parents=True, exist_ok=True)
@@ -123,7 +136,7 @@ def run_generation(args: argparse.Namespace) -> None:
 
             # Inject RAG context
             if kb is not None:
-                rag_context = kb.format_context(inst)
+                rag_context = kb.format_context(inst, k=rag_k, include_tiers=rag_tiers)
                 if rag_context:
                     user = f"{rag_context}\n\n{user}"
 
