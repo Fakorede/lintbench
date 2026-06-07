@@ -25,7 +25,6 @@ DEFAULT_MODELS=(
 
 PROMPTS=(
     "zero_shot"
-    "api_hint"
     "skeleton"
     "few_shot_surface_matched"
 )

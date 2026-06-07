@@ -32,7 +32,7 @@ def main() -> None:
                      help="Force provider (auto-detected from model name if omitted). "
                           "Use 'openrouter' to access any model with a single OPENROUTER_API_KEY.")
     gen.add_argument("--prompt",      default="api_hint_rag",
-                     choices=["api_hint_rag", "zero_shot", "api_hint", "skeleton",
+                     choices=["api_hint_rag", "zero_shot", "skeleton",
                                "few_shot_surface_matched"])
     gen.add_argument("--out",         default="generated/")
     gen.add_argument("--run-id",      default=None,
@@ -60,10 +60,16 @@ def main() -> None:
 
     # ── build-index ───────────────────────────────────────────────────────────
     idx = sub.add_parser("build-index", help="Build / rebuild the Lint API FAISS index")
-    idx.add_argument("--docs-dir", default=None,
+    idx.add_argument("--docs-dir",     default=None,
                      help="Path to android-custom-lint-rules/docs/ for Tier 3 guide chunking "
                           "(default: auto-detected)")
-    idx.add_argument("--out-dir",  default="src/lintgen/rag/index/")
+    idx.add_argument("--intellij-dir", default=None,
+                     help="Path to intellij-community checkout for Tier 4 UAST/PSI extraction "
+                          "(default: ../intellij-community)")
+    idx.add_argument("--common-jar",   default=None,
+                     help="Path to common-31.7.0.jar for Tier 5 SdkConstants extraction "
+                          "(default: ~/.gradle/caches/.../common-31.7.0.jar)")
+    idx.add_argument("--out-dir",      default="src/lintgen/rag/index/")
 
     # ── eval ──────────────────────────────────────────────────────────────────
     ev = sub.add_parser("eval", help="Evaluate generated detectors")
