@@ -3,6 +3,7 @@ lintgen.cli — command-line entry point.
 
 Usage:
   lintgen generate --instance <id> --model <model> --prompt api_hint_rag
+  lintgen agent   --model <model> --build-env <path/to/run.sh>
   lintgen build-index
   lintgen eval --generated <dir>
 """
@@ -58,6 +59,44 @@ def main() -> None:
     gen.add_argument("--no-rag",      action="store_true",
                      help="Disable RAG retrieval (ablation baseline)")
 
+    # ── agent ─────────────────────────────────────────────────────────────────
+    ag = sub.add_parser(
+        "agent",
+        help="Iterative repair loop: generate → compile+test → repair (up to --max-iter times)",
+    )
+    ag.add_argument("--benchmark",   default="../lintbench/data/dataset.jsonl")
+    ag.add_argument("--model",       required=True,
+                    help="Model name (same syntax as 'generate')")
+    ag.add_argument("--provider",    default=None,
+                    choices=["openai", "anthropic", "google", "openrouter"])
+    ag.add_argument("--prompt",      default="api_hint_rag",
+                    choices=["api_hint_rag", "zero_shot", "skeleton",
+                             "few_shot_surface_matched"])
+    ag.add_argument("--build-env",   default=None,
+                    help="Path to build_env/run.sh. Omit to use stub mode (dry-run).")
+    ag.add_argument("--max-iter",    type=int, default=10,
+                    help="Maximum repair iterations per instance (default: 10)")
+    ag.add_argument("--out",         default="generated/")
+    ag.add_argument("--run-id",      default=None,
+                    help="Run identifier. Auto-generates a UTC timestamp if omitted.")
+    ag.add_argument("--temperature", type=float, default=0.2,
+                    help="Sampling temperature (default: 0.2 — slight stochasticity aids repair)")
+    ag.add_argument("--max-tokens",  type=int, default=32768)
+    ag.add_argument("--thinking-budget", type=int, default=None)
+    ag.add_argument("--timeout",     type=int, default=180,
+                    help="Per-iteration build timeout in seconds (default: 180)")
+    ag.add_argument("--split",       choices=["easy", "hard"], default=None)
+    ag.add_argument("--limit",       type=int, default=None)
+    ag.add_argument("--instance-id", action="append", dest="instance_ids")
+    ag.add_argument("--delay",       type=float, default=0.5)
+    ag.add_argument("--api-base",    default=None)
+    ag.add_argument("--force",       action="store_true",
+                    help="Re-run even if final.* already exists")
+    ag.add_argument("--no-rag",      action="store_true")
+    ag.add_argument("--stub-mode",   default="all_fail",
+                    choices=["all_pass", "all_fail", "compile_only", "mixed"],
+                    help="Stub behaviour when --build-env is omitted (default: all_fail)")
+
     # ── build-index ───────────────────────────────────────────────────────────
     idx = sub.add_parser("build-index", help="Build / rebuild the Lint API FAISS index")
     idx.add_argument("--docs-dir",     default=None,
@@ -82,6 +121,9 @@ def main() -> None:
     if args.command == "generate":
         from lintgen.inference.runner import run_generation
         run_generation(args)
+    elif args.command == "agent":
+        from lintgen.agent.runner import run_agent
+        run_agent(args)
     elif args.command == "build-index":
         from lintgen.rag.build_corpus import build_index
         build_index(args)
