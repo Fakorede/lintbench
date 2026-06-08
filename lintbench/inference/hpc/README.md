@@ -37,11 +37,14 @@ hf auth login             # or just set the env var
 ```sh
 cd lintbench
 sbatch inference/hpc/slurm_vllm_gemma4_26b.sh
+MAX_MODEL_LEN=16384 sbatch inference/hpc/slurm_vllm_deepseek_r1_32b.sh
+sbatch inference/hpc/slurm_vllm_llama3_70b.sh
+sbatch inference/hpc/slurm_vllm_qwen3_coder_30b.sh
 
 # Watch it start:
 squeue -u $USER
-ls inference/hpc/logs/
-tail -f inference/hpc/logs/vllm_gemma4_26b_<jobid>.log
+ls -lt inference/hpc/logs/vllm_deepseek_r1_32b_*.log | head -1
+tail -f inference/hpc/logs/vllm_deepseek_r1_32b_<jobid>.log
 # wait for: "Application startup complete"
 ```
 
@@ -49,37 +52,18 @@ tail -f inference/hpc/logs/vllm_gemma4_26b_<jobid>.log
 
 ```sh
 # run inference (from the login node qbd1):
-cd /work/mfakor1/lintbench/
-conda activate lintbench
-cd lintbench
 
-# Run all prompt variants
-# Get the node the job landed on
-NODE=$(cat inference/hpc/logs/vllm_gemma4_26b_endpoint.txt)
+sbatch inference/hpc/slurm_inference_gemma4_26b.sh
+sbatch inference/hpc/slurm_inference_deepseek_r1_32b.sh
+sbatch inference/hpc/slurm_inference_llama3_70b.sh
+sbatch inference/hpc/slurm_inference_qwen3_coder_30b.sh
 
-bash inference/hpc/run_hpc_inference.sh \
-    --model       gemma4-26b \
-    --endpoint    "$NODE" \
-    --prompt      skeleton \
-    --prompt      few_shot_surface_matched \
-    --prompt      zero_shot \
-    --samples     5 \
-    --temperature 1.0 \
-    --run-id      gemma4_pass5_hpc_v1 \
-    --out         generated/
+# see logs
+# tail live
+tail -f inference/hpc/logs/inference_deepseek_r1_32b_<jobid>.log
 
-NODE=$(cat inference/hpc/logs/vllm_deepseek_r1_32b_endpoint.txt)
-
-bash inference/hpc/run_hpc_inference.sh \
-    --model       deepseek-r1-32b \
-    --endpoint    "$NODE" \
-    --prompt      skeleton \
-    --prompt      few_shot_surface_matched \
-    --prompt      zero_shot \
-    --samples     5 \
-    --temperature 0.6 \
-    --run-id      deepseek_pass5_hpc_v1 \
-    --out         generated/
+# or find the latest
+ls -lt inference/hpc/logs/inference_deepseek_r1_32b_*.log | head -1
 
 OR
 
@@ -94,5 +78,17 @@ bash inference/hpc/run_hpc_inference.sh \
     --temperature 1.0 \
     --run-id      gemma4_26b_pass5_zero_shot \
     --out         generated/
+```
+
+## download locally
+
+```sh
+# logs
+cd /Users/researchlab/dev/research/lintbench/lintbench/inference/hpc/logs
+rsync -avz mfakor1@qbd.loni.org:/work/mfakor1/lintbench/lintbench/inference/hpc/logs/ .
+
+# inference
+cd /Users/researchlab/dev/research/lintbench/lintbench/inference/hpc/generated
+rsync -avz mfakor1@qbd.loni.org:/work/mfakor1/lintbench/lintbench/generated/ .
 ```
 
