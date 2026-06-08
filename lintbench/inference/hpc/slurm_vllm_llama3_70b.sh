@@ -16,7 +16,7 @@
 #SBATCH --partition=gpu2
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gpus-per-node=4          # 70B needs 4×A100-80GB at fp16
+#SBATCH --gpus-per-node=2          # 70B fits in 2×A100-80GB at bf16 (~140GB weights)
 #SBATCH --cpus-per-task=16
 #SBATCH --time=72:00:00
 #SBATCH --output=inference/hpc/logs/vllm_llama3_70b_%j.log
@@ -27,7 +27,7 @@ set -eo pipefail
 MODEL_ID="meta-llama/Llama-3.3-70B-Instruct"
 SERVED_MODEL_NAME="llama3-70b-instruct"
 VLLM_PORT="${VLLM_PORT:-8001}"
-TENSOR_PARALLEL="${TENSOR_PARALLEL:-4}"
+TENSOR_PARALLEL="${TENSOR_PARALLEL:-2}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 GPU_UTIL="${GPU_UTIL:-0.92}"
 

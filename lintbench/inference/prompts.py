@@ -20,6 +20,7 @@ benchmark to avoid contamination.
 """
 
 import re
+from textwrap import dedent
 
 # ---------------------------------------------------------------------------
 # Few-shot examples — excluded from the benchmark to avoid contamination
