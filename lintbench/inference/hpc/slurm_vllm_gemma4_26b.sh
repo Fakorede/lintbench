@@ -51,6 +51,11 @@ echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_gemma4_26b_endpoint.tx
 source /usr/local/packages/conda/24.3.0/etc/profile.d/conda.sh
 conda activate /work/mfakor1/.conda/envs/lintbench
 
+# Use conda env's libstdc++ instead of the system one (too old on this cluster)
+CONDA_LIB="/work/mfakor1/.conda/envs/lintbench/lib"
+export LD_PRELOAD="${CONDA_LIB}/libstdc++.so.6"
+export LD_LIBRARY_PATH="${CONDA_LIB}:${LD_LIBRARY_PATH:-}"
+
 # Load HF_TOKEN from .env if not already set
 if [[ -z "$HF_TOKEN" && -f "/work/mfakor1/lintbench/.env" ]]; then
     export $(grep -E '^HF_TOKEN=' /work/mfakor1/lintbench/.env | xargs)
