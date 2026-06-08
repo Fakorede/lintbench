@@ -45,7 +45,7 @@ OUT="generated"
 BENCHMARK="data/dataset.jsonl"
 RUN_ID=""
 TEMPERATURE=""
-MAX_TOKENS="32768"
+MAX_TOKENS="8192"
 DELAY="0.2"        # local server: no rate limits, short delay is fine
 SAMPLES=""
 
