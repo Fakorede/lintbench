@@ -68,16 +68,13 @@ if [[ -z "$HF_TOKEN" ]]; then
 fi
 
 python -m vllm.entrypoints.openai.api_server \
-    --model                 "$MODEL_ID" \
-    --served-model-name     "$SERVED_MODEL_NAME" \
-    --port                  "$VLLM_PORT" \
-    --tensor-parallel-size  "$TENSOR_PARALLEL" \
-    --max-model-len         "$MAX_MODEL_LEN" \
+    --model                  "$MODEL_ID" \
+    --served-model-name      "$SERVED_MODEL_NAME" \
+    --port                   "$VLLM_PORT" \
+    --tensor-parallel-size   "$TENSOR_PARALLEL" \
+    --max-model-len          "$MAX_MODEL_LEN" \
     --gpu-memory-utilization "$GPU_UTIL" \
     --trust-remote-code \
-    --enable-reasoning \
-    --reasoning-parser      deepseek_r1 \
-    --disable-log-requests
-# Gemma 4 supports configurable thinking modes.
-# --enable-reasoning strips <think>...</think> from the text output and
-# exposes it as reasoning_content in the response (vLLM >= 0.8.5).
+    --reasoning-parser       gemma4
+# --reasoning-parser gemma4 strips <|think|>...</|think|> blocks from text
+# output and exposes them as reasoning_content in the response.
