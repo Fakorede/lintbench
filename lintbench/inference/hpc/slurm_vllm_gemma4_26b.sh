@@ -21,11 +21,10 @@
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-node=1          # 1×A100-80GB fits the full weight matrix
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=100G
-#SBATCH --time=04:00:00
+#SBATCH --time=12:00:00
 #SBATCH --output=logs/vllm_gemma4_26b_%j.log
 #SBATCH --error=logs/vllm_gemma4_26b_%j.log
-#SBATCH --partition=gpu
+#SBATCH --partition=gpu2
 
 set -eo pipefail
 
