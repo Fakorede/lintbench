@@ -29,7 +29,7 @@
 
 set -eo pipefail
 
-MODEL_ID="google/gemma-4-26b-it"
+MODEL_ID="google/gemma-4-26B-A4B-it"
 SERVED_MODEL_NAME="gemma4-26b"
 VLLM_PORT="${VLLM_PORT:-8003}"
 TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
