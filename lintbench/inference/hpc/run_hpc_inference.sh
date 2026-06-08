@@ -47,6 +47,7 @@ RUN_ID=""
 TEMPERATURE=""
 MAX_TOKENS="32768"
 DELAY="0.2"        # local server: no rate limits, short delay is fine
+SAMPLES=""
 
 PROMPTS=(
     "zero_shot"
@@ -73,6 +74,7 @@ while [[ $# -gt 0 ]]; do
         --benchmark)    BENCHMARK="$2";        shift 2 ;;
         --run-id)       RUN_ID="$2";           shift 2 ;;
         --temperature)  TEMPERATURE="$2";      shift 2 ;;
+        --samples)      SAMPLES="$2";          shift 2 ;;
         --max-tokens)   MAX_TOKENS="$2";       shift 2 ;;
         --delay)        DELAY="$2";            shift 2 ;;
         --instance-id)  INSTANCE_IDS+=("$2");  shift 2 ;;
@@ -135,6 +137,9 @@ LIMIT_ARGS=()
 TEMP_ARGS=()
 [[ -n "$TEMPERATURE" ]] && TEMP_ARGS=(--temperature "$TEMPERATURE")
 
+SAMPLES_ARGS=()
+[[ -n "$SAMPLES" ]] && SAMPLES_ARGS=(--samples "$SAMPLES")
+
 INSTANCE_ARGS=()
 for iid in "${INSTANCE_IDS[@]+"${INSTANCE_IDS[@]}"}"; do
     INSTANCE_ARGS+=(--instance-id "$iid")
@@ -167,6 +172,7 @@ for PROMPT in "${PROMPTS[@]}"; do
         --delay       "$DELAY" \
         "${LIMIT_ARGS[@]}" \
         "${TEMP_ARGS[@]}" \
+        "${SAMPLES_ARGS[@]}" \
         "${INSTANCE_ARGS[@]}"
 done
 
