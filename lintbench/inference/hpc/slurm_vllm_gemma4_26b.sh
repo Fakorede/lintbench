@@ -47,6 +47,7 @@ echo "GPUs     : $TENSOR_PARALLEL"
 echo "========================================"
 
 echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_gemma4_26b_endpoint.txt
+echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_gemma4_26b_${SLURM_JOB_ID}_endpoint.txt
 
 module load cuda/12.2.1
 
