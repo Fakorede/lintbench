@@ -251,12 +251,6 @@ def call_openrouter(
 
     msg = resp.choices[0].message
     text = msg.content or ""
-    if not text:
-        finish = resp.choices[0].finish_reason
-        raise RuntimeError(
-            f"Empty response from {model} (finish_reason={finish!r}). "
-            "Try increasing --max-tokens."
-        )
 
     # Reasoning/thinking content — try direct attribute first, then model_extra
     msg_extra = getattr(msg, "model_extra", None) or {}
@@ -267,6 +261,18 @@ def call_openrouter(
         or msg_extra.get("thinking")
         or None
     )
+
+    # Fallback: some models (e.g. Qwen3 via vLLM --reasoning-parser qwen3) put all
+    # output inside the think block and return empty content. Use reasoning as text.
+    if not text and reasoning:
+        text = reasoning
+
+    if not text:
+        finish = resp.choices[0].finish_reason
+        raise RuntimeError(
+            f"Empty response from {model} (finish_reason={finish!r}). "
+            "Try increasing --max-tokens."
+        )
 
     usage: dict = {
         "input_tokens":  resp.usage.prompt_tokens,
