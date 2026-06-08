@@ -17,6 +17,8 @@
 #   1×A100-80GB is sufficient; use 2 if memory is tight or for throughput.
 
 #SBATCH --job-name=vllm-gemma4-26b
+#SBATCH --account=loni_codelm2026
+#SBATCH --partition=gpu2
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus-per-node=1          # 1×A100-80GB fits the full weight matrix
@@ -24,7 +26,6 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=logs/vllm_gemma4_26b_%j.log
 #SBATCH --error=logs/vllm_gemma4_26b_%j.log
-#SBATCH --partition=gpu2
 
 set -eo pipefail
 
