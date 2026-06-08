@@ -57,12 +57,12 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 HPC_MODELS: dict[str, dict] = {
-    "qwen3-coder-30b": {
-        "hf_id":        "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "qwen25-32b": {
+        "hf_id":        "Qwen/Qwen2.5-32B-Instruct",
         "default_port":  8000,
         "gpus":          2,
-        "slurm_script":  "slurm_vllm_qwen3_coder_30b.sh",
-        "reasoning":     True,
+        "slurm_script":  "slurm_vllm_qwen25_32b.sh",
+        "reasoning":     False,
     },
     "llama3-70b-instruct": {
         "hf_id":        "meta-llama/Llama-3.3-70B-Instruct",
@@ -158,21 +158,14 @@ def call_vllm(
     msg  = resp.choices[0].message
     text = msg.content or ""
 
-    # vLLM reasoning parsers (qwen3, deepseek_r1, gemma4) return reasoning_content
+    # vLLM reasoning parsers (deepseek_r1, gemma4) return reasoning_content
     # as a non-standard field; the openai SDK surfaces it via model_extra.
     msg_extra = getattr(msg, "model_extra", None) or {}
     reasoning: str | None = (
         getattr(msg, "reasoning_content", None)
         or msg_extra.get("reasoning_content")
-        or msg_extra.get("reasoning")   # vLLM 0.22.1 qwen3 parser uses "reasoning"
         or None
     )
-
-    # Fallback: if content is empty but reasoning is non-empty, the model put
-    # everything inside <think> and returned nothing outside (known Qwen3 behaviour).
-    # Extract code from the reasoning block instead.
-    if not text.strip() and reasoning:
-        text = reasoning
 
     usage = {
         "input_tokens":  resp.usage.prompt_tokens,

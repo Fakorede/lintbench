@@ -262,11 +262,6 @@ def call_openrouter(
         or None
     )
 
-    # Fallback: some models (e.g. Qwen3 via vLLM --reasoning-parser qwen3) put all
-    # output inside the think block and return empty content. Use reasoning as text.
-    if not text and reasoning:
-        text = reasoning
-
     if not text:
         finish = resp.choices[0].finish_reason
         raise RuntimeError(

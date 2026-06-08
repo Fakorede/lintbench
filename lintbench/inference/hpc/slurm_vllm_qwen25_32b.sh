@@ -1,31 +1,31 @@
 #!/usr/bin/env bash
-# slurm_vllm_qwen3_coder_30b.sh
-# SLURM job: launch a vLLM OpenAI-compatible server for Qwen3-Coder-30B
+# slurm_vllm_qwen25_32b.sh
+# SLURM job: launch a vLLM OpenAI-compatible server for Qwen2.5-32B-Instruct
 #
 # Submit with:
-#   sbatch slurm_vllm_qwen3_coder_30b.sh
+#   sbatch slurm_vllm_qwen25_32b.sh
 #
 # Once READY:
 #   bash hpc/run_hpc_inference.sh \
-#     --model  qwen3-coder-30b \
+#     --model  qwen25-32b \
 #     --port   8000 \
 #     --prompt zero_shot
 
-#SBATCH --job-name=vllm-qwen3-coder-30b
+#SBATCH --job-name=vllm-qwen25-32b
 #SBATCH --account=loni_codelm2026
 #SBATCH --partition=gpu2
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gpus-per-node=2          # Qwen3-Coder-30B fits in 2×A100-80GB (fp16)
+#SBATCH --gpus-per-node=2          # Qwen2.5-32B fits in 2×A100-80GB (fp16)
 #SBATCH --cpus-per-task=16
 #SBATCH --time=72:00:00
-#SBATCH --output=inference/hpc/logs/vllm_qwen3_coder_30b_%j.log
-#SBATCH --error=inference/hpc/logs/vllm_qwen3_coder_30b_%j.log
+#SBATCH --output=inference/hpc/logs/vllm_qwen25_32b_%j.log
+#SBATCH --error=inference/hpc/logs/vllm_qwen25_32b_%j.log
 
 set -eo pipefail
 
-MODEL_ID="Qwen/Qwen3-Coder-30B-A3B-Instruct"
-SERVED_MODEL_NAME="qwen3-coder-30b"
+MODEL_ID="Qwen/Qwen2.5-32B-Instruct"
+SERVED_MODEL_NAME="qwen25-32b"
 VLLM_PORT="${VLLM_PORT:-8000}"
 TENSOR_PARALLEL="${TENSOR_PARALLEL:-2}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
@@ -41,8 +41,8 @@ echo "Port     : $VLLM_PORT"
 echo "GPUs     : $TENSOR_PARALLEL"
 echo "========================================"
 
-echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_qwen3_coder_30b_endpoint.txt
-echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_qwen3_coder_30b_${SLURM_JOB_ID}_endpoint.txt
+echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_qwen25_32b_endpoint.txt
+echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_qwen25_32b_${SLURM_JOB_ID}_endpoint.txt
 
 module load cuda/12.2.1
 
@@ -71,7 +71,5 @@ python -m vllm.entrypoints.openai.api_server \
     --tensor-parallel-size   "$TENSOR_PARALLEL" \
     --max-model-len          "$MAX_MODEL_LEN" \
     --gpu-memory-utilization "$GPU_UTIL" \
-    --trust-remote-code \
-    --reasoning-parser       qwen3
-# --reasoning-parser qwen3 strips <think>...</think> blocks from text output
-# and exposes them as reasoning_content in the response.
+    --trust-remote-code
+# Qwen2.5-32B-Instruct is a standard instruct model — no --reasoning-parser needed.
