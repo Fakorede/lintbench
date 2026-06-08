@@ -24,8 +24,8 @@
 #SBATCH --gpus-per-node=1          # 1×A100-80GB fits the full weight matrix
 #SBATCH --cpus-per-task=16
 #SBATCH --time=12:00:00
-#SBATCH --output=logs/vllm_gemma4_26b_%j.log
-#SBATCH --error=logs/vllm_gemma4_26b_%j.log
+#SBATCH --output=inference/hpc/logs/vllm_gemma4_26b_%j.log
+#SBATCH --error=inference/hpc/logs/vllm_gemma4_26b_%j.log
 
 set -eo pipefail
 
@@ -36,7 +36,7 @@ TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 GPU_UTIL="${GPU_UTIL:-0.92}"
 
-mkdir -p logs
+mkdir -p inference/hpc/logs
 
 echo "========================================"
 echo "Job ID   : $SLURM_JOB_ID"
@@ -46,13 +46,19 @@ echo "Port     : $VLLM_PORT"
 echo "GPUs     : $TENSOR_PARALLEL"
 echo "========================================"
 
-echo "$(hostname):${VLLM_PORT}" > logs/vllm_gemma4_26b_endpoint.txt
+echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_gemma4_26b_endpoint.txt
 
-# conda activate lintbench
+conda activate /work/mfakor1/.conda/envs/lintbench
+
+# Load HF_TOKEN from .env if not already set
+if [[ -z "$HF_TOKEN" && -f "/work/mfakor1/lintbench/.env" ]]; then
+    export $(grep -E '^HF_TOKEN=' /work/mfakor1/lintbench/.env | xargs)
+fi
 
 # Gemma 4 is a gated model — ensure HF_TOKEN is set
 if [[ -z "$HF_TOKEN" ]]; then
-    echo "WARNING: HF_TOKEN not set. Gemma 4 is a gated model; download may fail." >&2
+    echo "ERROR: HF_TOKEN not set. Gemma 4 is a gated model; download will fail." >&2
+    exit 1
 fi
 
 python -m vllm.entrypoints.openai.api_server \
