@@ -48,6 +48,8 @@ echo "========================================"
 
 echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_gemma4_26b_endpoint.txt
 
+module load cuda/12.2.1
+
 source /usr/local/packages/conda/24.3.0/etc/profile.d/conda.sh
 conda activate /work/mfakor1/.conda/envs/lintbench
 
@@ -55,6 +57,11 @@ conda activate /work/mfakor1/.conda/envs/lintbench
 CONDA_LIB="/work/mfakor1/.conda/envs/lintbench/lib"
 export LD_PRELOAD="${CONDA_LIB}/libstdc++.so.6"
 export LD_LIBRARY_PATH="${CONDA_LIB}:${LD_LIBRARY_PATH:-}"
+
+# Set CUDA_HOME for FlashInfer JIT compilation (module load sets CUDA_HOME automatically)
+export CUDA_HOME="${CUDA_HOME:-/usr/local/packages/cuda/12.2.1}"
+echo "CUDA_HOME : $CUDA_HOME"
+echo "nvcc      : $(which nvcc)"
 
 # Load HF_TOKEN from .env if not already set
 if [[ -z "$HF_TOKEN" && -f "/work/mfakor1/lintbench/.env" ]]; then
