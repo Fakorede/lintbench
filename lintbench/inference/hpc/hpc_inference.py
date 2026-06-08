@@ -58,14 +58,14 @@ except ImportError:
 
 HPC_MODELS: dict[str, dict] = {
     "qwen3-coder-30b": {
-        "hf_id":        "Qwen/Qwen3-Coder-30B-A3B",
+        "hf_id":        "Qwen/Qwen3-Coder-30B-A3B-Instruct",
         "default_port":  8000,
         "gpus":          2,
         "slurm_script":  "slurm_vllm_qwen3_coder_30b.sh",
         "reasoning":     True,
     },
     "llama3-70b-instruct": {
-        "hf_id":        "meta-llama/Meta-Llama-3-70B-Instruct",
+        "hf_id":        "meta-llama/Llama-3.3-70B-Instruct",
         "default_port":  8001,
         "gpus":          4,
         "slurm_script":  "slurm_vllm_llama3_70b.sh",
