@@ -48,6 +48,7 @@ echo "========================================"
 
 echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_gemma4_26b_endpoint.txt
 
+source /usr/local/packages/conda/24.3.0/etc/profile.d/conda.sh
 conda activate /work/mfakor1/.conda/envs/lintbench
 
 # Load HF_TOKEN from .env if not already set
