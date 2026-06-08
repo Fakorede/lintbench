@@ -49,23 +49,36 @@ tail -f inference/hpc/logs/vllm_gemma4_26b_<jobid>.log
 
 ```sh
 # run inference (from the login node qbd1):
-tmux new -s inference
 cd /work/mfakor1/lintbench/
 conda activate lintbench
 cd lintbench
 
+# Run all prompt variants
 # Get the node the job landed on
 NODE=$(cat inference/hpc/logs/vllm_gemma4_26b_endpoint.txt)
 
-# Run all prompt variants
 bash inference/hpc/run_hpc_inference.sh \
-    --model    gemma4-26b \
-    --endpoint "$NODE" \
-    --prompt   zero_shot \
-    --prompt   skeleton \
-    --prompt   few_shot_surface_matched \
-    --samples  5 \
+    --model       gemma4-26b \
+    --endpoint    "$NODE" \
+    --prompt      skeleton \
+    --prompt      few_shot_surface_matched \
+    --prompt      zero_shot \
+    --samples     5 \
     --temperature 1.0 \
+    --run-id      gemma4_pass5_hpc_v1 \
+    --out         generated/
+
+NODE=$(cat inference/hpc/logs/vllm_deepseek_r1_32b_endpoint.txt)
+
+bash inference/hpc/run_hpc_inference.sh \
+    --model       deepseek-r1-32b \
+    --endpoint    "$NODE" \
+    --prompt      skeleton \
+    --prompt      few_shot_surface_matched \
+    --prompt      zero_shot \
+    --samples     5 \
+    --temperature 0.6 \
+    --run-id      deepseek_pass5_hpc_v1 \
     --out         generated/
 
 OR

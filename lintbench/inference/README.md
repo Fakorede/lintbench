@@ -52,8 +52,10 @@ python run_inference.py \
     --out             generated/ \
     --max-tokens      32768 \
     --thinking-budget 10000 \
-    --instance-id     "RestrictionsDetector:ValidRestrictions" \
-    --run-id run_001
+    --temperature 0.6 \
+    # --instance-id     "RestrictionsDetector:ValidRestrictions" \
+    --run-id run_001 \
+    --samples 5
 ```
 
 
@@ -107,13 +109,13 @@ You need to run eval first — compile_repair_1 reads the eval results JSON to f
 **Step 2 — run eval:**
 ```bash
 python run_eval.py \
-    --generated generated/run_001/anthropic/claude-sonnet-4.6/few_shot_surface_matched_cot/ \
+    --generated generated/run_001/anthropic/claude-sonnet-4.6/few_shot_surface_matched/ \
     --model     anthropic/claude-sonnet-4.6 \
-    --prompt    few_shot_surface_matched_cot \
-    --out       results/claude-sonnet-4.6_few_shot_surface_matched_cot.json \
+    --prompt    few_shot_surface_matched \
+    --out       results/claude-sonnet-4.6_few_shot_surface_matched_k5.json \
     --build-env build_env/run.sh \
     --benchmark data/dataset.jsonl \
-    --samples   1
+    --samples   5
 
 OR
 
