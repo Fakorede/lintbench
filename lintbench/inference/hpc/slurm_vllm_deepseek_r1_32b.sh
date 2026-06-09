@@ -71,7 +71,8 @@ python -m vllm.entrypoints.openai.api_server \
     --tensor-parallel-size   "$TENSOR_PARALLEL" \
     --max-model-len          "$MAX_MODEL_LEN" \
     --gpu-memory-utilization "$GPU_UTIL" \
-    --trust-remote-code \
-    --reasoning-parser       deepseek_r1
-# --reasoning-parser deepseek_r1 strips <think>...</think> blocks from text
-# output and exposes them as reasoning_content in the response.
+    --trust-remote-code
+# --reasoning-parser deepseek_r1 removed — causes silent worker crashes after
+# ~40-60 requests due to a memory leak triggered by the HF chat template update
+# that prepends <think>\n, breaking the parser. The <think> block will appear
+# in content and extract_code() handles it via fenced block extraction.
