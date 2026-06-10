@@ -37,8 +37,8 @@ hf auth login             # or just set the env var
 ```sh
 cd lintbench
 sbatch inference/hpc/slurm_vllm_gemma4_26b.sh
-MAX_MODEL_LEN=16384 sbatch inference/hpc/slurm_vllm_deepseek_r1_32b.sh
-sbatch inference/hpc/slurm_vllm_llama3_70b.sh
+sbatch inference/hpc/slurm_vllm_deepseek_r1_32b.sh
+sbatch inference/hpc/slurm_vllm_llama3.1_8b.sh
 sbatch inference/hpc/slurm_vllm_qwen3_coder_30b.sh
 
 # Watch it start:
@@ -55,8 +55,8 @@ tail -f inference/hpc/logs/vllm_deepseek_r1_32b_<jobid>.log
 
 sbatch inference/hpc/slurm_inference_gemma4_26b.sh
 sbatch inference/hpc/slurm_inference_deepseek_r1_32b.sh
-sbatch inference/hpc/slurm_inference_llama3_70b.sh
-sbatch inference/hpc/slurm_inference_qwen3_coder_30b.sh
+sbatch inference/hpc/slurm_inference_llama3.1_8b.sh
+sbatch inference/hpc/slurm_inference_qwen25_32b.sh
 
 # see logs
 # tail live
