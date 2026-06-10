@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
-# slurm_vllm_llama3_70b.sh
-# SLURM job: launch a vLLM OpenAI-compatible server for LLaMA 3-70B-Instruct
+# slurm_vllm_llama3.1_8b.sh
+# SLURM job: launch a vLLM OpenAI-compatible server for LLaMA-3.1-8B-Instruct
 #
 # Submit with:
-#   sbatch slurm_vllm_llama3_70b.sh
+#   sbatch slurm_vllm_llama3.1_8b.sh
 #
 # Once READY:
 #   bash hpc/run_hpc_inference.sh \
-#     --model  llama3-70b-instruct \
+#     --model  llama3.1-8b-instruct \
 #     --port   8001 \
 #     --prompt zero_shot
 
-#SBATCH --job-name=vllm-llama3-70b
+#SBATCH --job-name=vllm-llama3.1-8b
 #SBATCH --account=loni_codelm2026
 #SBATCH --partition=gpu2
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gpus-per-node=2          # 70B fits in 2×A100-80GB at bf16 (~140GB weights)
+#SBATCH --gpus-per-node=1          # 8B fits comfortably on 1×A100-80GB
 #SBATCH --cpus-per-task=16
 #SBATCH --time=72:00:00
-#SBATCH --output=inference/hpc/logs/vllm_llama3_70b_%j.log
-#SBATCH --error=inference/hpc/logs/vllm_llama3_70b_%j.log
+#SBATCH --output=inference/hpc/logs/vllm_llama3.1_8b_%j.log
+#SBATCH --error=inference/hpc/logs/vllm_llama3.1_8b_%j.log
 
 set -eo pipefail
 
-MODEL_ID="meta-llama/Llama-3.3-70B-Instruct"
-SERVED_MODEL_NAME="llama3-70b-instruct"
+MODEL_ID="meta-llama/Llama-3.1-8B-Instruct"
+SERVED_MODEL_NAME="llama3.1-8b-instruct"
 VLLM_PORT="${VLLM_PORT:-8001}"
-TENSOR_PARALLEL="${TENSOR_PARALLEL:-2}"
+TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 GPU_UTIL="${GPU_UTIL:-0.92}"
 
@@ -41,8 +41,8 @@ echo "Port     : $VLLM_PORT"
 echo "GPUs     : $TENSOR_PARALLEL"
 echo "========================================"
 
-echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_llama3_70b_endpoint.txt
-echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_llama3_70b_${SLURM_JOB_ID}_endpoint.txt
+echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_llama3.1_8b_endpoint.txt
+echo "$(hostname):${VLLM_PORT}" > inference/hpc/logs/vllm_llama3.1_8b_${SLURM_JOB_ID}_endpoint.txt
 
 module load cuda/12.2.1
 
@@ -64,9 +64,9 @@ if [[ -z "$HF_TOKEN" && -f "/work/mfakor1/lintbench/.env" ]]; then
     export $(grep -E '^HF_TOKEN=' /work/mfakor1/lintbench/.env | xargs)
 fi
 
-# LLaMA 3 is a gated model — ensure HF_TOKEN is set
+# LLaMA 3.1 is a gated model — ensure HF_TOKEN is set
 if [[ -z "$HF_TOKEN" ]]; then
-    echo "ERROR: HF_TOKEN not set. LLaMA 3 is a gated model; download will fail." >&2
+    echo "ERROR: HF_TOKEN not set. LLaMA 3.1 is a gated model; download will fail." >&2
     exit 1
 fi
 
@@ -78,4 +78,4 @@ python -m vllm.entrypoints.openai.api_server \
     --max-model-len          "$MAX_MODEL_LEN" \
     --gpu-memory-utilization "$GPU_UTIL" \
     --trust-remote-code
-# LLaMA 3 is a non-reasoning model — no --reasoning-parser needed.
+# LLaMA 3.1-8B is a standard instruct model — no --reasoning-parser needed.

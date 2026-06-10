@@ -13,10 +13,10 @@
 
 #SBATCH --job-name=vllm-deepseek-r1-32b
 #SBATCH --account=loni_codelm2026
-#SBATCH --partition=gpu2
+#SBATCH --partition=gpu4
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gpus-per-node=2          # 32B fits in 2×A100-80GB at fp16
+#SBATCH --gpus-per-node=4          # 32B on 4×A100-80GB for max KV cache headroom
 #SBATCH --cpus-per-task=16
 #SBATCH --time=72:00:00
 #SBATCH --output=inference/hpc/logs/vllm_deepseek_r1_32b_%j.log
@@ -27,7 +27,7 @@ set -eo pipefail
 MODEL_ID="deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
 SERVED_MODEL_NAME="deepseek-r1-32b"
 VLLM_PORT="${VLLM_PORT:-8002}"
-TENSOR_PARALLEL="${TENSOR_PARALLEL:-2}"
+TENSOR_PARALLEL="${TENSOR_PARALLEL:-4}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 GPU_UTIL="${GPU_UTIL:-0.92}"
 
@@ -71,8 +71,5 @@ python -m vllm.entrypoints.openai.api_server \
     --tensor-parallel-size   "$TENSOR_PARALLEL" \
     --max-model-len          "$MAX_MODEL_LEN" \
     --gpu-memory-utilization "$GPU_UTIL" \
-    --trust-remote-code
-# --reasoning-parser deepseek_r1 removed — causes silent worker crashes after
-# ~40-60 requests due to a memory leak triggered by the HF chat template update
-# that prepends <think>\n, breaking the parser. The <think> block will appear
-# in content and extract_code() handles it via fenced block extraction.
+    --trust-remote-code \
+    --reasoning-parser       deepseek_r1

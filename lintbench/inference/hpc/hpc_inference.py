@@ -6,10 +6,10 @@ Wraps the lintbench.inference pipeline so you can call it from Python
 or a Jupyter notebook without subprocess indirection.
 
 Supported models (--served-model-name in vLLM):
-  qwen3-coder-30b        Qwen/Qwen3-Coder-30B-A3B             (reasoning)
-  llama3-70b-instruct    meta-llama/Meta-Llama-3-70B-Instruct  (instruct)
-  deepseek-r1-32b        deepseek-ai/DeepSeek-R1-Distill-Qwen-32B (reasoning)
-  gemma4-26b             google/gemma-4-26b-it                 (reasoning)
+  qwen25-32b             Qwen/Qwen2.5-32B-Instruct                 (instruct)
+  llama3.1-8b-instruct   meta-llama/Llama-3.1-8B-Instruct          (instruct)
+  deepseek-r1-32b        deepseek-ai/DeepSeek-R1-Distill-Qwen-32B  (reasoning)
+  gemma4-26b             google/gemma-4-26B-A4B-it                 (reasoning)
 
 Usage (CLI)
 -----------
@@ -64,26 +64,26 @@ HPC_MODELS: dict[str, dict] = {
         "slurm_script":  "slurm_vllm_qwen25_32b.sh",
         "reasoning":     False,
     },
-    "llama3-70b-instruct": {
-        "hf_id":        "meta-llama/Llama-3.3-70B-Instruct",
+    "llama3.1-8b-instruct": {
+        "hf_id":        "meta-llama/Llama-3.1-8B-Instruct",
         "default_port":  8001,
-        "gpus":          4,
-        "slurm_script":  "slurm_vllm_llama3_70b.sh",
+        "gpus":          1,
+        "slurm_script":  "slurm_vllm_llama3.1_8b.sh",
         "reasoning":     False,
     },
     "deepseek-r1-32b": {
         "hf_id":        "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B",
         "default_port":  8002,
-        "gpus":          2,
+        "gpus":          4,
         "slurm_script":  "slurm_vllm_deepseek_r1_32b.sh",
         "reasoning":     True,
     },
     "gemma4-26b": {
-        "hf_id":        "google/gemma-4-26b-it",
+        "hf_id":        "google/gemma-4-26B-A4B-it",
         "default_port":  8003,
         "gpus":          1,
         "slurm_script":  "slurm_vllm_gemma4_26b.sh",
-        "reasoning":     True,   # Gemma 4 supports configurable thinking modes
+        "reasoning":     True,
     },
 }
 
