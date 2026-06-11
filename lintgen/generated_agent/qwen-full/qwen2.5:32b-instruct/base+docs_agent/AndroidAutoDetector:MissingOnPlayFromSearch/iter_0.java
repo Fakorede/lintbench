@@ -1,0 +1,79 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.SdkConstants;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+
+import org.jetbrains.uast.UClass;
+import org.jetbrains.uast.UElement;
+import org.jetbrains.uast.UMethod;
+
+import java.util.Collections;
+import java.util.List;
+
+public class AndroidAutoDetector extends Detector implements Detector.UastScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "MissingOnPlayFromSearch",
+            "To support voice searches on Android Auto, you need to override and implement `onPlayFromSearch(String query, Bundle bundle)`.",
+            "Supporting voice search in your app requires implementing the `onPlayFromSearch` method. This is necessary for compatibility with Android Auto.",
+            Category.CORRECTNESS,
+            5,
+            Severity.WARNING,
+            new Implementation(
+                    AndroidAutoDetector.class,
+                    Scope.JAVA_FILE_SCOPE
+            )
+    );
+
+    @Nullable
+    @Override
+    public List<String> getApplicableMethodNames() {
+        return Collections.singletonList("onPlayFromSearch");
+    }
+
+    @Override
+    public void visitMethod(@NonNull JavaContext context, @NonNull UElement element, @NonNull String methodName) {
+        if (methodName.equals("onPlayFromSearch")) {
+            // Check the method signature to ensure it matches onPlayFromSearch(String query, Bundle extras)
+            UMethod method = (UMethod) element;
+            List<UClass> classes = context.getUastRoots();
+            for (UClass aClass : classes) {
+                if (aClass != null && isMediaBrowserService(aClass)) {
+                    boolean foundOnPlayFromSearch = false;
+                    for (UMethod m : aClass.getMethods()) {
+                        if ("onPlayFromSearch".equals(m.getName())) {
+                            List<UElement> parameters = m.getParameterList().getParameters();
+                            if (parameters.size() == 2 &&
+                                    "java.lang.String".equals(parameters.get(0).getType().getPresentableText()) &&
+                                    "android.os.Bundle".equals(parameters.get(1).getType().getPresentableText())) {
+                                foundOnPlayFromSearch = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!foundOnPlayFromSearch) {
+                        Location location = context.getLocation(aClass);
+                        context.report(ISSUE, element, location,
+                                "Missing implementation of onPlayFromSearch(String query, Bundle extras)");
+                    }
+                }
+            }
+        }
+    }
+
+    private boolean isMediaBrowserService(UClass uClass) {
+        String qualifiedName = uClass.getQualifiedName();
+        return qualifiedName != null && qualifiedName.endsWith("MediaBrowserService");
+    }
+}

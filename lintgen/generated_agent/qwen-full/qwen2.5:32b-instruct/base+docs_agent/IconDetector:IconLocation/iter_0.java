@@ -1,0 +1,109 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.resources.Density;
+import com.android.resources.ResourceFolderType;
+import com.android.utils.Pair;
+import com.android.utils.XmlUtils;
+import com.android.utils.XmlUtils.TagHandler;
+import com.android.utils.XmlUtils.ElementState;
+import com.android.utils.ILogger;
+import com.android.utils.PositionXmlParser;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Node;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+
+import javax.xml.parsers.SAXParserFactory;
+
+public class IconDetector extends ResourceXmlScanner {
+    private static final String DRAWABLE_FOLDER = "drawable";
+    private static final String NODPI_FOLDER = "nodpi";
+
+    @NonNull
+    public static final Issue ISSUE =
+            Issue.create(
+                    "DensityIndependentDrawable",
+                    "Image defined in density-independent drawable folder",
+                    "The res/drawable folder is intended for density-independent graphics such as shapes defined in XML. For bitmaps, move it to `drawable-mdpi` and consider providing higher and lower resolution versions in `drawable-ldpi`, `drawable-hdpi` and `drawable-xhdpi`. If the icon **really** is density independent (for example a solid color) you can place it in `drawable-nodpi`.",
+                    Category.CORRECTNESS,
+                    5,
+                    Severity.WARNING,
+                    new Implementation(
+                            IconDetector.class,
+                            Scope.RESOURCE_FILE_SCOPE));
+
+    @Override
+    public List<String> getApplicableDirectORIES() {
+        return List.of(DRAWABLE_FOLDER);
+    }
+
+    @Override
+    public boolean appliesToFolder(@NonNull ResourceFolderType folder) {
+        return folder == ResourceFolderType.DRAWABLE;
+    }
+
+    @Override
+    public void visitResource(
+            @NonNull Context context,
+            @NonNull String resourcePath,
+            @NonNull PositionXmlParser xml) {
+        File file = new File(resourcePath);
+        if (file.getName().endsWith(".xml")) {
+            return; // Skip XML files, they are usually density-independent.
+        }
+
+        List<Pair<Integer, Integer>> bitmapTags = findBitmapTags(xml);
+
+        for (Pair<Integer, Integer> tag : bitmapTags) {
+            int startLine = tag.getFirst();
+            int endLine = tag.getSecond();
+
+            context.report(
+                    ISSUE,
+                    context.getLocation(startLine, endLine),
+                    "Image defined in density-independent drawable folder. Move it to `drawable-mdpi` and consider providing higher and lower resolution versions in `drawable-ldpi`, `drawable-hdpi` and `drawable-xhdpi`. If the icon **really** is density independent (for example a solid color) you can place it in `drawable-nodpi`.");
+        }
+    }
+
+    private List<Pair<Integer, Integer>> findBitmapTags(PositionXmlParser xml) {
+        List<Pair<Integer, Integer>> bitmapTags = new ArrayList<>();
+        SAXParserFactory.newInstance().newSAXParser();
+        try (PositionXmlParser parser = xml) {
+            TagHandler handler =
+                    new TagHandler() {
+                        @Override
+                        public ElementState start(
+                                Attr attr,
+                                int startLine,
+                                int startColumn,
+                                int endLine,
+                                int endColumn) {
+                            if ("bitmap".equals(attr.getName())) {
+                                bitmapTags.add(new Pair<>(startLine, endLine));
+                            }
+                            return ElementState.Continue;
+                        }
+
+                        @Override
+                        public void end(
+                                String name,
+                                Node node,
+                                int startLine,
+                                int startColumn,
+                                int endLine,
+                                int endColumn) {}
+                    };
+            XmlUtils.parse(xml.getInputStream(), handler);
+        } catch (Exception e) {
+            ILogger logger = context.getReporter().getLogger();
+            if (logger != null) {
+                logger.error("Error parsing XML: " + e.getMessage());
+            }
+        }
+        return bitmapTags;
+    }
+}

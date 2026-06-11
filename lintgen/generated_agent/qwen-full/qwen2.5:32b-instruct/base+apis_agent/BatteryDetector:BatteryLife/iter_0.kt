@@ -1,0 +1,81 @@
+package com.android.tools.lint.checks
+
+import com.android.resources.ResourceFolderType
+import com.android.resources.ResourceType
+import com.android.tools.lint.client.api.UElementHandler
+import com.android.tools.lint.detector.api.AnnotationInfo
+import com.android.tools.lint.detector.api.AnnotationUsageInfo
+import com.android.tools.lint.detector.api.AnnotationUsageType
+import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.JavaContext
+import com.android.tools.lint.detector.api.XmlContext
+import com.intellij.psi.PsiMethod
+import org.jetbrains.uast.UCallExpression
+import org.jetbrains.uast.UElement
+import org.w3c.dom.Attr
+import org.w3c.dom.Element
+
+class BatteryDetector : Detector(), SourceCodeScanner, XmlScanner {
+
+    override fun getApplicableMethodNames(): List<String>? {
+        return listOf(
+            "startService",
+            "bindService",
+            "registerReceiver"
+        )
+    }
+
+    override fun visitMethodCall(context: JavaContext, node: UCallExpression, method: PsiMethod) {
+        val methodName = method.name
+        when (methodName) {
+            "startService", "bindService" -> context.report(
+                ISSUE_BATTERY,
+                node,
+                context.getLocation(node),
+                "Using $methodName can negatively affect battery life. Consider using WorkManager instead."
+            )
+            "registerReceiver" -> context.report(
+                ISSUE_BATTERY,
+                node,
+                context.getLocation(node),
+                "Using registerReceiver can negatively affect battery life. Consider using WorkManager for background tasks."
+            )
+        }
+    }
+
+    override fun getApplicableElements(): Collection<String>? {
+        return listOf("service")
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        if (element.tagName == "service") {
+            val name = element.getAttribute("android:name")
+            context.report(
+                ISSUE_BATTERY,
+                element,
+                context.getLocation(element),
+                "Using <service> can negatively affect battery life. Consider using WorkManager for background tasks."
+            )
+        }
+    }
+
+    companion object {
+        private val ISSUE_BATTERY = Issue.create(
+            id = "BatteryLifeIssues",
+            briefDescription = "Battery Life Issues",
+            explanation = """
+                This issue flags code that either negatively affects battery life, or uses APIs that have recently changed behavior to prevent background tasks from consuming memory and battery excessively. Generally, you should be using WorkManager instead.
+                
+                For more details on how to update your code, please see https://developer.android.com/topic/performance/background-optimization
+            """,
+            category = Category.PERFORMANCE,
+            priority = 6,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                BatteryDetector::class.java,
+                Scope.JAVA_FILE_SCOPE or Scope.RESOURCE_FILE_SCOPE
+            )
+        )
+    }
+}

@@ -1,0 +1,63 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.*
+import org.jetbrains.uast.*
+
+class LogDetector : Detector(), SourceCodeScanner {
+
+    companion object {
+        private const val ISSUE_ID = "UnconditionalLogging"
+        private const val ISSUE_NAME = "Unconditional Logging Calls"
+        private const val ISSUE_EXPLANATION =
+            "Unconditional logging calls can be removed in release mode by wrapping them with a check for `BuildConfig.DEBUG`."
+        private const val ISSUE_URL = "https://developer.android.com/studio/write/lint.html#unconditionallogging"
+
+        val ISSUE: Issue = Issue.create(
+            id = ISSUE_ID,
+            briefDescription = ISSUE_NAME,
+            explanation = ISSUE_EXPLANATION,
+            category = Category.PERFORMANCE,
+            priority = 5,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                LogDetector::class.java,
+                Scope.JAVA_FILE_SCOPE
+            )
+        )
+    }
+
+    override fun getApplicableMethodNames(): List<String>? {
+        return listOf("d", "v", "i", "w", "e")
+    }
+
+    override fun visitMethodCall(context: JavaContext, node: UCallExpression, method: PsiMethod) {
+        if (method.containingClass?.qualifiedName == "android.util.Log") {
+            val parent = node.uastParent
+            if (parent is UIfExpression && !isConditionalOnDebug(parent.condition)) {
+                context.report(
+                    ISSUE,
+                    node,
+                    context.getLocation(node),
+                    "Unconditional logging call. Wrap with `if (BuildConfig.DEBUG)` to remove in release mode."
+                )
+            }
+        }
+    }
+
+    private fun isConditionalOnDebug(expression: UExpression?): Boolean {
+        if (expression is UBinaryExpression) {
+            val left = expression.leftOperand
+            val right = expression.rightOperand
+
+            if ((left as? UQualifiedReferenceExpression)?.selectorName == "DEBUG" &&
+                (right as? UBooleanLiteralExpression)?.value == true ||
+                (right as? UQualifiedReferenceExpression)?.selectorName == "DEBUG" &&
+                (left as? UBooleanLiteralExpression)?.value == true
+            ) {
+                return true
+            }
+        }
+
+        return false
+    }
+}

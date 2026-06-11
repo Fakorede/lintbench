@@ -1,0 +1,102 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.resources.Density;
+import com.android.resources.ResourceFolderType;
+import com.android.utils.Pair;
+import com.intellij.psi.PsiDirectory;
+import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiFile;
+
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
+
+import java.util.HashMap;
+import java.util.Map;
+
+public class IconDetector extends ResourceXmlScanner {
+
+    private static final Map<Density, Integer> LAUNCHER_ICON_SIZES = new HashMap<>();
+    static {
+        LAUNCHER_ICON_SIZES.put(Density.MDPI, 48);
+        LAUNCHER_ICON_SIZES.put(Density.HDPI, 72);
+        LAUNCHER_ICON_SIZES.put(Density.XHDPI, 96);
+        LAUNCHER_ICON_SIZES.put(Density.XXHDPI, 144);
+        LAUNCHER_ICON_SIZES.put(Density.XXXHDPI, 192);
+    }
+
+    public static final Issue ISSUE = Issue.create(
+            "IncorrectLauncherIconSize",
+            "The launcher icon has an incorrect size for the specified density.",
+            "Launcher icons should follow predefined sizes to fit in with the overall look of the platform. " +
+                    "Using incorrect sizes can lead to distorted or pixelated icons on different devices.",
+            Category.USABILITY,
+            5, // Priority
+            Severity.WARNING,
+            new Implementation(
+                    IconDetector.class,
+                    Scope.RESOURCE_FILE_SCOPE
+            )
+    );
+
+    @Override
+    public void visitResource(@NonNull ResourceFolderType folderType, @NonNull PsiDirectory resDirectory,
+                              @NonNull String resourcePath, @NonNull PsiFile file) {
+        if (folderType == ResourceFolderType.DRAWABLE && isLauncherIcon(resourcePath)) {
+            checkIconSize(file);
+        }
+    }
+
+    private boolean isLauncherIcon(@NonNull String resourcePath) {
+        return resourcePath.contains("ic_launcher");
+    }
+
+    private void checkIconSize(@NonNull PsiFile file) {
+        Document document = getDocument(file);
+        if (document == null) {
+            return;
+        }
+
+        NodeList nodes = document.getElementsByTagName("bitmap");
+        for (int i = 0; i < nodes.getLength(); i++) {
+            Element element = (Element) nodes.item(i);
+
+            String densityAttr = element.getAttribute("srcDensity");
+            Density density = Density.parse(densityAttr);
+            if (density == null) {
+                continue;
+            }
+
+            int width = Integer.parseInt(element.getAttribute("width"));
+            int height = Integer.parseInt(element.getAttribute("height"));
+
+            if (!LAUNCHER_ICON_SIZES.getOrDefault(density, -1).equals(width)
+                    || !LAUNCHER_ICON_SIZES.getOrDefault(density, -1).equals(height)) {
+                reportIssue(file, element);
+            }
+        }
+    }
+
+    private void reportIssue(@NonNull PsiFile file, @NonNull Element element) {
+        String message = "Launcher icon has incorrect size for density: "
+                + Density.parse(element.getAttribute("srcDensity")).toString();
+        final int startOffset = getStartOffset(element);
+        final int endOffset = getEndOffset(element);
+
+        if (startOffset >= 0 && endOffset > startOffset) {
+            report(ISSUE, file, message,
+                    scope.getCreator().create(file, startOffset, endOffset));
+        }
+    }
+
+    private int getStartOffset(@NonNull Element element) {
+        PsiElement psiElement = getElement(element);
+        return psiElement != null ? psiElement.getTextRange().getStartOffset() : -1;
+    }
+
+    private int getEndOffset(@NonNull Element element) {
+        PsiElement psiElement = getElement(element);
+        return psiElement != null ? psiElement.getTextRange().getEndOffset() : -1;
+    }
+}

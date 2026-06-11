@@ -1,0 +1,54 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.resources.ResourceType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+
+import java.util.Collections;
+import java.util.List;
+
+public class IconDetector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "IconSize",
+            "Launcher icons should follow predefined sizes for each density.",
+            "Launcher icons have predefined sizes for different densities. Ensure your icons match these sizes to fit in with the overall look of the platform.",
+            Category.USABILITY,
+            5, // Priority
+            Severity.WARNING,
+            new Implementation(IconDetector.class, Collections.emptyList())
+    );
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return ResourceType.DRAWABLE == ResourceType.valueOf(folderType.name());
+    }
+
+    @Override
+    public List<String> getApplicableElements() {
+        return Collections.singletonList("item");
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        Attr formatAttr = element.getAttributeNode("format");
+        if (formatAttr != null && "vector".equals(formatAttr.getValue())) {
+            reportIssue(context, element);
+        }
+    }
+
+    private void reportIssue(XmlContext context, Element element) {
+        context.report(
+                ISSUE,
+                context.getLocation(element),
+                "Launcher icons should follow predefined sizes for each density."
+        );
+    }
+}

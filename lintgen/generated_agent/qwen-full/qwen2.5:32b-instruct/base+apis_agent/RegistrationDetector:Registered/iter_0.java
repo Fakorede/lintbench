@@ -1,0 +1,112 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.client.api.UElementHandler;
+import com.android.tools.lint.detector.api.AnnotationInfo;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.intellij.psi.PsiClass;
+import org.jetbrains.uast.UClass;
+
+import java.util.Collections;
+import java.util.List;
+
+public class RegistrationDetector extends Detector implements SourceCodeScanner, XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "UnregisteredComponents",
+            "Activities, services and content providers should be registered in the `AndroidManifest.xml` file using `<activity>`, `<service>` and `<provider>` tags.",
+            "If your activity is simply a parent class intended to be subclassed by other \"real\" activities, make it an abstract class.",
+            Category.CORRECTNESS,
+            5,
+            Severity.ERROR,
+            new Implementation(
+                    RegistrationDetector.class,
+                    true));
+
+    @Override
+    public List<String> getApplicableMethodNames() {
+        return Collections.emptyList();
+    }
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return ResourceFolderType.MANIFEST == folderType;
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        // No-op for now.
+    }
+
+    @Override
+    public void visitDocument(XmlContext context, Document document) {
+        // Collect all registered components in the manifest file.
+        List<String> registeredComponents = collectRegisteredComponents(context);
+        context.getScope().getPsiClasses()
+                .forEach(psiClass -> checkComponentRegistration(context, psiClass, registeredComponents));
+    }
+
+    private void checkComponentRegistration(XmlContext context, PsiClass psiClass, List<String> registeredComponents) {
+        if (psiClass.isAbstract()) return;
+
+        String className = psiClass.getQualifiedName();
+        boolean isActivity = psiClass.isInheritor("android.app.Activity", true);
+        boolean isService = psiClass.isInheritor("android.app.Service", true);
+        boolean isProvider = psiClass.isInheritor("android.content.ContentProvider", true);
+
+        if (isActivity || isService || isProvider) {
+            if (!registeredComponents.contains(className)) {
+                context.report(ISSUE, context.getLocation(psiClass), "Component class `" + className + "` should be registered in the AndroidManifest.xml");
+            }
+        }
+    }
+
+    private List<String> collectRegisteredComponents(XmlContext context) {
+        // Collect all components from manifest file.
+        return context.getXmlDocument().getElementsByTagNames("activity", "service", "provider")
+                .stream()
+                .map(element -> element.getAttributeValue("android:name"))
+                .filter(name -> name != null && !name.isEmpty())
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public UElementHandler createUastHandler(JavaContext context) {
+        return new UElementHandler() {
+            @Override
+            public void visitClass(UClass node) {
+                JavaContext javaContext = (JavaContext) context;
+                PsiClass psiClass = node.getJavaPsi();
+                if (psiClass != null && !psiClass.isAbstract()) {
+                    String className = psiClass.getQualifiedName();
+                    boolean isActivity = psiClass.isInheritor("android.app.Activity", true);
+                    boolean isService = psiClass.isInheritor("android.app.Service", true);
+                    boolean isProvider = psiClass.isInheritor("android.content.ContentProvider", true);
+
+                    if (isActivity || isService || isProvider) {
+                        javaContext.getScope().getManifest()
+                                .ifPresent(manifest -> {
+                                    List<String> registeredComponents = collectRegisteredComponents(javaContext, manifest);
+                                    if (!registeredComponents.contains(className)) {
+                                        context.report(ISSUE, node, "Component class `" + className + "` should be registered in the AndroidManifest.xml");
+                                    }
+                                });
+                    }
+                }
+            }
+        };
+    }
+
+    private List<String> collectRegisteredComponents(JavaContext context, Document manifest) {
+        // Collect all components from manifest file.
+        return context.getXmlDocument(manifest).getElementsByTagNames("activity", "service", "provider")
+                .stream()
+                .map(element -> element.getAttributeValue("android:name"))
+                .filter(name -> name != null && !name.isEmpty())
+                .collect(Collectors.toList());
+    }
+}

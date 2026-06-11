@@ -1,0 +1,70 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.*
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.*
+import org.w3c.dom.Attr
+import org.w3c.dom.Element
+
+class ForegroundServicePermissionDetector : Detector(), XmlScanner {
+
+    companion object {
+        private val FOREGROUND_SERVICE_TYPES = listOf("FOREGROUND_SERVICE_TYPE_LOCATION", "FOREGROUND_SERVICE_TYPE_MICROPHONE")
+        private val PERMISSIONS_MAP = mapOf(
+            "FOREGROUND_SERVICE_TYPE_LOCATION" to "android.permission.FOREGROUND_SERVICE_LOCATION",
+            "FOREGROUND_SERVICE_TYPE_MICROPHONE" to "android.permission.FOREGROUND_SERVICE_MICROPHONE"
+        )
+
+        private val ISSUE_MISSING_PERMISSION = Issue.create(
+            id = "MissingForegroundServicePermissions",
+            briefDescription = "Missing permissions required by foregroundServiceType",
+            explanation = """
+                For targetSdkVersion >= 34, each `foregroundServiceType` listed in the `<service>` element requires specific sets of permissions to be declared in the manifest. If permissions are missing, then when the foreground service is started with a `foregroundServiceType` that has missing permissions, a `SecurityException` will be thrown.
+            """,
+            category = Category.SECURITY,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                ForegroundServicePermissionDetector::class.java,
+                Scope.MANIFEST_SCOPE
+            )
+        )
+    }
+
+    override fun getApplicableElements(): Collection<String>? {
+        return listOf(TAG_SERVICE)
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val targetSdkVersion = context.getManifest().getTargetSdkVersion()
+        if (targetSdkVersion >= 34 && element.tagName == TAG_SERVICE) {
+            val foregroundServiceTypesAttr = element.getAttributeNS(null, "foregroundServiceType")
+            if (!foregroundServiceTypesAttr.isNullOrEmpty()) {
+                val declaredPermissions = context.getManifest().usesPermissions.orEmpty()
+                val requiredPermissions = mutableListOf<String>()
+
+                for (serviceType in FOREGROUND_SERVICE_TYPES) {
+                    if (foregroundServiceTypesAttr.contains(serviceType)) {
+                        val permission = PERMISSIONS_MAP[serviceType]
+                        if (!declaredPermissions.any { it.name == permission }) {
+                            requiredPermissions.add(permission!!)
+                        }
+                    }
+                }
+
+                if (requiredPermissions.isNotEmpty()) {
+                    context.report(
+                        ISSUE_MISSING_PERMISSION,
+                        element,
+                        context.getLocation(element),
+                        "Missing permissions for foregroundServiceTypes: ${requiredPermissions.joinToString(", ")}"
+                    )
+                }
+            }
+        }
+    }
+
+    override fun appliesTo(folderType: ResourceFolderType): Boolean {
+        return folderType == ResourceFolderType.MANIFEST
+    }
+}

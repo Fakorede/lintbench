@@ -1,0 +1,72 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+
+import java.util.HashMap;
+import java.util.Map;
+
+public class DuplicateIdDetector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "DuplicateIds",
+            "Duplicate ids within a single layout",
+            "Within a layout, id's should be unique since otherwise `findViewById()` can return an unexpected view.",
+            Category.CORRECTNESS,
+            6,
+            Severity.ERROR,
+            new Implementation(DuplicateIdDetector.class, true)
+    );
+
+    private Map<String, Element> idMap;
+
+    @Override
+    public void beforeCheck(String filename, ResourceFolderType folderType) {
+        if (folderType == ResourceFolderType.LAYOUT) {
+            idMap = new HashMap<>();
+        }
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return null;
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        Attr idAttr = element.getAttributeNode("android:id");
+        if (idAttr != null && idMap.containsKey(idAttr.getValue())) {
+            context.report(ISSUE, element, context.getLocation(element),
+                    "Duplicate ID: " + idAttr.getValue());
+        } else if (idAttr != null) {
+            idMap.put(idAttr.getValue(), element);
+        }
+    }
+
+    @Override
+    public void visitElementAfter(XmlContext context, Element element) {}
+
+    @Override
+    public Collection<String> getApplicableAttributes() {
+        return null;
+    }
+
+    @Override
+    public void visitAttribute(XmlContext context, Attr attribute) {}
+
+    @Override
+    public void visitDocument(XmlContext context, Document document) {}
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.LAYOUT;
+    }
+}

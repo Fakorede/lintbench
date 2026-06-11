@@ -1,0 +1,80 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.XmlContext;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
+
+public class ObsoleteLayoutParamsDetector extends Detector implements XmlScanner {
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Collections.emptyList();
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        // Check for layout parameters that are not applicable to the current view type.
+        List<Attr> attributes = getAttributes(element);
+        for (Attr attribute : attributes) {
+            String attributeName = attribute.getName();
+            if (!isValidLayoutParamsForView(context, element, attributeName)) {
+                context.report(
+                        this,
+                        element,
+                        context.getLocation(attribute),
+                        "The layout parameter '" + attributeName + "' is not defined for the given view and has no effect."
+                );
+            }
+        }
+    }
+
+    @Override
+    public void visitElementAfter(XmlContext context, Element element) {}
+
+    @Override
+    public Collection<String> getApplicableAttributes() {
+        return Collections.emptyList();
+    }
+
+    @Override
+    public void visitAttribute(XmlContext context, Attr attribute) {}
+
+    @Override
+    public void visitDocument(XmlContext context, Document document) {}
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return ResourceFolderType.LAYOUT.equals(folderType);
+    }
+
+    private List<Attr> getAttributes(Element element) {
+        // Retrieve all attributes from the given element.
+        return Collections.list(element.getAttributes());
+    }
+
+    private boolean isValidLayoutParamsForView(XmlContext context, Element element, String attributeName) {
+        // Check if the attribute is valid for the view type.
+        // This method should be implemented based on the specific rules of layout parameters for different views.
+        Set<String> validParams = getValidLayoutParams(element.getTagName());
+        return validParams.contains(attributeName);
+    }
+
+    private Set<String> getValidLayoutParams(String viewType) {
+        // Return a set of valid layout params for the given view type.
+        // This method should be implemented based on the specific rules of layout parameters for different views.
+        switch (viewType.toLowerCase()) {
+            case "linearlayout":
+                return Collections.singleton("android:orientation");
+            case "relativelayout":
+                return Collections.emptySet();
+            default:
+                return Collections.emptySet();
+        }
+    }
+}

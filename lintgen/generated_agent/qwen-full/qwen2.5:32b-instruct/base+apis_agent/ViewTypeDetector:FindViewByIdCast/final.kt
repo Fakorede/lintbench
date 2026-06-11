@@ -1,0 +1,65 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.*
+import org.jetbrains.uast.*
+
+class ViewTypeDetector : Detector(), SourceCodeScanner {
+
+    companion object Issues {
+        val ADD_EXPLICIT_CAST = Issue.create(
+            "AddExplicitCast",
+            "In Android O, the `findViewById` signature switched to using generics. This change may cause code to not compile without explicit casts.",
+            "Due to language changes between Java 7 and 8, this lint check looks for scenarios where an explicit cast is needed to ensure the code will continue to compile if the language level is updated to 1.8.",
+            Category.CORRECTNESS,
+            5,
+            Severity.WARNING,
+            Implementation(ViewTypeDetector::class.java, Scope.JAVA_FILE_SCOPE)
+        )
+    }
+
+    override fun getApplicableMethodNames(): List<String>? {
+        return listOf("findViewById")
+    }
+
+    override fun visitMethodCall(context: JavaContext, node: UCallExpression, method: PsiMethod) {
+        val argument = node.valueArguments.firstOrNull()
+        if (argument is ULiteralExpression && argument.isStringLiteral()) {
+            val returnType = method.returnType ?: return
+
+            // Check if the assignment target is a specific view type.
+            val parent = node.uastParent as? UVariable ?: return
+            val targetType = parent.type
+
+            if (!targetType.equals(returnType, true)) {
+                context.report(
+                    ADD_EXPLICIT_CAST,
+                    node,
+                    context.getLocation(node),
+                    "Add explicit cast to ${targetType.canonicalText}",
+                    Fix.create()
+                        .name("Add explicit cast")
+                        .replace()
+                        .text("${node.sourcePsi?.text}")
+                        .with("((${targetType.canonicalText})${node.sourcePsi?.text})")
+                        .autoFix()
+                        .build()
+                )
+            }
+        }
+    }
+
+    override fun getApplicableUastTypes(): List<Class<out UElement>>? {
+        return listOf(UCallExpression::class.java)
+    }
+
+    override fun createUastHandler(context: JavaContext): UElementHandler? {
+        return object : UElementHandler() {
+            override fun visitCallExpression(node: UCallExpression) {
+                val method = node.resolve() as? PsiMethod ?: return
+                if (method.name == "findViewById") {
+                    visitMethodCall(context, node, method)
+                }
+            }
+        }
+    }
+}

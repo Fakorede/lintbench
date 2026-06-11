@@ -1,0 +1,90 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.*
+import org.jetbrains.uast.*
+
+class DateFormatDetector : Detector(), SourceCodeScanner {
+
+    companion object {
+        private const val ISSUE_ID = "ImpliedLocaleInDateFormat"
+        private val BRIEF_MESSAGE = "Use `getDateInstance()`, `getDateTimeInstance()` or `getTimeInstance()` for locale-specific date formats."
+        private val EXPLANATION =
+            """
+            Almost all callers should use `getDateInstance()`, `getDateTimeInstance()` or `getTimeInstance()` to get a ready-made instance of SimpleDateFormat suitable for the user's locale. If you need to format/parse a specific machine-readable format, explicitly pass in an explicit locale such as Locale.US.
+            """.trimIndent()
+        private val ISSUE = Issue.create(
+            id = ISSUE_ID,
+            briefDescription = BRIEF_MESSAGE,
+            explanation = EXPLANATION,
+            category = Category.I18N,
+            priority = 6,
+            severity = Severity.WARNING,
+            implementation = Implementation(DateFormatDetector::class.java, Scope.JAVA_FILE_SCOPE)
+        )
+    }
+
+    override fun getApplicableConstructorTypes(): List<String>? {
+        return listOf("java.text.SimpleDateFormat")
+    }
+
+    override fun visitConstructor(context: JavaContext, node: UCallExpression, constructor: PsiMethod) {
+        val arguments = node.valueArguments
+        if (arguments.size == 1 || (arguments.size > 2 && arguments[1].getJavaPsi().text != "Locale.US")) {
+            context.report(
+                ISSUE,
+                node,
+                context.getLocation(node),
+                BRIEF_MESSAGE
+            )
+        }
+    }
+
+    override fun getApplicableMethodNames(): List<String>? {
+        return listOf("getDateInstance", "getDateTimeInstance", "getTimeInstance")
+    }
+
+    override fun visitMethodCall(context: JavaContext, node: UCallExpression, method: PsiMethod) {
+        val className = method.containingClass?.qualifiedName
+        if (className == "java.text.SimpleDateFormat") {
+            context.report(
+                ISSUE,
+                node,
+                context.getLocation(node),
+                BRIEF_MESSAGE
+            )
+        }
+    }
+
+    override fun getApplicableUastTypes(): List<Class<out UElement>>? {
+        return listOf(UCallExpression::class.java)
+    }
+
+    override fun createUastHandler(context: JavaContext): UElementHandler? {
+        return object : UElementHandler() {
+            override fun visitCallExpression(node: UCallExpression) {
+                val method = node.resolve()
+                if (method != null && getApplicableMethodNames()?.contains(method.name) == true) {
+                    context.report(
+                        ISSUE,
+                        node,
+                        context.getLocation(node),
+                        BRIEF_MESSAGE
+                    )
+                }
+            }
+
+            override fun visitConstructor(node: UCallExpression) {
+                val constructor = node.resolve()
+                if (constructor != null && getApplicableConstructorTypes()?.contains(constructor.containingClass?.qualifiedName ?: "") == true) {
+                    context.report(
+                        ISSUE,
+                        node,
+                        context.getLocation(node),
+                        BRIEF_MESSAGE
+                    )
+                }
+            }
+        }
+    }
+
+}

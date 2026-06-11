@@ -1,0 +1,87 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.LayoutDetector;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+
+import java.util.Collections;
+import java.util.List;
+
+public class RtlDetector extends LayoutDetector {
+
+    public static final Issue ISSUE = Issue.create(
+            "UseOfLeftRight",
+            "Using left/right instead of start/end attributes can lead to problems when a layout is rendered in locales where text flows from right to left.",
+            "Use `Gravity#START` and `Gravity#END` instead. Similarly, in XML `gravity` and `layout_gravity` attributes, use `start` rather than `left`. For XML attributes such as `paddingLeft` and `layout_marginLeft`, use `paddingStart` and `layout_marginStart`. If your `minSdkVersion` is less than 17, you should add both the older left/right attributes as well as the new start/end attributes.",
+            Category.I18N,
+            6,
+            Severity.WARNING,
+            new Implementation(RtlDetector.class, Scope.RESOURCE_FILE_SCOPE)
+    );
+
+    @NonNull
+    @Override
+    public List<String> getApplicableAttributes() {
+        return Collections.singletonList("*");
+    }
+
+    @Nullable
+    @Override
+    public String[] getApplicableElements() {
+        return new String[]{"*"};
+    }
+
+    @Override
+    public void visitAttribute(@NonNull XmlContext context, @NonNull Element element,
+                               @NonNull Attr attribute) {
+
+        final String name = attribute.getName();
+        if (name.equals("gravity") || name.equals("layout_gravity")) {
+            checkGravity(context, attribute);
+        } else if (name.endsWith("Left") || name.endsWith("Right")) {
+            checkPaddingAndMargin(context, element, attribute);
+        }
+    }
+
+    private void checkGravity(@NonNull XmlContext context, @NonNull Attr attribute) {
+        final String value = attribute.getValue();
+        if ("left".equals(value)) {
+            reportIssue(context, attribute, "Use `start` instead of `left` for gravity.");
+        } else if ("right".equals(value)) {
+            reportIssue(context, attribute, "Use `end` instead of `right` for gravity.");
+        }
+    }
+
+    private void checkPaddingAndMargin(@NonNull XmlContext context,
+                                       @NonNull Element element,
+                                       @NonNull Attr attribute) {
+
+        final String name = attribute.getName();
+        if (name.endsWith("Left")) {
+            reportIssue(context, attribute, "Use `" + name.replace("Left", "Start") +
+                    "` instead of `" + name + "`.");
+        } else if (name.endsWith("Right")) {
+            reportIssue(context, attribute, "Use `" + name.replace("Right", "End") +
+                    "` instead of `" + name + "`.");
+        }
+    }
+
+    private void reportIssue(@NonNull XmlContext context,
+                             @NonNull Attr attribute,
+                             @NonNull String message) {
+
+        Location location = context.getLocation(attribute);
+        context.report(ISSUE, location, message);
+    }
+}

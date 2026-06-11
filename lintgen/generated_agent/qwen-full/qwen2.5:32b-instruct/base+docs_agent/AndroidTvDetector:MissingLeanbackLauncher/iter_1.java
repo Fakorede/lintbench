@@ -1,0 +1,76 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.resources.ScreenType;
+import com.android.utils.XmlUtils;
+import com.android.utils.flattenToPathString;
+import com.android.utils.PathUtils;
+import com.android.utils.Pair;
+import com.android.utils.ILogger;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+
+import java.util.Collections;
+import java.util.List;
+
+public class AndroidTvDetector extends Detector implements Detector.XmlScanner {
+    private static final String CATEGORY_LEANBACK_LAUNCHER = "android.intent.category.LEANBACK_LAUNCHER";
+    private static final String TAG_ACTIVITY = "activity";
+    private static final String TAG_INTENT_FILTER = "intent-filter";
+    private static final String TAG_ACTION = "action";
+    private static final String ATTR_NAME = "name";
+
+    @NonNull
+    @Override
+    public List<String> getApplicableElements() {
+        return Collections.singletonList(TAG_ACTIVITY);
+    }
+
+    @Nullable
+    @Override
+    public Issue getIssue() {
+        return ISSUE;
+    }
+
+    @Nullable
+    @Override
+    public List<String> visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        if (element.getNodeName().equals(TAG_ACTIVITY)) {
+            List<Element> intentFilters = XmlUtils.getChildrenByTagName(element, TAG_INTENT_FILTER);
+            boolean hasLauncherCategory = false;
+
+            for (Element intentFilter : intentFilters) {
+                List<Element> actions = XmlUtils.getChildrenByTagName(intentFilter, "action");
+
+                for (Element action : actions) {
+                    Attr nameAttr = action.getAttributeNode("android:name");
+                    if (nameAttr != null && nameAttr.getValue().equals(CATEGORY_LEANBACK_LAUNCHER)) {
+                        hasLauncherCategory = true;
+                        break;
+                    }
+                }
+
+                if (hasLauncherCategory) {
+                    break;
+                }
+            }
+
+            if (!hasLauncherCategory) {
+                context.report(ISSUE, element, context.getLocation(element),
+                        "Activity is missing android.intent.category.LEANBACK_LAUNCHER intent filter");
+            }
+        }
+        return null;
+    }
+
+    public static final Issue ISSUE = Issue.create(
+            "MissingLeanbackLauncherIntentFilter",
+            "An application intended to run on TV devices must declare a launcher activity for TV in its manifest using an `android.intent.category.LEANBACK_LAUNCHER` intent filter.",
+            "TV applications should have at least one activity with the `android.intent.category.LEANBACK_LAUNCHER` category in order to be properly launched on TV devices.",
+            Category.CORRECTNESS,
+            5, Severity.ERROR,
+            new Implementation(AndroidTvDetector.class, Scope.MANIFEST_SCOPE));
+}

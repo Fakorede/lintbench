@@ -1,0 +1,92 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.*
+import com.android.annotations.VisibleForTesting
+import com.android.resources.ScreenOrientation
+import com.android.utils.parseScreenOrientation
+import com.android.utils.getAttributeValue
+import com.android.utils.resolveAttribute
+import com.android.utils.toDensity
+import com.android.tools.lint.detector.api.*
+import org.w3c.dom.Element
+
+class TranslucentViewDetector : Detector(), SourceCodeScanner {
+    companion object Issues {
+        val ISSUE = Issue.create(
+            id = "TranslucentWithFixedOrientation",
+            briefDescription = "Mixing screenOrientation and translucency",
+            explanation = """
+                Specifying a fixed screen orientation with a translucent theme isn't supported on apps with `targetSdkVersion` O or greater since there can be another activity visible behind your activity with a conflicting request.
+                
+                For example, your activity requests landscape and the visible activity behind your translucent activity requests portrait. In this case the system can only honor one of the requests and currently prefers to honor the request from non-translucent activities since there is nothing visible behind them.
+
+                Devices running platform version O or greater will throw an exception in your app if this state is detected.
+            """,
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                TranslucentViewDetector::class.java,
+                Scope.RESOURCE_FILE_SCOPE
+            )
+        )
+    }
+
+    override fun getApplicableAttributes(): Collection<String> {
+        return listOf(ATTR_NAME)
+    }
+
+    override fun visitResource(context: XmlContext, element: Element) {
+        val appNode = context.getApplicationNode(element) ?: return
+
+        val targetSdkVersion = appNode.getTargetSdkVersion()
+        if (targetSdkVersion < android.os.Build.VERSION_CODES.O) {
+            return
+        }
+
+        val activities = appNode.activities
+        for ((_, activityElement) in activities) {
+            val orientationAttrValue = getScreenOrientation(activityElement)
+            if (orientationAttrValue != null && !isPortraitOrUnspecified(orientationAttrValue)) {
+                val themeResId = getThemeResourceId(context, activityElement)
+                if (themeResId != 0 && isTranslucentTheme(context, themeResId)) {
+                    context.report(
+                        ISSUE,
+                        element,
+                        context.getLocation(activityElement),
+                        "Mixing screenOrientation and translucent theme isn't supported on apps with targetSdkVersion O or greater"
+                    )
+                }
+            }
+        }
+    }
+
+    @VisibleForTesting
+    fun getScreenOrientation(element: Element): String? {
+        return getAttributeValue(element, SCREEN_ORIENTATION_ATTR)
+    }
+
+    private fun isPortraitOrUnspecified(orientationAttrValue: String): Boolean {
+        val orientation = parseScreenOrientation(orientationAttrValue)
+        return orientation == ScreenOrientation.PORTRAIT || orientation == ScreenOrientation.UNSPECIFIED
+    }
+
+    @VisibleForTesting
+    fun getThemeResourceId(context: XmlContext, element: Element): Int {
+        val themeAttribute = THEME_ATTR
+        val themeResId = context.getAttrResourceValue(element, themeAttribute)
+        return themeResId ?: 0
+    }
+
+    private fun isTranslucentTheme(context: XmlContext, themeResId: Int): Boolean {
+        val themeNode = context.getResource(themeResId) ?: return false
+
+        for (item in themeNode.items) {
+            if (item.name == android.R.attr.windowIsTranslucent.toString()) {
+                return item.value.getBooleanValue()
+            }
+        }
+
+        return false
+    }
+}

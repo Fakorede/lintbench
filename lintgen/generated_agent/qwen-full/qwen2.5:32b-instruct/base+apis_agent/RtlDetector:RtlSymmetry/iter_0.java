@@ -1,0 +1,81 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.resources.ResourceType;
+import com.android.tools.lint.detector.api.AnnotationInfo;
+import com.android.tools.lint.detector.api.AnnotationUsageInfo;
+import com.android.tools.lint.detector.api.AnnotationUsageType;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiMethod;
+import org.jetbrains.uast.UCallExpression;
+import org.jetbrains.uast.UClass;
+import org.jetbrains.uast.UElement;
+import org.jetbrains.uast.ULambdaExpression;
+import org.jetbrains.uast.UReferenceExpression;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+
+import java.util.Collections;
+import java.util.List;
+
+public class RtlDetector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "RtlSymmetry",
+            "Padding and margin symmetry for right-to-left layout support.",
+            "If you specify padding or margin on the left side of a layout, you should probably also specify padding on the right side (and vice versa) for right-to-left layout symmetry.",
+            Category.I18N,
+            6,
+            Severity.WARNING,
+            new Implementation(
+                    RtlDetector.class,
+                    Scope.RESOURCE_FILE_SCOPE
+            )
+    );
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return ResourceFolderType.LAYOUT.equals(folderType);
+    }
+
+    @Override
+    public Collection<String> getApplicableAttributes() {
+        return Collections.singletonList("android:paddingLeft");
+    }
+
+    @Override
+    public void visitAttribute(XmlContext context, Attr attribute) {
+        Element element = (Element) attribute.getOwnerElement();
+        String attributeName = attribute.getName();
+
+        if ("android:paddingLeft".equals(attributeName)) {
+            checkSymmetry(context, element, "android:paddingRight");
+        } else if ("android:paddingRight".equals(attributeName)) {
+            checkSymmetry(context, element, "android:paddingLeft");
+        }
+
+        if ("android:marginLeft".equals(attributeName)) {
+            checkSymmetry(context, element, "android:marginRight");
+        } else if ("android:marginRight".equals(attributeName)) {
+            checkSymmetry(context, element, "android:marginLeft");
+        }
+    }
+
+    private void checkSymmetry(XmlContext context, Element element, String oppositeAttribute) {
+        Attr oppositeAttr = getAttribute(element, oppositeAttribute);
+        if (oppositeAttr == null) {
+            context.report(ISSUE, element, context.getLocation(element),
+                    "Consider specifying the opposite padding/margin attribute for RTL symmetry.");
+        }
+    }
+
+    private Attr getAttribute(Element element, String attributeName) {
+        return (Attr) element.getAttributes().getNamedItem(attributeName);
+    }
+}

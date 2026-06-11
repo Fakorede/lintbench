@@ -1,0 +1,64 @@
+package com.android.tools.lint.checks
+
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.*
+import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiMethod
+import org.jetbrains.uast.UCallExpression
+import org.w3c.dom.Element
+
+class BatteryDetector : Detector(), SourceCodeScanner, XmlScanner {
+
+    companion object {
+        val ISSUE = Issue.create(
+            "BatteryLifeIssues",
+            "This issue flags code that either negatively affects battery life or uses APIs that have recently changed behavior to prevent background tasks from consuming memory and battery excessively.",
+            "Generally, you should be using `WorkManager` instead. For more details on how to update your code, please see https://developer.android.com/topic/performance/background-optimization",
+            "https://developer.android.com/topic/performance/background-optimization",
+            Severity.WARNING,
+            Implementation(BatteryDetector::class.java, Scope.JAVA_FILE_SCOPE or Scope.RESOURCE_FILE_SCOPE)
+        )
+    }
+
+    override fun getApplicableMethodNames(): List<String>? {
+        return listOf(
+            "startService",
+            "bindService",
+            "registerReceiver"
+        )
+    }
+
+    override fun visitMethodCall(context: JavaContext, node: UCallExpression, method: PsiMethod) {
+        context.report(ISSUE, node, context.getLocation(node), "This method call can negatively affect battery life. Consider using WorkManager instead.")
+    }
+
+    override fun getApplicableUastTypes(): List<Class<out UElement>>? {
+        return listOf(UCallExpression::class.java)
+    }
+
+    override fun createUastHandler(context: JavaContext): UElementHandler? {
+        return object : UElementHandler() {
+            override fun visitCallExpression(node: UCallExpression) {
+                val methodName = node.methodName ?: return
+                if (getApplicableMethodNames()?.contains(methodName) == true) {
+                    context.report(ISSUE, node, context.getLocation(node), "This method call can negatively affect battery life. Consider using WorkManager instead.")
+                }
+            }
+        }
+    }
+
+    override fun getApplicableElements(): Collection<String>? {
+        return listOf("service", "receiver")
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val tagName = element.tagName
+        if (getApplicableElements()?.contains(tagName) == true) {
+            context.report(ISSUE, element, context.getLocation(element), "This XML element can negatively affect battery life. Consider using WorkManager instead.")
+        }
+    }
+
+    override fun appliesTo(folderType: ResourceFolderType): Boolean {
+        return folderType == ResourceFolderType.MANIFEST
+    }
+}

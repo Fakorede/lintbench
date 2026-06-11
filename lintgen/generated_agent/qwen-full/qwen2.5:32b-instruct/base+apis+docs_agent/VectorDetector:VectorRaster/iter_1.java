@@ -1,0 +1,90 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+
+import java.util.Collections;
+import java.util.List;
+
+public class VectorDetector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "VectorImageGeneration",
+            "Checks for vector image generation limitations",
+            "Vector icons require API 21 or API 24 depending on used features. When `minSdkVersion` is less than 21 or 24 and Android Gradle plugin 1.4 or higher is used, a vector drawable placed in the `drawable` folder is automatically moved to `drawable-anydpi-v21` or `drawable-anydpi-v24` and bitmap images are generated for different screen resolutions for backwards compatibility.\n\n" +
+            "However, there are some limitations to this raster image generation, and this lint check flags elements and attributes that are not fully supported. You should manually check whether the generated output is acceptable for those older devices.",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(VectorDetector.class, EnumSet.of(Scope.RESOURCE_FILE))
+    );
+
+    @Override
+    public boolean appliesTo(@NonNull ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.DRAWABLE;
+    }
+
+    @NonNull
+    @Override
+    public List<String> getApplicableElements() {
+        return Collections.singletonList("vector");
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        if (element.getTagName().equals("vector")) {
+            // Check for unsupported elements or attributes within the vector drawable
+            checkUnsupportedFeatures(context, element);
+        }
+    }
+
+    private void checkUnsupportedFeatures(XmlContext context, Element element) {
+        int minSdkVersion = context.getProject().getMinSdkVersion();
+        if (minSdkVersion < 21 || minSdkVersion < 24) {
+            // Check for specific unsupported elements or attributes
+            List<Element> children = getChildren(element);
+            for (Element child : children) {
+                String tagName = child.getTagName();
+                switch (tagName) {
+                    case "clip-path":
+                    case "group":
+                        context.report(ISSUE, element, context.getLocation(child),
+                                "The element <" + tagName + "> is not fully supported in vector image generation.");
+                        break;
+                    default:
+                        // Check attributes
+                        List<Attr> attrs = getAttributes(child);
+                        for (Attr attr : attrs) {
+                            String attrName = attr.getName();
+                            if ("android:clipPath".equals(attrName)) {
+                                context.report(ISSUE, element, context.getLocation(attr),
+                                        "The attribute <" + attrName + "> is not fully supported in vector image generation.");
+                            }
+                        }
+                }
+            }
+        }
+    }
+
+    @NonNull
+    private List<Element> getChildren(@NonNull Element element) {
+        // Implementation to retrieve children elements of the given element
+        return Collections.emptyList();
+    }
+
+    @NonNull
+    private List<Attr> getAttributes(@NonNull Element element) {
+        // Implementation to retrieve attributes of the given element
+        return Collections.emptyList();
+    }
+}

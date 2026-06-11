@@ -1,0 +1,76 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.resources.ResourceType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Element;
+
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
+
+public class IconDetector extends Detector implements Detector.XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "IconDensities",
+            "Icons should have complete coverage across the densities (mdpi, hdpi, xhdpi, xxhdpi, xxxhdpi).",
+            "Icons will look best if a custom version is provided for each of the major screen density classes. This lint check identifies icons which do not have complete coverage across the densities.",
+            Category.USABILITY,
+            5,
+            Severity.WARNING,
+            new Implementation(IconDetector.class, Scope.RESOURCE_FILE_SCOPE));
+
+    private static final Set<String> DENSITIES = new HashSet<>();
+    static {
+        DENSITIES.add("mdpi");
+        DENSITIES.add("hdpi");
+        DENSITIES.add("xhdpi");
+        DENSITIES.add("xxhdpi");
+        DENSITIES.add("xxxhdpi");
+
+        if (System.getenv("ANDROID_LINT_INCLUDE_LDPI") != null) {
+            DENSITIES.add("ldpi");
+        }
+    }
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return ResourceType.DRAWABLE.equals(folderType.getResourceType());
+    }
+
+    @Override
+    public Set<String> getApplicableElements() {
+        return Collections.singleton("*");
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        String name = element.getAttribute("name");
+
+        if (name != null && name.endsWith("_icon")) {
+            checkIconDensities(context, name);
+        }
+    }
+
+    private void checkIconDensities(XmlContext context, String iconName) {
+        Set<String> foundDensities = new HashSet<>();
+
+        for (String density : DENSITIES) {
+            if (context.getDriver().findResource(ResourceType.DRAWABLE, iconName + "-" + density, null, false) != null) {
+                foundDensities.add(density);
+            }
+        }
+
+        if (!foundDensities.containsAll(DENSITIES)) {
+            context.report(ISSUE, element, context.getLocation(element),
+                    "Icon '" + iconName + "' is missing densities: " +
+                            DENSITIES.stream().filter(d -> !foundDensities.contains(d)).toList());
+        }
+    }
+}

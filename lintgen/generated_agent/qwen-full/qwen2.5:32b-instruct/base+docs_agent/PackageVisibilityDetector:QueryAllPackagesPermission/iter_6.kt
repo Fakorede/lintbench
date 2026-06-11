@@ -1,0 +1,43 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.*
+import com.android.annotations.VisibleForTesting
+import com.android.resources.Density
+import com.android.tools.lint.detector.api.*
+import org.w3c.dom.Element
+
+class PackageVisibilityDetector : Detector(), ManifestVisitor {
+
+    companion object {
+        val ISSUE = Issue.create(
+            id = "PackageVisibility",
+            briefDescription = "Using the QUERY_ALL_PACKAGES permission",
+            explanation = """
+                Using the `QUERY_ALL_PACKAGES` permission in order to see all installed apps is rarely necessary. 
+                Most apps on Google Play are not allowed to have this permission. If you need to query or interact with other installed apps, you should be using a `<queries>` declaration in your manifest.
+            """.trimIndent(),
+            category = Category.SECURITY,
+            priority = 6,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                PackageVisibilityDetector::class.java,
+                Scope.MANIFEST_SCOPE
+            ),
+            references = listOf("https://g.co/dev/packagevisibility")
+        )
+    }
+
+    override fun visitManifest(context: XmlContext, manifest: Element) {
+        val permissions = context.getManifest().getElementsByTagName(TAG_PERMISSION)
+        for (i in 0 until permissions.length) {
+            val permissionElement = permissions.item(i) as Element
+            if (permissionElement.getAttributeNS(NAMESPACE_ANDROID, "name").equals("android.permission.QUERY_ALL_PACKAGES", ignoreCase = true)) {
+                context.report(
+                    issue = ISSUE,
+                    location = context.getLocation(permissionElement),
+                    message = "Using the QUERY_ALL_PACKAGES permission is discouraged. Consider using a <queries> declaration instead."
+                )
+            }
+        }
+    }
+}

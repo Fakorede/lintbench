@@ -1,0 +1,79 @@
+package com.android.tools.lint.checks;
+
+import com.android.SdkConstants;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.intellij.psi.PsiElement;
+import org.jetbrains.annotations.NotNull;
+import org.w3c.dom.Document;
+
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
+
+public class IconDetector extends Detector implements Detector.XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "IdenticalBitmaps",
+            "Identical bitmaps across various configurations",
+            "If an icon is provided under different configuration parameters such as `drawable-hdpi` or `-v11`, they should typically be different. This detector catches cases where the same icon is provided in different configuration folders which is usually not intentional.",
+            Category.CORRECTNESS,
+            5, // Priority
+            Severity.WARNING,
+            new Implementation(IconDetector.class, true)
+    );
+
+    private final Set<String> seenBitmaps = new HashSet<>();
+
+    @Override
+    public boolean appliesTo(@NotNull ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.DRAWABLE;
+    }
+
+    @Override
+    public void visitDocument(@NotNull XmlContext context, @NotNull Document document) {
+        String bitmapPath = getBitmapPath(context.getFile());
+        if (bitmapPath != null && seenBitmaps.contains(bitmapPath)) {
+            context.report(ISSUE, context.getLocation(document), "Identical bitmap found in different configuration folders");
+        } else {
+            seenBitmaps.add(bitmapPath);
+        }
+    }
+
+    private String getBitmapPath(PsiElement element) {
+        if (element == null || !element.getContainingFile().getName().endsWith(".xml")) {
+            return null;
+        }
+        String path = element.getVirtualFile().getPath();
+        // Remove the configuration part from the path
+        for (String config : new String[]{SdkConstants.DRAWABLE_XHDPI, SdkConstants.DRAWABLE_XXHDPI, SdkConstants.DRAWABLE_HDPI, SdkConstants.DRAWABLE_LDPI}) {
+            int index = path.indexOf(config);
+            if (index != -1) {
+                return path.substring(0, index) + config;
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Collections.emptyList();
+    }
+
+    @Override
+    public void visitElement(@NotNull XmlContext context, @NotNull Element element) {}
+
+    @Override
+    public void visitElementAfter(@NotNull XmlContext context, @NotNull Element element) {}
+
+    @Override
+    public Collection<String> getApplicableAttributes() {
+        return Collections.emptyList();
+    }
+
+    @Override
+    public void visitAttribute(@NotNull XmlContext context, @NotNull Attr attribute) {}
+}

@@ -1,0 +1,38 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants
+import com.android.tools.lint.detector.api.*
+import org.jetbrains.uast.*
+
+class KotlincFE10Detector : Detector(), SourceCodeScanner {
+
+    companion object {
+        val ISSUE = Issue.create(
+            id = "KotlincFE10",
+            briefDescription = "Avoid using old K1 Kotlin compiler APIs",
+            explanation = """
+                The new version of the Kotlin compiler, K2, is coming and it encompasses a new frontend. 
+                Try to avoid using internal APIs from the old frontend if possible.
+            """,
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                KotlincFE10Detector::class.java,
+                Scope.JAVA_FILE_SCOPE
+            )
+        )
+
+        private val OLD_FRONTEND_API_CALLS = listOf("oldKotlinApiCall", "anotherOldApi")
+    }
+
+    override fun getApplicableUastTypes() = listOf(UCallExpression::class.java)
+
+    override fun visitCallExpression(node: UCallExpression, context: JavaContext) {
+        val methodName = node.methodName ?: return
+        if (OLD_FRONTEND_API_CALLS.contains(methodName)) {
+            val location = context.getLocation(node)
+            context.report(ISSUE, node, location, "Avoid using old K1 Kotlin compiler APIs")
+        }
+    }
+}

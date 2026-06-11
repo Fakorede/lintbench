@@ -1,0 +1,106 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.resources.ResourceType;
+import com.android.tools.lint.client.api.UElementHandler;
+import com.android.tools.lint.detector.api.AnnotationInfo;
+import com.android.tools.lint.detector.api.AnnotationUsageInfo;
+import com.android.tools.lint.detector.api.AnnotationUsageType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiMethod;
+import org.jetbrains.uast.UClass;
+import org.jetbrains.uast.UMethod;
+import org.jetbrains.uast.UastUtils;
+
+import java.util.Collections;
+import java.util.List;
+
+public class JobSchedulerDetector extends Detector implements Detector.JavaScanner, Detector.XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "JobSchedulerProblem",
+            "Common mistakes in using the JobScheduler API",
+            "The service class must extend `JobService`, the service must be registered in the manifest and the registration must require the permission `android.permission.BIND_JOB_SERVICE`.",
+            Category.CORRECTNESS,
+            6,
+            Severity.ERROR,
+            new Implementation(JobSchedulerDetector.class, true)
+    );
+
+    @Override
+    public List<String> applicableSuperClasses() {
+        return Collections.singletonList("android.app.job.JobService");
+    }
+
+    @Override
+    public void visitClass(@NonNull JavaContext context, @NonNull UClass klass) {
+        if (UastUtils.isSubclassOf(klass, "android.app.job.JobService")) {
+            PsiElement element = klass.getJavaPsi();
+            if (element != null && !context.getManifest().hasService(element)) {
+                context.report(ISSUE, klass, context.getLocation(klass),
+                        "JobService subclass is not registered in the manifest");
+            }
+        }
+    }
+
+    @Override
+    public void visitResourceReference(@NonNull JavaContext context, @NonNull UElement element,
+                                       @NonNull ResourceType type, @NonNull String name, boolean isFramework) {
+        if (type == ResourceType.SERVICE && !isFramework) {
+            PsiElement psi = element.getJavaPsi();
+            if (psi != null && !context.getManifest().hasService(psi)) {
+                context.report(ISSUE, element, context.getLocation(element),
+                        "JobService subclass is not registered in the manifest");
+            }
+        }
+    }
+
+    @Override
+    public void visitAnnotationUsage(@NonNull JavaContext context, @NonNull UElement element,
+                                     @NonNull AnnotationInfo annotationInfo, @NonNull AnnotationUsageInfo usageInfo) {
+        if (usageInfo.getType() == AnnotationUsageType.CLASS && "android.app.job.JobService".equals(usageInfo.getReferenced().getQualifiedName())) {
+            PsiElement psi = element.getJavaPsi();
+            if (psi != null && !context.getManifest().hasService(psi)) {
+                context.report(ISSUE, element, context.getLocation(element),
+                        "JobService subclass is not registered in the manifest");
+            }
+        }
+    }
+
+    @Override
+    public void visitResourceReference(@NonNull XmlContext context, @NonNull UElement element,
+                                       @NonNull ResourceType type, @NonNull String name, boolean isFramework) {
+        if (type == ResourceType.SERVICE && !isFramework) {
+            PsiElement psi = element.getJavaPsi();
+            if (psi != null && !context.getManifest().hasService(psi)) {
+                context.report(ISSUE, element, context.getLocation(element),
+                        "JobService subclass is not registered in the manifest");
+            }
+        }
+    }
+
+    @Override
+    public void visitClass(@NonNull XmlContext context, @NonNull UClass klass) {
+        if (UastUtils.isSubclassOf(klass, "android.app.job.JobService")) {
+            PsiElement element = klass.getJavaPsi();
+            if (element != null && !context.getManifest().hasService(element)) {
+                context.report(ISSUE, klass, context.getLocation(klass),
+                        "JobService subclass is not registered in the manifest");
+            }
+        }
+    }
+
+    @Override
+    public void visitClass(@NonNull JavaContext context, @NonNull ULambdaExpression lambda) {
+        // No-op for now.
+    }
+}

@@ -1,0 +1,66 @@
+package com.android.tools.lint.checks;
+
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+
+import com.intellij.psi.PsiMethod;
+import org.jetbrains.uast.UCallExpression;
+import org.jetbrains.uast.UMethod;
+
+import java.util.Collections;
+import java.util.List;
+
+public class BadHostnameVerifierDetector extends Detector implements Detector.JavaScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "BadHostnameVerifier",
+            "Insecure HostnameVerifier implementation",
+            "This check looks for implementations of `HostnameVerifier` whose `verify` method always returns true (thus trusting any hostname) which could result in insecure network traffic caused by trusting arbitrary hostnames in TLS/SSL certificates presented by peers.",
+            Category.SECURITY,
+            6,
+            Severity.ERROR,
+            new Implementation(
+                    BadHostnameVerifierDetector.class,
+                    Scope.JAVA_FILE_SCOPE
+            )
+    );
+
+    @Override
+    public List<String> getApplicableMethodNames() {
+        return Collections.singletonList("verify");
+    }
+
+    @Override
+    public void visitMethod(JavaContext context, UCallExpression call, PsiMethod method) {
+        if (method != null && "javax.net.ssl.HostnameVerifier".equals(method.getContainingClass().getQualifiedName())) {
+            checkVerifyMethod(context, call);
+        }
+    }
+
+    private void checkVerifyMethod(JavaContext context, UCallExpression call) {
+        UMethod verifyMethod = (UMethod) call.getMethod();
+        if (verifyMethod != null && "boolean".equals(verifyMethod.getReturnType())) {
+            // Check if the method always returns true
+            boolean alwaysReturnsTrue = false;
+            for (UElement child : verifyMethod.getBody().getChildren()) {
+                if (child instanceof UCallExpression) {
+                    UCallExpression returnExpr = (UCallExpression) child;
+                    String methodName = returnExpr.getMethodName();
+                    if ("return".equals(methodName)) {
+                        alwaysReturnsTrue = "true".equals(returnExpr.getReceiver().getText());
+                        break;
+                    }
+                }
+            }
+
+            if (alwaysReturnsTrue) {
+                context.report(ISSUE, call, context.getLocation(call), "Insecure HostnameVerifier implementation that always returns true");
+            }
+        }
+    }
+}

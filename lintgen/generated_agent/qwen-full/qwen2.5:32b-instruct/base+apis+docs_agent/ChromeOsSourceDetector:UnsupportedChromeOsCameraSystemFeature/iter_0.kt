@@ -1,0 +1,69 @@
+package com.android.tools.lint.checks
+
+import com.android.resources.ResourceType
+import com.android.tools.lint.client.api.UElementHandler
+import com.android.tools.lint.detector.api.AnnotationInfo
+import com.android.tools.lint.detector.api.AnnotationUsageInfo
+import com.android.tools.lint.detector.api.AnnotationUsageType
+import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.JavaContext
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.XmlContext
+import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiMethod
+import org.jetbrains.uast.UCallExpression
+import org.jetbrains.uast.UClass
+import org.jetbrains.uast.ULambdaExpression
+import org.jetbrains.uast.UReferenceExpression
+import org.w3c.dom.Node
+
+class ChromeOsSourceDetector : Detector(), SourceCodeScanner {
+
+    companion object {
+        val ISSUE = Issue.create(
+            "ChromeOSCameraFeature",
+            "Looking for `FEATURE_CAMERA` only looks for a rear facing camera, which certain large screen devices don't have. Use `FEATURE_CAMERA_ANY` instead.",
+            "Certain large screen devices and newer device configurations may not have a rear-facing camera available. Using `FEATURE_CAMERA_ANY` ensures that all possible cameras are included.",
+            "https://developer.android.com/guide/topics/large-screens/large-screen-cookbook#chromebook_camera_support",
+            Category.CORRECTNESS,
+            6,
+            Implementation(ChromeOsSourceDetector::class.java, Scope.JAVA_FILE_SCOPE)
+        )
+    }
+
+    override fun getApplicableMethodNames(): List<String>? {
+        return listOf("hasSystemFeature")
+    }
+
+    override fun visitMethodCall(context: JavaContext, node: UCallExpression, method: PsiMethod) {
+        val arguments = node.valueArguments
+        if (arguments.size == 1 && arguments[0] is UReferenceExpression) {
+            val argument = arguments[0]
+            val referenceName = (argument as UReferenceExpression).getReferencedName()
+            if ("FEATURE_CAMERA" == referenceName) {
+                context.report(
+                    ISSUE,
+                    node,
+                    context.getLocation(node),
+                    "Use FEATURE_CAMERA_ANY instead of FEATURE_CAMERA"
+                )
+            }
+        }
+    }
+
+    override fun getApplicableUastTypes(): List<Class<out UElement>>? {
+        return listOf(UCallExpression::class.java)
+    }
+
+    override fun createUastHandler(context: JavaContext): UElementHandler? {
+        return object : UElementHandler() {
+            override fun visitCallExpression(node: UCallExpression) {
+                val method = node.resolveMethod()
+                if (method != null && "hasSystemFeature" == method.name) {
+                    visitMethodCall(context, node, method)
+                }
+            }
+        }
+    }
+}

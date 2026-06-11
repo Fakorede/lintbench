@@ -1,0 +1,74 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.resources.ResourceFolderType;
+import com.android.sdklib.AndroidVersion;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.LayoutDetector;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Project;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Element;
+
+import java.util.Collections;
+import java.util.List;
+
+public class OverdrawDetector extends LayoutDetector {
+
+    public static final Issue ISSUE = Issue.create(
+            "Overdraw",
+            "Painting regions more than once",
+            "If you set a background drawable on a root view, then you should use a custom theme where the theme background is null. Otherwise, the theme background will be painted first, only to have your custom background completely cover it; this is called \"overdraw\".",
+            Category.PERFORMANCE,
+            6,
+            Severity.WARNING,
+            new Implementation(
+                    OverdrawDetector.class,
+                    Collections.emptyList())
+    );
+
+    @NonNull
+    private String getThemeBackground(@NonNull Project project) {
+        // This method should return the background drawable specified in the theme.
+        // For simplicity, this is a placeholder implementation.
+        return "";
+    }
+
+    @Override
+    public List<String> getApplicableAttributes() {
+        return Collections.singletonList("android:background");
+    }
+
+    @NonNull
+    @Override
+    public List<String> getApplicableElements() {
+        return Collections.unmodifiableList(List.of("LinearLayout", "RelativeLayout", "FrameLayout"));
+    }
+
+    @Override
+    public void visitAttribute(@NonNull XmlContext context, @NonNull Element element,
+                               @NonNull String attributeName, @NonNull String value) {
+
+        if ("android:background".equals(attributeName)) {
+            Project project = context.getProject();
+
+            // Check if the layout is a root view
+            boolean isRootView = true; // Placeholder logic to determine if it's a root view
+
+            if (isRootView) {
+                String themeBackground = getThemeBackground(project);
+                if (!themeBackground.isEmpty()) {
+                    Location location = context.getLocation(element);
+                    context.report(ISSUE, element, location,
+                            "Setting background drawable on the root view can cause overdraw. Consider using a custom theme with a null background.");
+                }
+            }
+        }
+    }
+
+}

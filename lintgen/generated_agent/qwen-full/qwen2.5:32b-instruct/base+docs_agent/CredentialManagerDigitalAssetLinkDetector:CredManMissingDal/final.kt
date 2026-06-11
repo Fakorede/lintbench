@@ -1,0 +1,64 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.*
+import com.android.annotations.VisibleForTesting
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.*
+import org.w3c.dom.Element
+
+class CredentialManagerDigitalAssetLinkDetector : Detector(), ManifestVisitor {
+
+    companion object {
+        val ISSUE = Issue.create(
+            id = "MissingCredentialManagerDigitalAssetLinks",
+            briefDescription = "Missing Digital Asset Link for Credential Manager",
+            explanation = """
+                When using password sign-in through Credential Manager, an asset statements string resource file that includes the `assetlinks.json` files to load must be declared in the manifest using a `<meta-data>` element.
+                
+                Reference documentation:
+                - https://developer.android.com/identity/sign-in/credential-manager#add-support-dal
+            """,
+            category = Category.SECURITY,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                CredentialManagerDigitalAssetLinkDetector::class.java,
+                Scope.MANIFEST_SCOPE
+            )
+        )
+    }
+
+    override fun visitManifest(context: XmlContext, manifest: Element) {
+        var hasDigitalAssetLinks = false
+
+        val applicationElement = context.getApplicationNode(manifest)
+        if (applicationElement != null) {
+            for (metaData in context.getChildren(applicationElement)) {
+                if (TAG_META_DATA == metaData.tagName && "asset_statements" == metaData.getAttribute(NAME_ATTRIBUTE)) {
+                    hasDigitalAssetLinks = true
+                    break
+                }
+            }
+        }
+
+        if (!hasDigitalAssetLinks) {
+            context.report(
+                issue = ISSUE,
+                scope = manifest,
+                location = context.getLocation(manifest),
+                message = "Missing Digital Asset Link for Credential Manager. Add a <meta-data> element with name 'asset_statements' in the manifest."
+            )
+        }
+    }
+
+    @VisibleForTesting
+    internal fun hasDigitalAssetLinksInManifest(context: XmlContext, manifest: Element): Boolean {
+        val applicationElement = context.getApplicationNode(manifest)
+        if (applicationElement != null) {
+            return context.getChildren(applicationElement).any { metaData ->
+                TAG_META_DATA == metaData.tagName && "asset_statements" == metaData.getAttribute(NAME_ATTRIBUTE)
+            }
+        }
+        return false
+    }
+}

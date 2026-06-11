@@ -1,0 +1,118 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.resources.Density;
+import com.android.resources.ResourceFolderType;
+import com.android.utils.Pair;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.ResourceXmlDetector;
+import com.android.tools.lint.detector.api.Severity;
+
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.xml.sax.SAXException;
+
+import java.io.IOException;
+import java.util.HashSet;
+import java.util.Set;
+
+import javax.annotation.Nullable;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+
+public class IconDetector extends ResourceXmlDetector {
+
+    private Set<String> iconNames = new HashSet<>();
+
+    @NonNull
+    @Override
+    public Issue getIssue() {
+        return IconIssue;
+    }
+
+    @Nullable
+    @Override
+    public String getApplicableElements() {
+        return "item";
+    }
+
+    @Override
+    public void visitDocument(@NonNull Document document, @NonNull Context context) throws SAXException, IOException {
+        Element root = document.getDocumentElement();
+        if ("resources".equals(root.getTagName())) {
+            for (Element item : getAllChildren(root)) {
+                String name = item.getAttribute("name");
+                ResourceFolderType folderType = context.getResourceFolderType();
+                Density density = context.getDensity();
+
+                if (!iconNames.contains(name) && isAmbiguousIcon(name, folderType, density)) {
+                    iconNames.add(name);
+                    context.report(IconIssue, context.getLocation(item), "Icon appears in both -nodpi and dpi folders");
+                }
+            }
+        }
+    }
+
+    private boolean isAmbiguousIcon(String name, ResourceFolderType folderType, Density density) {
+        if (folderType == ResourceFolderType.DRAWABLE_NODPI && hasDpiVersion(name)) {
+            return true;
+        } else if (!Density.isUndefined(density) && hasNodpiVersion(name)) {
+            return true;
+        }
+        return false;
+    }
+
+    private boolean hasDpiVersion(String name) {
+        for (ResourceFolderType type : ResourceFolderType.values()) {
+            if (type != ResourceFolderType.DRAWABLE_NODPI && !Density.isUndefined(type.getDefaultDensity())) {
+                if (iconNames.contains(name + "-" + type.getDefaultDensity().name().toLowerCase())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean hasNodpiVersion(String name) {
+        for (ResourceFolderType type : ResourceFolderType.values()) {
+            if (type == ResourceFolderType.DRAWABLE_NODPI && iconNames.contains(name + "-" + type.getDefaultDensity().name().toLowerCase())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Element[] getAllChildren(Element element) {
+        DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+        try {
+            DocumentBuilder builder = factory.newDocumentBuilder();
+            Document doc = builder.newDocument();
+
+            Element root = doc.createElement("root");
+            for (int i = 0; i < element.getChildNodes().getLength(); i++) {
+                org.w3c.dom.Node node = element.getChildNodes().item(i);
+                if (node.getNodeType() == org.w3c.dom.Node.ELEMENT_NODE) {
+                    root.appendChild(doc.importNode(node, true));
+                }
+            }
+
+            return new Element[]{root};
+        } catch (ParserConfigurationException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static final Issue IconIssue = Issue.create(
+            "AmbiguousIcon",
+            "Bitmaps that appear in drawable-nodpi folders will not be scaled by the Android framework. If a drawable resource of the same name appears both in a -nodpi folder as well as a dpi folder such as drawable-hdpi, then the behavior is ambiguous and probably not intentional.",
+            "Delete one or the other, or use different names for the icons.",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(IconDetector.class, Scope.RESOURCE_FILE_SCOPE)
+    );
+}

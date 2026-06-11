@@ -1,0 +1,102 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.resources.ResourceType;
+import com.android.tools.lint.client.api.UElementHandler;
+import com.android.tools.lint.detector.api.AnnotationInfo;
+import com.android.tools.lint.detector.api.AnnotationUsageInfo;
+import com.android.tools.lint.detector.api.AnnotationUsageType;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.ResourceXmlDetector;
+import com.android.tools.lint.detector.api.XmlContext;
+import org.jetbrains.uast.UElement;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+
+import java.util.Collections;
+import java.util.List;
+
+public class IconDetector extends ResourceXmlDetector {
+
+    private static final Issue ISSUE = Issue.create(
+            "IconDensityValidation",
+            "Checks that all icons provided in multiple densities compute to roughly the same density-independent pixel (dip) size.",
+            "This check ensures that images are placed in the correct folder and have consistent sizes across different densities.",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(
+                    IconDetector.class,
+                    Collections.emptySet())
+    );
+
+    @Override
+    public List<String> getApplicableElements() {
+        return Collections.singletonList("item");
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        String name = element.getAttribute("name");
+        if (name != null && name.startsWith("ic_")) { // Assuming icons start with "ic_"
+            checkIconDensity(context, element);
+        }
+    }
+
+    private void checkIconDensity(XmlContext context, Element element) {
+        int[] densities = new int[]{120, 160, 240, 320, 480}; // Common density buckets
+        float[] dipSizes = new float[densities.length];
+        boolean first = true;
+        float referenceDipSize = -1;
+
+        for (int i = 0; i < densities.length; i++) {
+            String densityFolder = "drawable-" + getDensityString(densities[i]);
+            Element iconElement = context.getResources().getByNameAndType(element.getAttribute("name"), ResourceType.DRAWABLE, densityFolder);
+            if (iconElement != null) {
+                int sizeInPixels = Integer.parseInt(iconElement.getAttribute("size")); // Assuming there is a "size" attribute
+                float dipSize = convertToDip(sizeInPixels, densities[i]);
+                dipSizes[i] = dipSize;
+
+                if (first) {
+                    referenceDipSize = dipSize;
+                    first = false;
+                } else {
+                    if (!isCloseEnough(dipSize, referenceDipSize)) {
+                        context.report(ISSUE, element, context.getLocation(element),
+                                "Icon size in density folder " + densityFolder + " is not consistent with other densities.");
+                    }
+                }
+            }
+        }
+    }
+
+    private String getDensityString(int dpi) {
+        switch (dpi) {
+            case 120:
+                return "ldpi";
+            case 160:
+                return "mdpi";
+            case 240:
+                return "hdpi";
+            case 320:
+                return "xhdpi";
+            case 480:
+                return "xxhdpi";
+            default:
+                return "";
+        }
+    }
+
+    private float convertToDip(int pixels, int dpi) {
+        return (pixels * 160f) / dpi;
+    }
+
+    private boolean isCloseEnough(float size1, float size2) {
+        final float tolerance = 5.0f; // Tolerance in dip
+        return Math.abs(size1 - size2) <= tolerance;
+    }
+}

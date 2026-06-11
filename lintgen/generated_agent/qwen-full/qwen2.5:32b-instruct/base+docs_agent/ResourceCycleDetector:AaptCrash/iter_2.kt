@@ -1,0 +1,47 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.ANDROID_URI
+import com.android.annotations.VisibleForTesting
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.*
+import org.w3c.dom.Element
+
+class ResourceCycleDetector : Detector(), XmlScanner {
+
+    companion object Issues {
+        val POTENTIAL_AAPT_CRASH: Issue = Issue.create(
+            id = "PotentialAaptCrash",
+            briefDescription = "Potential AAPT crash due to dynamically generated ids in styles",
+            explanation = """
+                Defining a style which sets `android:id` to a dynamically generated id can cause many versions of `aapt`, the resource packaging tool, to crash. To work around this, declare the id explicitly with `<item type="id" name="..." />` instead.
+            """.trimIndent(),
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                ResourceCycleDetector::class.java,
+                Scope.RESOURCE_FILE_SCOPE
+            )
+        )
+    }
+
+    override fun getApplicableElements(): Collection<String> {
+        return listOf("style")
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val idAttribute = element.getAttributeNS(ANDROID_URI, "id")
+        if (idAttribute.isNotEmpty() && isDynamicallyGeneratedId(idAttribute)) {
+            context.report(
+                POTENTIAL_AAPT_CRASH,
+                context.getLocation(element),
+                "Defining a style with dynamically generated ids can cause AAPT to crash. Declare the id explicitly in resources."
+            )
+        }
+    }
+
+    @VisibleForTesting
+    fun isDynamicallyGeneratedId(id: String): Boolean {
+        return id.startsWith("?")
+    }
+}
