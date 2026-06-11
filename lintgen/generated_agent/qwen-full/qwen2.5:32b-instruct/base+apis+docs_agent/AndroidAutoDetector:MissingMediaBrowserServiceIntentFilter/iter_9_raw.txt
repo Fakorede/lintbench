@@ -1,0 +1,68 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.List;
+
+public class AndroidAutoDetector extends Detector implements Detector.XmlScanner {
+
+    public static final Issue MISSING_MEDIA_BROWSER_SERVICE_INTENT_FILTER = Issue.create(
+            "MissingMediaBrowserServiceIntentFilter",
+            "Automotive Media App requires an exported service that extends `android.service.media.MediaBrowserService` with an intent-filter for the action `android.media.browse.MediaBrowserService`.",
+            "To be able to browse and play media in an Automotive Media App, you need to add an `<intent-filter>` with the specified action to your service declaration.",
+            Category.CORRECTNESS,
+            6,
+            Severity.ERROR,
+            new Implementation(
+                    AndroidAutoDetector.class,
+                    EnumSet.of(Scope.MANIFEST))
+    );
+
+    @Override
+    public List<String> getApplicableElements() {
+        return Collections.singletonList("service");
+    }
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return ResourceFolderType.MANIFEST.equals(folderType);
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        if ("service".equals(element.getTagName())) {
+            String name = element.getAttribute("android:name");
+            if (name != null && name.contains(".MediaBrowserService")) {
+                boolean hasIntentFilter = false;
+                for (int i = 0; i < element.getChildNodes().getLength(); i++) {
+                    Node childNode = element.getChildNodes().item(i);
+                    if ("intent-filter".equals(childNode.getNodeName())) {
+                        Element intentFilterElement = (Element) childNode;
+                        for (int j = 0; j < intentFilterElement.getChildNodes().getLength(); j++) {
+                            Node actionNode = intentFilterElement.getChildNodes().item(j);
+                            if ("action".equals(actionNode.getNodeName()) && "android.media.browse.MediaBrowserService".equals(((Element) actionNode).getAttribute("android:name"))) {
+                                hasIntentFilter = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (!hasIntentFilter) {
+                    context.report(MISSING_MEDIA_BROWSER_SERVICE_INTENT_FILTER, element, context.getLocation(element),
+                            "Missing intent-filter for android.media.browse.MediaBrowserService");
+                }
+            }
+        }
+    }
+}

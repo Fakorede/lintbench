@@ -1,0 +1,55 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.ANNOTATION_EMPTY_SUPER
+import com.android.tools.lint.detector.api.*
+import org.jetbrains.uast.*
+
+class EmptySuperDetector : Detector(), SourceCodeScanner {
+
+    companion object Issues {
+        val EMPTY_SUPER_CALL = Issue.create(
+            id = "EmptySuperCall",
+            briefDescription = "Calling an empty super method",
+            explanation = """
+                Methods annotated with `@EmptySuper` should not have their super implementation called when overridden.
+            """,
+            category = Category.CORRECTNESS,
+            priority = 5,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                EmptySuperDetector::class.java,
+                Scope.JAVA_FILE_SCOPE
+            )
+        )
+    }
+
+    override fun getApplicableUastTypes() = listOf(UMethod::class.java)
+
+    @VisibleForTesting
+    internal fun isAnnotatedWithEmptySuper(method: UElement): Boolean {
+        return method.annotations.any { it.qualifiedName == ANNOTATION_EMPTY_SUPER }
+    }
+
+    override fun visitMethod(context: JavaContext, node: UMethod) {
+        val overriddenMethods = context.evaluator.getOverriddenMethods(node)
+        for (overridden in overriddenMethods) {
+            if (isAnnotatedWithEmptySuper(overridden)) {
+                node.accept(object : UastVisitor() {
+                    override fun visitMethodCallExpression(node: UCallExpression): Boolean {
+                        if (node.receiver == null && overridden.name == node.methodName.asString()) {
+                            context.report(
+                                EMPTY_SUPER_CALL,
+                                node,
+                                context.getLocation(node),
+                                "Do not call super implementation of method annotated with @EmptySuper"
+                            )
+                        }
+                        return true
+                    }
+
+                    override fun visitElement(node: UElement): Boolean = true
+                })
+            }
+        }
+    }
+}

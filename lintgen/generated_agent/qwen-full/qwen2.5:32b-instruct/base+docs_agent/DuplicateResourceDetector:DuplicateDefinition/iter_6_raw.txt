@@ -1,0 +1,83 @@
+package com.android.tools.lint.checks;
+
+import com.android.SdkConstants;
+import com.android.annotations.NonNull;
+import com.android.resources.ResourceFolderType;
+import com.android.utils.Pair;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
+
+import java.util.HashMap;
+import java.util.Map;
+
+import com.google.common.collect.HashMultimap;
+import com.google.common.collect.Multimap;
+
+public class DuplicateResourceDetector extends Detector implements ResourceXmlScanner {
+
+    private static final String ISSUE_ID = "DuplicateResources";
+    private static final String ISSUE_NAME = "Duplicate resource definitions in the same folder";
+
+    public static final Issue ISSUE = Issue.create(
+            ISSUE_ID,
+            ISSUE_NAME,
+            "Defining the same resource more than once in the same resource folder is likely an error.",
+            Category.CORRECTNESS,
+            6, // Priority
+            Severity.ERROR,
+            new Implementation(DuplicateResourceDetector.class, Scope.RESOURCE_FILE_SCOPE)
+    );
+
+    @NonNull
+    @Override
+    public Issue getIssue() {
+        return ISSUE;
+    }
+
+    @Override
+    public void visitResourceFolder(@NonNull XmlContext context, @NonNull ResourceFolderType folderType) {
+        Multimap<String, Pair<Integer, String>> resourceMap = HashMultimap.create();
+        Document document = context.getDocument();
+
+        Element root = document.getDocumentElement();
+        NodeList items = root.getElementsByTagName(SdkConstants.TAG_ITEM);
+        for (int i = 0; i < items.getLength(); i++) {
+            Element item = (Element) items.item(i);
+
+            String name = item.getAttribute(SdkConstants.ATTR_NAME);
+            if (!name.isEmpty()) {
+                int lineNumber = context.getLineNumber(item);
+                resourceMap.put(name, Pair.of(lineNumber, item.getTextContent()));
+            }
+        }
+
+        for (String resourceName : resourceMap.keySet()) {
+            Map<Integer, String> occurrences = new HashMap<>();
+            for (Pair<Integer, String> occurrence : resourceMap.get(resourceName)) {
+                if (!occurrences.containsKey(occurrence.first())) {
+                    occurrences.put(occurrence.first(), occurrence.second());
+                } else {
+                    // Report the duplicate
+                    report(context, resourceName, occurrence.first());
+                }
+            }
+        }
+    }
+
+    private void report(@NonNull XmlContext context, String resourceName, int lineNumber) {
+        Location location = context.getLocation(lineNumber);
+        context.report(ISSUE,
+                location,
+                "Duplicate definition of resource '" + resourceName + "'");
+    }
+}

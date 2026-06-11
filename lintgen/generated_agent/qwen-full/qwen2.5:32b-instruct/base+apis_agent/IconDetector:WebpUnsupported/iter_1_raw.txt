@@ -1,0 +1,67 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.resources.ResourceFolderType;
+import com.android.resources.ResourceType;
+import com.android.tools.lint.client.api.UastScanner;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.jetbrains.uast.UElement;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+
+import java.util.Collections;
+import java.util.List;
+
+public class IconDetector extends Detector implements XmlScanner, UastScanner {
+
+    public static final Issue ISSUE_WEBP_UNSUPPORTED = Issue.create(
+            "WebpUnsupported",
+            "The WebP format requires Android 4.0 (API 15). Certain features, such as lossless encoding and transparency, require Android 4.2.1 (API 18; API 17 is 4.2.0.)",
+            "Using the WebP image format can cause issues on older versions of Android that do not support it.",
+            Category.CORRECTNESS,
+            6,
+            Severity.ERROR,
+            new Implementation(
+                    IconDetector.class,
+                    Scope.RESOURCE_FILES
+            )
+    );
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.DRAWABLE;
+    }
+
+    @NonNull
+    @Override
+    public List<String> getApplicableElements() {
+        return Collections.singletonList("item");
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        Attr nameAttr = element.getAttributeNode("name");
+        if (nameAttr != null && nameAttr.getValue().endsWith(".webp")) {
+            Location location = context.getLocation(nameAttr);
+            context.report(ISSUE_WEBP_UNSUPPORTED, location, "WebP format is not supported on Android versions below 4.0 (API level 15).");
+        }
+    }
+
+    @Override
+    public void visitResourceReference(@NonNull JavaContext context, @NonNull UElement element, @NonNull ResourceType resourceType, String name, boolean isFramework) {
+        if (resourceType == ResourceType.DRAWABLE && name.endsWith(".webp")) {
+            Location location = context.getLocation(element);
+            context.report(ISSUE_WEBP_UNSUPPORTED, location, "WebP format is not supported on Android versions below 4.0 (API level 15).");
+        }
+    }
+
+}

@@ -1,0 +1,60 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Element;
+
+import java.util.Collections;
+import java.util.List;
+
+public class AndroidTvDetector extends Detector implements XmlScanner {
+
+    public static final Issue UNSUPPORTED_TV_HARDWARE_FEATURE = Issue.create(
+            "UnsupportedTVHardwareFeature",
+            "The `<uses-feature>` element should not require this unsupported TV hardware feature.",
+            "Any `uses-feature` not explicitly marked with `required=\"false\"` is necessary on the device to be installed on. Ensure that any features that might prevent it from being installed on a TV device are reviewed and marked as not required in the manifest.",
+            Category.USABILITY,
+            6,
+            Severity.WARNING,
+            new Implementation(AndroidTvDetector.class, Scope.MANIFEST_SCOPE)
+    );
+
+    @Override
+    public List<String> getApplicableElements() {
+        return Collections.singletonList("uses-feature");
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        String name = element.getAttribute("name");
+
+        // List of unsupported TV hardware features
+        List<String> unsupportedFeatures = Collections.unmodifiableList(List.of(
+                "android.hardware.camera",
+                "android.hardware.location",
+                "android.hardware.microphone"
+        ));
+
+        if (unsupportedFeatures.contains(name)) {
+            boolean required = Boolean.parseBoolean(element.getAttribute("required"));
+            if (!required) {
+                return;
+            }
+
+            context.report(UNSUPPORTED_TV_HARDWARE_FEATURE, element,
+                    context.getLocation(element),
+                    "The `<uses-feature>` element should not require this unsupported TV hardware feature. Mark it as `required=\"false\"`.");
+        }
+    }
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return ResourceFolderType.MANIFEST.equals(folderType);
+    }
+}
