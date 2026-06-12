@@ -224,8 +224,9 @@ def evaluate_instance(
         t0 = time.monotonic()
 
         if build_env_script is not None:
+            sample_log_dir = (log_dir / f"sample_{sample_id}") if log_dir else None
             raw = run_build_env(build_env_script, candidate, test_class_fqn,
-                                tests_to_run, timeout_s, log_dir, loose=loose)
+                                tests_to_run, timeout_s, sample_log_dir, loose=loose)
         else:
             raw = run_stub(instance_id, candidate, test_class_fqn,
                            tests_to_run, stub_mode)
@@ -297,6 +298,37 @@ def evaluate_instance(
 # Main
 # ---------------------------------------------------------------------------
 
+def _write_results(
+    out_path: Path,
+    instance_results: list[InstanceResult],
+    instance_map: dict,
+    args: argparse.Namespace,
+    benchmark_version: str,
+) -> None:
+    """Compute metrics and write results JSON — called after each instance and at the end."""
+    metrics = aggregate_metrics(instance_results, k=args.samples)
+    metrics["by_api_surface"] = aggregate_by_api_surface(instance_results, instance_map)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    output = {
+        "model":                args.model,
+        "prompt_variant":       args.prompt,
+        "benchmark_version":    benchmark_version,
+        "split":                args.split,
+        "n_instances":          len(instance_results),
+        "n_samples_per_inst":   args.samples,
+        "timestamp":            datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "pass_at_1":            metrics["pass_at_1"],
+        "pass_at_k":            metrics["pass_at_k"],
+        "compilation_rate":     metrics["compilation_rate"],
+        "by_difficulty":        metrics["by_difficulty"],
+        "by_category":          metrics["by_category"],
+        "by_api_surface":       metrics["by_api_surface"],
+        "failure_distribution": metrics["failure_distribution"],
+        "instances":            [asdict(r) for r in instance_results],
+    }
+    out_path.write_text(json.dumps(output, indent=2))
+
+
 def main(args: argparse.Namespace) -> None:
     benchmark_path = Path(args.benchmark)
     generated_dir  = Path(args.generated)
@@ -348,13 +380,34 @@ def main(args: argparse.Namespace) -> None:
 
     instance_map = {inst["instance_id"]: inst for inst in all_instances}
 
-    print(f"Evaluating {len(all_instances)} instances | "
+    # ── Resume: load already-evaluated instances from a partial results file ──
+    already_done: dict[str, InstanceResult] = {}
+    if out_path.exists() and not getattr(args, "force", False):
+        try:
+            prior = json.loads(out_path.read_text())
+            for inst_data in prior.get("instances", []):
+                iid = inst_data["instance_id"]
+                # Reconstruct SampleResult and InstanceResult from saved dicts
+                samples = [SampleResult(**s) for s in inst_data.pop("samples", [])]
+                already_done[iid] = InstanceResult(**inst_data, samples=samples)
+            if already_done:
+                print(f"Resuming: {len(already_done)} instances already evaluated, "
+                      f"skipping them.")
+        except Exception as e:
+            print(f"WARNING: could not load prior results from {out_path}: {e}", file=sys.stderr)
+
+    todo = [i for i in all_instances if i["instance_id"] not in already_done]
+
+    print(f"Evaluating {len(todo)} instances "
+          f"({'resuming, ' + str(len(already_done)) + ' done already' if already_done else 'fresh run'}) | "
           f"model={args.model} | prompt={args.prompt} | "
           f"k={args.samples} | {'STUB' if not build_env else 'REAL'}")
     print()
 
-    instance_results: list[InstanceResult] = []
-    with tqdm(all_instances, unit="instance", desc="evaluating") as pbar:
+    # Start from previously completed results so incremental writes are correct
+    instance_results: list[InstanceResult] = list(already_done.values())
+
+    with tqdm(todo, unit="instance", desc="evaluating") as pbar:
         for inst in pbar:
             result = evaluate_instance(
                 instance=inst,
@@ -372,31 +425,11 @@ def main(args: argparse.Namespace) -> None:
             compile_rate = sum(r.compilation_rate for r in instance_results) / len(instance_results)
             pbar.set_postfix(passing=n_pass, compile=f"{compile_rate:.1%}")
 
+            # Incremental write after every instance
+            _write_results(out_path, instance_results, instance_map, args, benchmark_version)
+
     metrics = aggregate_metrics(instance_results, k=args.samples)
-    metrics["by_api_surface"] = aggregate_by_api_surface(instance_results, instance_map)
-
     print_summary(metrics, args.model, args.prompt, args.samples)
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    output = {
-        "model":              args.model,
-        "prompt_variant":     args.prompt,
-        "benchmark_version":  benchmark_version,
-        "split":              args.split,
-        "n_instances":        len(instance_results),
-        "n_samples_per_inst": args.samples,
-        "timestamp":          datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-        "pass_at_1":          metrics["pass_at_1"],
-        "pass_at_k":          metrics["pass_at_k"],
-        "compilation_rate":   metrics["compilation_rate"],
-        "by_difficulty":      metrics["by_difficulty"],
-        "by_category":        metrics["by_category"],
-        "by_api_surface":     metrics["by_api_surface"],
-        "failure_distribution": metrics["failure_distribution"],
-        "instances": [asdict(r) for r in instance_results],
-    }
-
-    out_path.write_text(json.dumps(output, indent=2))
     print(f"\nResults saved to: {out_path}")
 
 
@@ -440,6 +473,9 @@ if __name__ == "__main__":
     parser.add_argument("--stub-mode",  default="all_fail",
                         choices=["all_pass", "all_fail", "compile_only", "mixed"],
                         help="Stub behaviour (default: all_fail)")
+    parser.add_argument("--force",      action="store_true",
+                        help="Re-evaluate all instances even if --out already exists "
+                             "(disables resume)")
     args = parser.parse_args()
 
     if args.stub and args.build_env:
