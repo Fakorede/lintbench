@@ -40,6 +40,35 @@ import time
 from pathlib import Path
 from typing import Optional
 
+# ---------------------------------------------------------------------------
+# Scanner interface detection
+# ---------------------------------------------------------------------------
+
+_KNOWN_SCANNERS = [
+    "XmlScanner",
+    "SourceCodeScanner",
+    "BinaryResourceScanner",
+    "ResourceFolderScanner",
+    "GradleScanner",
+    "OtherFileScanner",
+]
+_SCANNER_IFACE_RE = re.compile(r'\b(' + '|'.join(_KNOWN_SCANNERS) + r')\b')
+
+
+def _extract_scanner_interfaces(code: str) -> list[str]:
+    """
+    Return scanner interface names found in generated detector code,
+    deduplicating while preserving order of first appearance.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for m in _SCANNER_IFACE_RE.finditer(code):
+        name = m.group(1)
+        if name not in seen:
+            seen.add(name)
+            result.append(name)
+    return result
+
 from tqdm import tqdm
 
 # Ensure the repo root is on sys.path so `lintbench` is importable regardless
@@ -305,21 +334,23 @@ def run_agent(args: argparse.Namespace) -> None:
             # ── Build initial prompt ──────────────────────────────────────────
             system, raw_user = build_prompt(inst, lintbench_prompt)
 
-            # Inject RAG context (initial retrieval).
-            # raw_user is kept without RAG so repair iterations can substitute
-            # (not stack) the error-augmented context.
+            # Iteration 0: inject scanner overview + tier 2/3/4/5 only.
+            # The model hasn't chosen a scanner yet, so tier 1 (interface method
+            # signatures) is withheld until iteration 1 when we know which
+            # scanner(s) the model selected from its generated code.
             if kb is not None:
-                rag_context = kb.format_context(inst, k=rag_k, include_tiers=rag_tiers)
+                rag_context = kb.format_scanner_overview(inst, k=rag_k, include_tiers=rag_tiers)
                 original_user = f"{rag_context}\n\n{raw_user}" if rag_context else raw_user
             else:
                 original_user = raw_user
 
             # ── Repair loop ───────────────────────────────────────────────────
-            prev_code:  Optional[str] = None
-            best_code:  Optional[str] = None   # last passing code
-            last_code:  Optional[str] = None   # most recent code regardless
-            inst_cost   = 0.0
-            passed_iter = None
+            prev_code:       Optional[str] = None
+            best_code:       Optional[str] = None   # last passing code
+            last_code:       Optional[str] = None   # most recent code regardless
+            inst_cost        = 0.0
+            passed_iter      = None
+            current_scanners: list[str] = []        # scanner(s) detected from generated code
 
             traj_records: list[dict] = []
 
@@ -330,12 +361,20 @@ def run_agent(args: argparse.Namespace) -> None:
                 else:
                     feedback = _extract_feedback(last_result)  # type: ignore[name-defined]
 
-                    # Re-retrieve RAG with error-augmented query if available.
-                    # Use raw_user (without any prior RAG context) as the base
-                    # so the new context replaces rather than stacks on iter_0's.
+                    # Re-retrieve RAG with error-augmented query.
+                    # From iteration 1 onwards, tier 1 is retrieved using the
+                    # scanner interfaces detected from the model's own code
+                    # (scanner_override) rather than the dataset annotation.
+                    # If the model switched scanners this iteration, the new
+                    # tier 1 entries are automatically picked up here.
                     if kb is not None:
                         augmented_inst = _augment_rag_query(inst, feedback, prev_code or "")
-                        rag_context = kb.format_context(augmented_inst, k=rag_k, include_tiers=rag_tiers)
+                        rag_context = kb.format_context(
+                            augmented_inst,
+                            k=rag_k,
+                            include_tiers=rag_tiers,
+                            scanner_override=current_scanners if current_scanners else None,
+                        )
                         aug_base = f"{rag_context}\n\n{raw_user}" if rag_context else raw_user
                     else:
                         aug_base = raw_user
@@ -383,6 +422,17 @@ def run_agent(args: argparse.Namespace) -> None:
                     code = extract_code(raw, ext)
                     iter_file.write_text(code, encoding="utf-8")
                     prev_code = last_code = code
+
+                    # Detect scanner choice from generated code; track changes
+                    # so RAG re-retrieval is triggered when the model switches.
+                    detected = _extract_scanner_interfaces(code)
+                    scanner_changed = bool(detected) and detected != current_scanners
+                    if detected:
+                        current_scanners = detected
+                    gen_record["detected_scanners"] = current_scanners
+                    if scanner_changed:
+                        gen_record["scanner_changed"] = True
+
                     gen_record["generated"] = True
                     gen_record["output_chars"] = len(code)
                     gen_record["usage"] = usage

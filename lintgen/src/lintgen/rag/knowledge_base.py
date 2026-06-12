@@ -29,9 +29,41 @@ INDEX_DIR  = Path(__file__).parent / "index"
 CORPUS_DIR = Path(__file__).parent / "corpus"
 
 EMBEDDING_MODEL  = "BAAI/bge-large-en-v1.5"
-DEFAULT_TOP_K    = 5
+DEFAULT_TOP_K    = 10
 SCORE_THRESHOLD  = 0.6
 _TIER3_CHAR_LIMIT = 1600
+
+# ---------------------------------------------------------------------------
+# Scanner overview — injected at iteration 0 so the model can choose
+# which scanner interface(s) to use before API details are retrieved.
+# ---------------------------------------------------------------------------
+SCANNER_OVERVIEW = """\
+Select the scanner interface(s) appropriate for this detector by implementing \
+them on your Detector class.
+
+Available scanner interfaces:
+  XmlScanner            — analyzes XML resource files (layouts, drawables, \
+manifests, values)
+  SourceCodeScanner     — analyzes Java/Kotlin source files via UAST \
+(method calls, classes, annotations, references)
+  BinaryResourceScanner — analyzes binary resource files (PNG, WebP, GIF images)
+  ResourceFolderScanner — called once per resource folder \
+(mipmap/, drawable/, layout/, etc.)
+  GradleScanner         — analyzes build.gradle / build.gradle.kts files
+  OtherFileScanner      — analyzes arbitrary non-source, non-resource project files
+
+Project-level hooks (no scanner interface needed — override directly on Detector):
+  beforeCheckRootProject(context) — called once before the root project is analyzed
+  beforeCheckEachProject(context) — called before each module/project is analyzed
+  afterCheckRootProject(context)  — called once after the root project is analyzed; \
+report cross-project issues here
+  afterCheckEachProject(context)  — called after each module; use to enumerate all \
+project files
+                                    (e.g. scan PNG files via \
+context.getProject().getResourceFolders())
+
+Choose the interface(s) that match what the detector needs to inspect.\
+"""
 
 
 def _smart_truncate(content: str, limit: int = _TIER3_CHAR_LIMIT) -> str:
@@ -161,6 +193,7 @@ class LintAPIKnowledgeBase:
         instance: dict,
         k: int = DEFAULT_TOP_K,
         score_threshold: float = SCORE_THRESHOLD,
+        scanner_override: Optional[list[str]] = None,
     ) -> dict[str, list[dict]]:
         """
         Return {"tier1": [...], "tier2": [...], "tier3": [...]} for instance.
@@ -168,8 +201,14 @@ class LintAPIKnowledgeBase:
         Tier 1: exact-match on scanner_interfaces, semantic fallback.
         Tier 2: dense search — API methods and utilities.
         Tier 3: dense search — API guide doc sections.
+
+        scanner_override: if provided, use these scanner interface names for
+        Tier 1 exact-match instead of instance["scanner_interfaces"]. Pass the
+        interfaces detected from the model's generated code so retrieval tracks
+        the model's actual scanner choice rather than the dataset's annotation.
         """
-        scanner_ifaces = instance.get("scanner_interfaces", [])
+        scanner_ifaces = scanner_override if scanner_override is not None \
+            else instance.get("scanner_interfaces", [])
         nl_spec        = instance.get("nl_spec", "")
         query          = f"{nl_spec} [{' '.join(scanner_ifaces)}]"
 
@@ -224,11 +263,33 @@ class LintAPIKnowledgeBase:
 
         return {"tier1": tier1_exact, "tier2": tier2_docs, "tier3": tier3_docs, "tier4": tier4_docs, "tier5": tier5_docs}
 
+    def format_scanner_overview(
+        self,
+        instance: dict,
+        k: int = DEFAULT_TOP_K,
+        include_tiers: frozenset[int] = frozenset({1, 2, 3, 4, 5}),
+    ) -> str:
+        """
+        Return the scanner overview + tier 2/3/4/5 context (no tier 1).
+
+        Used at iteration 0 before the model has chosen a scanner interface.
+        Tier 1 is omitted because it requires knowing which scanner to retrieve;
+        the model will declare its choice in the generated code, at which point
+        format_context(scanner_override=...) takes over from iteration 1 onwards.
+        """
+        api_context = self.format_context(
+            instance, k=k, include_tiers=include_tiers - frozenset({1}),
+        )
+        if api_context:
+            return SCANNER_OVERVIEW + "\n\n" + api_context
+        return SCANNER_OVERVIEW
+
     def format_context(
         self,
         instance: dict,
         k: int = DEFAULT_TOP_K,
         include_tiers: frozenset[int] = frozenset({1, 2, 3, 4, 5}),
+        scanner_override: Optional[list[str]] = None,
     ) -> str:
         """
         Return a formatted string ready for prompt injection.
@@ -247,7 +308,7 @@ class LintAPIKnowledgeBase:
           [Tier 4] UAST / PSI methods
           [Tier 5] SdkConstants
         """
-        results = self.retrieve(instance, k=k)
+        results = self.retrieve(instance, k=k, scanner_override=scanner_override)
         tier1   = results["tier1"] if 1 in include_tiers else []
         tier2   = results["tier2"] if 2 in include_tiers else []
         tier3   = results["tier3"] if 3 in include_tiers else []
