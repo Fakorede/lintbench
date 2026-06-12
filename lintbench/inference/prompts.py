@@ -365,6 +365,8 @@ and compile cleanly against the Android Lint API.
 ZERO_SHOT_TEMPLATE = """\
 Implement an Android Lint Detector named {detector} in {lang} for the following issue.
 
+Issue ID: {issue_id}
+
 Specification:
 {nl_spec}
 {more_info}
