@@ -1,0 +1,17 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.JavaContext
+import com.android.tools.lint.detector.api.JavaElementVisitor
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiMethod
+
+class WrongConstructorDetector : Detector(), Detector.JavaPsiScanner {
+    override fun getApplicablePsiTypes(): List<Class<out PsiElement>> = listOf(PsiMethod::class.java)
+
+    override fun createPsiVisitor(context: JavaContext): JavaElementVisitor = object : JavaElementVisitor() {

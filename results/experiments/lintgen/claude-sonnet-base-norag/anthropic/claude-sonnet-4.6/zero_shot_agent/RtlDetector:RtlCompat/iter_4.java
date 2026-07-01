@@ -1,0 +1,263 @@
+/*
+ * Copyright (C) 2013 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.tools.lint.checks;
+
+import static com.android.SdkConstants.ANDROID_URI;
+import static com.android.SdkConstants.ATTR_GRAVITY;
+import static com.android.SdkConstants.ATTR_LAYOUT_GRAVITY;
+import static com.android.SdkConstants.ATTR_TEXT_ALIGNMENT;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.LayoutDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+
+import java.io.File;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * Checks for RTL (right-to-left) layout compatibility issues.
+ */
+public class RtlDetector extends LayoutDetector {
+
+    /**
+     * Mapping from old (left/right) attribute names to new (start/end) attribute names.
+     * Each pair is: old attribute name, new attribute name.
+     */
+    public static final String[] ATTRIBUTES = new String[] {
+            // Pairs of old -> new
+            "alignParentLeft",          "alignParentStart",
+            "alignParentRight",         "alignParentEnd",
+            "alignLeft",                "alignStart",
+            "alignRight",               "alignEnd",
+            "layout_alignParentLeft",   "layout_alignParentStart",
+            "layout_alignParentRight",  "layout_alignParentEnd",
+            "layout_alignLeft",         "layout_alignStart",
+            "layout_alignRight",        "layout_alignEnd",
+            "layout_toLeftOf",          "layout_toStartOf",
+            "layout_toRightOf",         "layout_toEndOf",
+            "layout_marginLeft",        "layout_marginStart",
+            "layout_marginRight",       "layout_marginEnd",
+            "paddingLeft",              "paddingStart",
+            "paddingRight",             "paddingEnd",
+            "drawableLeft",             "drawableStart",
+            "drawableRight",            "drawableEnd",
+    };
+
+    // Map from old attribute name -> new attribute name
+    private static final Map<String, String> OLD_TO_NEW = new HashMap<String, String>();
+    // Map from new attribute name -> old attribute name
+    private static final Map<String, String> NEW_TO_OLD = new HashMap<String, String>();
+
+    static {
+        for (int i = 0; i < ATTRIBUTES.length; i += 2) {
+            OLD_TO_NEW.put(ATTRIBUTES[i], ATTRIBUTES[i + 1]);
+            NEW_TO_OLD.put(ATTRIBUTES[i + 1], ATTRIBUTES[i]);
+        }
+    }
+
+    /** The main issue discovered by this detector */
+    public static final Issue COMPAT = Issue.create(
+            "RtlCompat",
+            "Right-to-left text compatibility issues",
+            "API 17 adds a `textAlignment` attribute to specify text alignment. However, " +
+            "if you are supporting older versions than API 17, you must **also** specify a " +
+            "gravity or layout_gravity attribute, since older platforms will ignore the " +
+            "`textAlignment` attribute.",
+            Category.RTL,
+            6,
+            Severity.ERROR,
+            new Implementation(
+                    RtlDetector.class,
+                    Scope.RESOURCE_FILE_SCOPE));
+
+    /** Constructs a new {@link RtlDetector} */
+    public RtlDetector() {
+    }
+
+    /**
+     * Returns true if the given attribute name is an RTL-specific attribute
+     * (i.e., uses "start" or "end" instead of "left" or "right").
+     */
+    public static boolean isRtlAttributeName(@NonNull String name) {
+        return name.endsWith("Start") || name.endsWith("End");
+    }
+
+    /**
+     * Converts an old (left/right) attribute name to the new (start/end) equivalent.
+     * Returns null if there is no known conversion.
+     */
+    @Nullable
+    public static String convertOldToNew(@NonNull String attribute) {
+        return OLD_TO_NEW.get(attribute);
+    }
+
+    /**
+     * Converts a new (start/end) attribute name to the old (left/right) equivalent.
+     * Returns null if there is no known conversion.
+     */
+    @Nullable
+    public static String convertNewToOld(@NonNull String attribute) {
+        return NEW_TO_OLD.get(attribute);
+    }
+
+    /**
+     * Converts an attribute name to its opposite direction equivalent.
+     */
+    @Nullable
+    public static String convertToOppositeDirection(@NonNull String attribute) {
+        if (attribute.endsWith("Left")) {
+            return attribute.substring(0, attribute.length() - 4) + "Right";
+        } else if (attribute.endsWith("Right")) {
+            return attribute.substring(0, attribute.length() - 5) + "Left";
+        } else if (attribute.endsWith("Start")) {
+            return attribute.substring(0, attribute.length() - 5) + "End";
+        } else if (attribute.endsWith("End")) {
+            return attribute.substring(0, attribute.length() - 3) + "Start";
+        }
+        return null;
+    }
+
+    /**
+     * Returns the API version encoded in a folder name (e.g., "layout-v17" returns 17).
+     * Returns -1 if no version qualifier is found.
+     */
+    public static int getFolderVersion(@NonNull File folder) {
+        String name = folder.getName();
+        int index = name.indexOf("-v");
+        if (index == -1) {
+            return -1;
+        }
+        String versionStr = name.substring(index + 2);
+        int end = versionStr.length();
+        for (int i = 0; i < versionStr.length(); i++) {
+            char c = versionStr.charAt(i);
+            if (!Character.isDigit(c)) {
+                end = i;
+                break;
+            }
+        }
+        versionStr = versionStr.substring(0, end);
+        if (versionStr.isEmpty()) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(versionStr);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    // Gravity attribute values that correspond to text alignment
+    private static final Collection<String> GRAVITY_VALUES = Arrays.asList(
+            "left", "right", "start", "end", "center", "center_horizontal",
+            "fill", "fill_horizontal"
+    );
+
+    @Override
+    @Nullable
+    public Collection<String> getApplicableAttributes() {
+        return Collections.singletonList(ATTR_TEXT_ALIGNMENT);
+    }
+
+    @Override
+    public void visitAttribute(@NonNull XmlContext context, @NonNull Attr attribute) {
+        // Only flag this if the minSdkVersion is less than 17
+        int minSdk = context.getMainProject().getMinSdk();
+        if (minSdk >= 17) {
+            return;
+        }
+
+        // Also check the folder version qualifier - if the layout is in a v17+ folder,
+        // it's fine since it will only be used on API 17+
+        File folder = context.file.getParentFile();
+        if (folder != null) {
+            int folderVersion = getFolderVersion(folder);
+            if (folderVersion >= 17) {
+                return;
+            }
+        }
+
+        // Check if the element also defines gravity or layout_gravity
+        Element element = attribute.getOwnerElement();
+        NamedNodeMap attributes = element.getAttributes();
+
+        boolean hasGravity = false;
+        boolean hasLayoutGravity = false;
+
+        for (int i = 0, n = attributes.getLength(); i < n; i++) {
+            Attr attr = (Attr) attributes.item(i);
+            String localName = attr.getLocalName();
+            String ns = attr.getNamespaceURI();
+            if (ANDROID_URI.equals(ns)) {
+                if (ATTR_GRAVITY.equals(localName)) {
+                    hasGravity = true;
+                } else if (ATTR_LAYOUT_GRAVITY.equals(localName)) {
+                    hasLayoutGravity = true;
+                }
+            }
+        }
+
+        if (!hasGravity && !hasLayoutGravity) {
+            String message = String.format(
+                    "To support older versions than API 17 (project specifies %1$d) " +
+                    "you should **also** specify `gravity` or `layout_gravity` when " +
+                    "using `textAlignment` attribute",
+                    minSdk);
+            context.report(COMPAT, attribute, context.getLocation(attribute), message);
+        }
+    }
+
+    /**
+     * Checks whether a gravity value contains a horizontal alignment component.
+     */
+    private static boolean hasHorizontalGravity(@NonNull String gravityValue) {
+        for (String part : gravityValue.split("\\|")) {
+            part = part.trim();
+            if (GRAVITY_VALUES.contains(part)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Returns the "start/end" equivalent of a gravity value that uses "left/right".
+     */
+    @Nullable
+    public static String convertGravityValue(@NonNull String value) {
+        if (value.contains("left")) {
+            return value.replace("left", "start");
+        } else if (value.contains("right")) {
+            return value.replace("right", "end");
+        }
+        return null;
+    }
+}

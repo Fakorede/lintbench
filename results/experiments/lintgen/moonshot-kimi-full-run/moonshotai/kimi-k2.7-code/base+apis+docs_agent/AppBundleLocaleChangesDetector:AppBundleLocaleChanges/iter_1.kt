@@ -1,0 +1,158 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.*
+import com.intellij.psi.PsiMethod
+import org.jetbrains.uast.UCallExpression
+import java.util.EnumSet
+
+class AppBundleLocaleChangesDetector : Detector(), SourceCodeScanner, GradleScanner {
+
+    companion object {
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "AppBundleLocaleChanges",
+            briefDescription = "App Bundle may not handle runtime locale changes correctly",
+            explanation = """
+                When changing locales at runtime (for example, to implement an in-app language \
+                switcher), the Android App Bundle must either be configured to disable locale \
+                splits or the Play Core library must be used to download additional language \
+                splits at runtime.
+
+                Without one of these configurations, users who change the app language may see \
+                resources from the wrong locale because the APK for the new locale may not be \
+                installed on the device.
+
+                To fix this, add `android.bundle.language.enableSplit = false` to your \
+                `build.gradle` file, or use the Play Core library to fetch language splits \
+                dynamically.
+            """.trimIndent(),
+            moreInfo = "https://developer.android.com/guide/app-bundle/configure-base#handling_language_changes",
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                AppBundleLocaleChangesDetector::class.java,
+                EnumSet.of(Scope.JAVA_FILE, Scope.GRADLE_FILE)
+            )
+        )
+    }
+
+    private var hasRuntimeLocaleChange = false
+    private var localeChangeLocation: Location? = null
+    private var languageSplitEnabled: Boolean? = null
+    private var hasPlayCoreLibrary = false
+
+    override fun beforeCheckEachProject(context: Context) {
+        hasRuntimeLocaleChange = false
+        localeChangeLocation = null
+        languageSplitEnabled = null
+        hasPlayCoreLibrary = false
+    }
+
+    override fun getApplicableMethodNames(): List<String> {
+        return listOf("setDefault", "updateConfiguration", "createConfigurationContext", "setApplicationLocales")
+    }
+
+    override fun visitMethodCall(context: JavaContext, node: UCallExpression, method: PsiMethod) {
+        val containingClass = method.containingClass?.qualifiedName ?: return
+        val name = method.name
+        when {
+            containingClass == "java.util.Locale" && name == "setDefault" -> {
+                recordLocaleChange(context, node)
+            }
+            containingClass == "android.content.res.Resources" && name == "updateConfiguration" -> {
+                recordLocaleChange(context, node)
+            }
+            containingClass == "android.content.Context" && name == "createConfigurationContext" -> {
+                recordLocaleChange(context, node)
+            }
+            containingClass == "androidx.appcompat.app.AppCompatDelegate" && name == "setApplicationLocales" -> {
+                recordLocaleChange(context, node)
+            }
+        }
+    }
+
+    private fun recordLocaleChange(context: JavaContext, node: UCallExpression) {
+        hasRuntimeLocaleChange = true
+        if (localeChangeLocation == null) {
+            localeChangeLocation = context.getLocation(node)
+        }
+    }
+
+    override fun checkDslPropertyAssignment(
+        context: GradleContext,
+        property: String,
+        value: String,
+        parent: String,
+        parentParent: String?,
+        propertyCookie: Any,
+        valueCookie: Any,
+        statementCookie: Any
+    ) {
+        if (property == "enableSplit" && parent == "language" && parentParent == "bundle") {
+            languageSplitEnabled = value.toBooleanStrictOrNull() ?: true
+        }
+    }
+
+    override fun checkMethodCall(
+        context: GradleContext,
+        statement: String,
+        parent: String?,
+        parentParent: String?,
+        namedArguments: Map<String, String>,
+        unnamedArguments: List<String>,
+        cookie: Any
+    ) {
+        if (statement == "enableSplit" && parent == "language" && parentParent == "bundle") {
+            languageSplitEnabled = unnamedArguments.firstOrNull()?.toBooleanStrictOrNull() ?: true
+            return
+        }
+
+        if (parent != "dependencies") return
+        if (statement !in DEPENDENCY_CONFIGURATIONS) return
+
+        for (arg in unnamedArguments) {
+            if (isPlayCoreDependency(arg)) {
+                hasPlayCoreLibrary = true
+                return
+            }
+        }
+        for (arg in namedArguments.values) {
+            if (isPlayCoreDependency(arg)) {
+                hasPlayCoreLibrary = true
+                return
+            }
+        }
+    }
+
+    override fun afterCheckEachProject(context: Context) {
+        if (!hasRuntimeLocaleChange) return
+        if (hasPlayCoreLibrary) return
+        if (languageSplitEnabled == false) return
+
+        val location = localeChangeLocation ?: return
+        context.report(
+            ISSUE,
+            location,
+            "Runtime locale changes may not work correctly with App Bundle locale splits. " +
+                "Set `android.bundle.language.enableSplit = false` or include the Play Core library."
+        )
+    }
+}
+
+private val DEPENDENCY_CONFIGURATIONS = setOf(
+    "implementation",
+    "api",
+    "compileOnly",
+    "runtimeOnly",
+    "testImplementation",
+    "testCompileOnly",
+    "testRuntimeOnly",
+    "androidTestImplementation",
+    "androidTestCompileOnly",
+    "androidTestRuntimeOnly"
+)
+
+private fun isPlayCoreDependency(arg: String): Boolean {
+    return arg.trim().removeSurrounding("\"").removeSurrounding("'").contains("com.google.android.play")
+}

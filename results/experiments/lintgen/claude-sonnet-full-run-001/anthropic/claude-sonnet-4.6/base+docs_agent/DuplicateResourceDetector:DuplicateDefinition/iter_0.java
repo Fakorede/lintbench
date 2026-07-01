@@ -1,0 +1,277 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import static com.android.SdkConstants.ATTR_NAME;
+import static com.android.SdkConstants.ATTR_TYPE;
+import static com.android.SdkConstants.TAG_ITEM;
+
+/**
+ * Checks for duplicate resource definitions within the same resource folder.
+ */
+public class DuplicateResourceDetector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "DuplicateDefinition",
+            "Duplicate resource definition",
+            "You can define a resource multiple times in different resource folders; that's how " +
+            "string translations are done, for example. However, defining the same resource " +
+            "more than once in the same resource folder is likely an error, for example " +
+            "attempting to add a new resource without realizing that the name is already used, " +
+            "and so on.",
+            Category.CORRECTNESS,
+            6,
+            Severity.FATAL,
+            new Implementation(
+                    DuplicateResourceDetector.class,
+                    Scope.ALL_RESOURCES_SCOPE
+            )
+    );
+
+    /**
+     * Map from resource folder (canonical path) to a map of resource keys to their locations.
+     * Resource key is "type/name" (e.g. "string/app_name").
+     */
+    private final Map<String, Map<String, Location>> mFolderToResources = new HashMap<>();
+
+    /**
+     * Map from resource folder to a map of resource keys to the XmlContext (for deferred reporting).
+     * We store the first occurrence location and report when we find a duplicate.
+     */
+    private final Map<String, Map<String, List<Location>>> mDuplicates = new HashMap<>();
+
+    public DuplicateResourceDetector() {
+    }
+
+    // ---- Implements XmlScanner ----
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Collections.singletonList(TAG_ITEM);
+    }
+
+    @Override
+    public boolean appliesTo(@NonNull ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.VALUES;
+    }
+
+    @Override
+    public void visitDocument(@NonNull XmlContext context, @NonNull Document document) {
+        ResourceFolderType folderType = context.getResourceFolderType();
+        if (folderType != ResourceFolderType.VALUES) {
+            // For non-values folders, the resource name is the file name itself.
+            // Check for duplicate file-based resources.
+            checkFileBasedResource(context, folderType);
+            return;
+        }
+
+        // For values folders, parse all child elements of the root.
+        Element root = document.getDocumentElement();
+        if (root == null) {
+            return;
+        }
+
+        // Get the folder key: parent folder path (e.g. "res/values" or "res/values-de")
+        File folder = context.file.getParentFile();
+        String folderKey = folder != null ? folder.getPath() : "";
+
+        Map<String, Location> resourcesInFolder = mFolderToResources.get(folderKey);
+        if (resourcesInFolder == null) {
+            resourcesInFolder = new HashMap<>();
+            mFolderToResources.put(folderKey, resourcesInFolder);
+        }
+
+        NodeList children = root.getChildNodes();
+        for (int i = 0, n = children.getLength(); i < n; i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+            Element element = (Element) child;
+            String tagName = element.getTagName();
+
+            String type = getResourceType(tagName, element);
+            if (type == null) {
+                continue;
+            }
+
+            String name = element.getAttribute(ATTR_NAME);
+            if (name == null || name.isEmpty()) {
+                continue;
+            }
+
+            // Normalize name (replace dots and hyphens with underscores as Android does)
+            name = name.replace('.', '_').replace('-', '_');
+
+            String key = type + "/" + name;
+
+            Location location = context.getLocation(element);
+
+            if (resourcesInFolder.containsKey(key)) {
+                // Duplicate found
+                Location previousLocation = resourcesInFolder.get(key);
+                Location secondaryLocation = previousLocation.withMessage("Previously defined here");
+                location.setSecondary(secondaryLocation);
+
+                context.report(
+                        ISSUE,
+                        element,
+                        location,
+                        String.format("`%1$s` has already been defined in this folder", key)
+                );
+            } else {
+                resourcesInFolder.put(key, location);
+            }
+        }
+    }
+
+    private void checkFileBasedResource(@NonNull XmlContext context,
+            @NonNull ResourceFolderType folderType) {
+        // For file-based resources (layouts, drawables, etc.), the resource name
+        // is derived from the file name. Duplicates within the same folder would
+        // mean two files with the same name, which the filesystem prevents.
+        // However, we check across files in the same folder for completeness.
+        // In practice, the filesystem won't allow two files with the same name,
+        // so this is mainly a no-op for file-based resources.
+        // We still track them for completeness.
+        File folder = context.file.getParentFile();
+        String folderKey = folder != null ? folder.getPath() : "";
+
+        String fileName = context.file.getName();
+        // Strip extension
+        int dot = fileName.lastIndexOf('.');
+        String resourceName = dot >= 0 ? fileName.substring(0, dot) : fileName;
+        resourceName = resourceName.replace('.', '_').replace('-', '_');
+
+        String type = folderType.getName();
+        String key = type + "/" + resourceName;
+
+        Map<String, Location> resourcesInFolder = mFolderToResources.get(folderKey);
+        if (resourcesInFolder == null) {
+            resourcesInFolder = new HashMap<>();
+            mFolderToResources.put(folderKey, resourcesInFolder);
+        }
+
+        Location location = Location.create(context.file);
+
+        if (resourcesInFolder.containsKey(key)) {
+            Location previousLocation = resourcesInFolder.get(key);
+            Location secondaryLocation = previousLocation.withMessage("Previously defined here");
+            location.setSecondary(secondaryLocation);
+
+            context.report(
+                    ISSUE,
+                    location,
+                    String.format("`%1$s` has already been defined in this folder", key)
+            );
+        } else {
+            resourcesInFolder.put(key, location);
+        }
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        // Handled in visitDocument for values files
+    }
+
+    /**
+     * Returns the resource type string for the given element tag and element.
+     */
+    @Nullable
+    private static String getResourceType(@NonNull String tagName, @NonNull Element element) {
+        if (tagName.equals(TAG_ITEM)) {
+            // <item type="..." name="...">
+            String type = element.getAttribute(ATTR_TYPE);
+            if (type != null && !type.isEmpty()) {
+                return type;
+            }
+            return null;
+        }
+
+        // Map tag names to resource types
+        switch (tagName) {
+            case "string":
+                return "string";
+            case "string-array":
+                return "array";
+            case "integer-array":
+                return "array";
+            case "array":
+                return "array";
+            case "plurals":
+                return "plurals";
+            case "color":
+                return "color";
+            case "dimen":
+                return "dimen";
+            case "integer":
+                return "integer";
+            case "bool":
+                return "bool";
+            case "style":
+                return "style";
+            case "declare-styleable":
+                return "styleable";
+            case "attr":
+                return "attr";
+            case "fraction":
+                return "fraction";
+            case "drawable":
+                return "drawable";
+            case "layout":
+                return "layout";
+            case "menu":
+                return "menu";
+            case "anim":
+                return "anim";
+            case "animator":
+                return "animator";
+            case "interpolator":
+                return "interpolator";
+            case "transition":
+                return "transition";
+            case "xml":
+                return "xml";
+            case "raw":
+                return "raw";
+            case "font":
+                return "font";
+            case "navigation":
+                return "navigation";
+            default:
+                return null;
+        }
+    }
+
+    @Override
+    public void afterCheckEachProject(@NonNull Context context) {
+        // Clean up per-project state if needed
+        mFolderToResources.clear();
+    }
+}

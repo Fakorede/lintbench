@@ -1,0 +1,266 @@
+package com.android.tools.lint.checks;
+
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+
+import org.w3c.dom.Document;
+
+import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Arrays;
+
+public class Utf8Detector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "EnforceUTF8",
+            "Encoding used in resource files is not UTF-8",
+            "XML supports encoding in a wide variety of character sets. However, not all " +
+            "tools handle the XML encoding attribute correctly, and nearly all Android " +
+            "apps use UTF-8, so by using UTF-8 you can protect yourself against subtle " +
+            "bugs when using non-ASCII characters.\n\n" +
+            "In particular, the Android Gradle build system will merge resource XML files " +
+            "assuming the resource files are using UTF-8 encoding.",
+            Category.I18N,
+            8,
+            Severity.ERROR,
+            new Implementation(
+                    Utf8Detector.class,
+                    Scope.RESOURCE_FILE_SCOPE
+            )
+    );
+
+    public Utf8Detector() {
+    }
+
+    @Override
+    public void visitDocument(XmlContext context, Document document) {
+        // Check the raw bytes of the file for the XML declaration encoding attribute
+        File file = context.file;
+        String encoding = getXmlEncoding(file);
+
+        if (encoding != null) {
+            // An explicit encoding was declared; check if it's UTF-8
+            if (!encoding.equalsIgnoreCase("utf-8") && !encoding.equalsIgnoreCase("utf8")) {
+                String message = String.format(
+                        "Resource file is not encoded in UTF-8; found encoding `%1$s`",
+                        encoding);
+                Location location = Location.create(file);
+                context.report(ISSUE, location, message);
+            }
+        } else {
+            // No encoding declared; check if the file has a BOM that indicates non-UTF-8
+            // If there's no declaration and no BOM, it defaults to UTF-8 per XML spec
+            // which is fine. But if there's a non-UTF-8 BOM, we should warn.
+            String bomEncoding = getBomEncoding(file);
+            if (bomEncoding != null && !bomEncoding.equalsIgnoreCase("utf-8")
+                    && !bomEncoding.equalsIgnoreCase("utf8")) {
+                String message = String.format(
+                        "Resource file is not encoded in UTF-8; found encoding `%1$s` from BOM",
+                        bomEncoding);
+                Location location = Location.create(file);
+                context.report(ISSUE, location, message);
+            }
+        }
+    }
+
+    /**
+     * Reads the beginning of the XML file and extracts the encoding from the XML declaration,
+     * e.g. {@code <?xml version="1.0" encoding="ISO-8859-1"?>}.
+     *
+     * @param file the XML file to inspect
+     * @return the declared encoding, or null if no encoding attribute is found
+     */
+    private static String getXmlEncoding(File file) {
+        try {
+            byte[] bytes = readBytes(file, 200);
+            if (bytes == null) {
+                return null;
+            }
+
+            // Convert to ASCII string for parsing the XML declaration
+            // The XML declaration must be in ASCII-compatible encoding
+            String header = new String(bytes, "US-ASCII");
+
+            if (!header.startsWith("<?xml")) {
+                // Check for BOM before the declaration
+                // UTF-16 BE BOM: FE FF
+                // UTF-16 LE BOM: FF FE
+                // UTF-8 BOM: EF BB BF
+                int start = 0;
+                if (bytes.length >= 3 &&
+                        (bytes[0] & 0xFF) == 0xEF &&
+                        (bytes[1] & 0xFF) == 0xBB &&
+                        (bytes[2] & 0xFF) == 0xBF) {
+                    // UTF-8 BOM
+                    start = 3;
+                } else if (bytes.length >= 2 &&
+                        (bytes[0] & 0xFF) == 0xFE &&
+                        (bytes[1] & 0xFF) == 0xFF) {
+                    // UTF-16 BE BOM - can't easily parse as ASCII
+                    return null;
+                } else if (bytes.length >= 2 &&
+                        (bytes[0] & 0xFF) == 0xFF &&
+                        (bytes[1] & 0xFF) == 0xFE) {
+                    // UTF-16 LE BOM - can't easily parse as ASCII
+                    return null;
+                }
+
+                if (start > 0 && header.substring(start).startsWith("<?xml")) {
+                    header = header.substring(start);
+                } else {
+                    return null;
+                }
+            }
+
+            // Look for encoding attribute in the XML declaration
+            int encodingIndex = header.indexOf("encoding");
+            if (encodingIndex == -1) {
+                return null;
+            }
+
+            // Make sure we're within the XML declaration
+            int declarationEnd = header.indexOf("?>");
+            if (declarationEnd != -1 && encodingIndex > declarationEnd) {
+                return null;
+            }
+
+            int pos = encodingIndex + "encoding".length();
+
+            // Skip whitespace
+            while (pos < header.length() && Character.isWhitespace(header.charAt(pos))) {
+                pos++;
+            }
+
+            // Expect '='
+            if (pos >= header.length() || header.charAt(pos) != '=') {
+                return null;
+            }
+            pos++;
+
+            // Skip whitespace
+            while (pos < header.length() && Character.isWhitespace(header.charAt(pos))) {
+                pos++;
+            }
+
+            if (pos >= header.length()) {
+                return null;
+            }
+
+            // Get the quote character
+            char quote = header.charAt(pos);
+            if (quote != '"' && quote != '\'') {
+                return null;
+            }
+            pos++;
+
+            // Find the closing quote
+            int end = header.indexOf(quote, pos);
+            if (end == -1) {
+                return null;
+            }
+
+            return header.substring(pos, end);
+
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Checks the BOM (Byte Order Mark) of the file to determine encoding.
+     *
+     * @param file the file to inspect
+     * @return the encoding indicated by the BOM, or null if no BOM is present
+     */
+    private static String getBomEncoding(File file) {
+        try {
+            byte[] bytes = readBytes(file, 4);
+            if (bytes == null || bytes.length < 2) {
+                return null;
+            }
+
+            int b0 = bytes[0] & 0xFF;
+            int b1 = bytes[1] & 0xFF;
+
+            if (bytes.length >= 3) {
+                int b2 = bytes[2] & 0xFF;
+                if (b0 == 0xEF && b1 == 0xBB && b2 == 0xBF) {
+                    return "UTF-8";
+                }
+            }
+
+            if (bytes.length >= 4) {
+                int b2 = bytes[2] & 0xFF;
+                int b3 = bytes[3] & 0xFF;
+                if (b0 == 0x00 && b1 == 0x00 && b2 == 0xFE && b3 == 0xFF) {
+                    return "UTF-32BE";
+                }
+                if (b0 == 0xFF && b1 == 0xFE && b2 == 0x00 && b3 == 0x00) {
+                    return "UTF-32LE";
+                }
+            }
+
+            if (b0 == 0xFE && b1 == 0xFF) {
+                return "UTF-16BE";
+            }
+            if (b0 == 0xFF && b1 == 0xFE) {
+                return "UTF-16LE";
+            }
+
+            return null;
+
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Reads up to {@code maxBytes} bytes from the beginning of the file.
+     *
+     * @param file     the file to read
+     * @param maxBytes the maximum number of bytes to read
+     * @return the bytes read, or null if an error occurred
+     */
+    private static byte[] readBytes(File file, int maxBytes) throws IOException {
+        if (!file.exists() || !file.isFile()) {
+            return null;
+        }
+
+        InputStream is = null;
+        try {
+            is = new BufferedInputStream(new FileInputStream(file));
+            byte[] buffer = new byte[maxBytes];
+            int totalRead = 0;
+            int read;
+            while (totalRead < maxBytes &&
+                    (read = is.read(buffer, totalRead, maxBytes - totalRead)) != -1) {
+                totalRead += read;
+            }
+            if (totalRead == 0) {
+                return null;
+            }
+            if (totalRead < maxBytes) {
+                return Arrays.copyOf(buffer, totalRead);
+            }
+            return buffer;
+        } finally {
+            if (is != null) {
+                try {
+                    is.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+}

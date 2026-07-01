@@ -1,0 +1,158 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.BinaryResourceScanner;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceContext;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.EnumSet;
+
+public class IconDetector extends Detector implements BinaryResourceScanner {
+
+    public static final Issue ICON_EXTENSION = Issue.create(
+            "IconExtension",
+            "Icon format does not match the file extension",
+            "Ensures that icons have the correct file extension (e.g. a `.png` file is " +
+            "really in the PNG format and not for example a GIF file named `.png`).",
+            Category.ICONS,
+            6,
+            Severity.WARNING,
+            new Implementation(
+                    IconDetector.class,
+                    Scope.BINARY_RESOURCE_FILE_SCOPE
+            )
+    );
+
+    public IconDetector() {
+    }
+
+    @Override
+    public Collection<ResourceFolderType> getApplicableFolders() {
+        return Arrays.asList(
+                ResourceFolderType.DRAWABLE,
+                ResourceFolderType.MIPMAP
+        );
+    }
+
+    @Override
+    public void checkBinaryResource(ResourceContext context) {
+        File file = context.file;
+        String name = file.getName();
+        int dotIndex = name.lastIndexOf('.');
+        if (dotIndex == -1) {
+            return;
+        }
+
+        String extension = name.substring(dotIndex + 1).toLowerCase();
+
+        // Only check image file extensions
+        if (!extension.equals("png") && !extension.equals("jpg") &&
+                !extension.equals("jpeg") && !extension.equals("gif") &&
+                !extension.equals("webp") && !extension.equals("bmp")) {
+            return;
+        }
+
+        String detectedFormat = detectImageFormat(file);
+        if (detectedFormat == null) {
+            return;
+        }
+
+        boolean matches = formatMatchesExtension(detectedFormat, extension);
+        if (!matches) {
+            String message = String.format(
+                    "Misleading file extension; named `.%1$s` but the file format is `%2$s`",
+                    extension, detectedFormat);
+            context.report(ICON_EXTENSION, Location.create(file), message);
+        }
+    }
+
+    private String detectImageFormat(File file) {
+        try (FileInputStream fis = new FileInputStream(file)) {
+            byte[] header = new byte[16];
+            int bytesRead = fis.read(header);
+            if (bytesRead < 4) {
+                return null;
+            }
+
+            // Check PNG: 89 50 4E 47 0D 0A 1A 0A
+            if (bytesRead >= 8 &&
+                    (header[0] & 0xFF) == 0x89 &&
+                    (header[1] & 0xFF) == 0x50 &&
+                    (header[2] & 0xFF) == 0x4E &&
+                    (header[3] & 0xFF) == 0x47 &&
+                    (header[4] & 0xFF) == 0x0D &&
+                    (header[5] & 0xFF) == 0x0A &&
+                    (header[6] & 0xFF) == 0x1A &&
+                    (header[7] & 0xFF) == 0x0A) {
+                return "PNG";
+            }
+
+            // Check JPEG: FF D8 FF
+            if ((header[0] & 0xFF) == 0xFF &&
+                    (header[1] & 0xFF) == 0xD8 &&
+                    (header[2] & 0xFF) == 0xFF) {
+                return "JPEG";
+            }
+
+            // Check GIF: GIF87a or GIF89a
+            if ((header[0] & 0xFF) == 0x47 &&
+                    (header[1] & 0xFF) == 0x49 &&
+                    (header[2] & 0xFF) == 0x46 &&
+                    (header[3] & 0xFF) == 0x38) {
+                return "GIF";
+            }
+
+            // Check WebP: RIFF????WEBP
+            if (bytesRead >= 12 &&
+                    (header[0] & 0xFF) == 0x52 &&
+                    (header[1] & 0xFF) == 0x49 &&
+                    (header[2] & 0xFF) == 0x46 &&
+                    (header[3] & 0xFF) == 0x46 &&
+                    (header[8] & 0xFF) == 0x57 &&
+                    (header[9] & 0xFF) == 0x45 &&
+                    (header[10] & 0xFF) == 0x42 &&
+                    (header[11] & 0xFF) == 0x50) {
+                return "WEBP";
+            }
+
+            // Check BMP: BM
+            if ((header[0] & 0xFF) == 0x42 &&
+                    (header[1] & 0xFF) == 0x4D) {
+                return "BMP";
+            }
+
+            return null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    private boolean formatMatchesExtension(String format, String extension) {
+        switch (format.toUpperCase()) {
+            case "PNG":
+                return extension.equals("png");
+            case "JPEG":
+                return extension.equals("jpg") || extension.equals("jpeg");
+            case "GIF":
+                return extension.equals("gif");
+            case "WEBP":
+                return extension.equals("webp");
+            case "BMP":
+                return extension.equals("bmp");
+            default:
+                return true;
+        }
+    }
+}

@@ -1,0 +1,175 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceContext;
+import com.android.tools.lint.detector.api.ResourceFolderScanner;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+
+import org.jetbrains.annotations.NotNull;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.io.File;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.Map;
+
+public class DuplicateResourceDetector extends Detector implements XmlScanner, ResourceFolderScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "DuplicateDefinition",
+            "Duplicate resource definitions",
+            "You can define a resource multiple times in different resource folders; that's how "
+                    + "string translations are done, for example. However, defining the same resource "
+                    + "more than once in the same resource folder is likely an error, for example "
+                    + "attempting to add a new resource without realizing that the name is already used, "
+                    + "and so on.",
+            Category.CORRECTNESS,
+            6,
+            Severity.ERROR,
+            new Implementation(
+                    DuplicateResourceDetector.class,
+                    EnumSet.of(Scope.RESOURCE_FILE, Scope.RESOURCE_FOLDER))
+    );
+
+    private static final String TAG_RESOURCES = "resources";
+    private static final String TAG_ITEM = "item";
+    private static final String ATTR_NAME = "name";
+    private static final String ATTR_TYPE = "type";
+
+    private final Map<String, Location> mLocations = new HashMap<>();
+
+    @Override
+    public void beforeCheckEachProject(@NotNull Context context) {
+        mLocations.clear();
+    }
+
+    @Override
+    public boolean appliesTo(@NotNull ResourceFolderType folderType) {
+        return true;
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Collections.singletonList(TAG_RESOURCES);
+    }
+
+    @Override
+    public void visitElement(@NotNull XmlContext context, @NotNull Element element) {
+        if (!TAG_RESOURCES.equals(element.getTagName())) {
+            return;
+        }
+
+        File folder = context.file.getParentFile();
+        if (folder == null) {
+            return;
+        }
+
+        ResourceFolderType folderType = ResourceFolderType.getFolderType(folder.getName());
+        if (folderType != ResourceFolderType.VALUES) {
+            return;
+        }
+
+        String folderPath = folder.getPath();
+        NodeList children = element.getChildNodes();
+        for (int i = 0, n = children.getLength(); i < n; i++) {
+            Node node = children.item(i);
+            if (node.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+
+            Element child = (Element) node;
+            String name = child.getAttribute(ATTR_NAME);
+            if (name.isEmpty()) {
+                continue;
+            }
+
+            String type = getValueResourceType(child);
+            if (type == null || type.isEmpty()) {
+                continue;
+            }
+
+            record(context, folderPath, type, name, context.getLocation(child));
+        }
+    }
+
+    @Override
+    public void checkFolder(@NotNull ResourceContext context, @NotNull String folderName) {
+        ResourceFolderType folderType = ResourceFolderType.getFolderType(folderName);
+        if (folderType == null || folderType == ResourceFolderType.VALUES) {
+            return;
+        }
+
+        File[] files = context.file.listFiles();
+        if (files == null) {
+            return;
+        }
+
+        String folderPath = context.file.getPath();
+        String typeName = folderType.getName();
+
+        for (File file : files) {
+            if (file.isDirectory() || file.isHidden() || file.getName().startsWith(".")) {
+                continue;
+            }
+
+            String fileName = file.getName();
+            int dot = fileName.lastIndexOf('.');
+            String name = dot > 0 ? fileName.substring(0, dot) : fileName;
+            if (name.isEmpty()) {
+                continue;
+            }
+
+            record(context, folderPath, typeName, name, Location.create(file));
+        }
+    }
+
+    private void record(
+            @NotNull Context context,
+            @NotNull String folderPath,
+            @NotNull String type,
+            @NotNull String name,
+            @NotNull Location location) {
+        String key = folderPath + "/" + type + "/" + name;
+        Location previous = mLocations.get(key);
+        if (previous != null) {
+            String message = String.format(
+                    "Duplicate resource definition for R.%s.%s (already defined in %s)",
+                    type, name, previous.getFile().getPath());
+            context.report(ISSUE, location, message);
+        } else {
+            mLocations.put(key, location);
+        }
+    }
+
+    private static String getValueResourceType(@NotNull Element element) {
+        String tag = element.getTagName();
+        if (TAG_ITEM.equals(tag)) {
+            String type = element.getAttribute(ATTR_TYPE);
+            return !type.isEmpty() ? type : null;
+        }
+        if ("string-array".equals(tag) || "integer-array".equals(tag)) {
+            return "array";
+        }
+        if ("plurals".equals(tag)) {
+            return "plurals";
+        }
+        if ("declare-styleable".equals(tag)) {
+            return "styleable";
+        }
+        return tag;
+    }
+}

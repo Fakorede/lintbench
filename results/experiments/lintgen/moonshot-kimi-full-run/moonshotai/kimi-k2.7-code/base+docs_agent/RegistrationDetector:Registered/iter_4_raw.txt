@@ -1,0 +1,1751 @@
+We need answer only corrected source file. Need analyze failing detector. Need output Java file with exact package and class name. Must be correct and idiomatic, compile cleanly against Android Lint API. Need fix tests. Let's infer context. The previous code uses Detector.ClassScanner, checkClass receives ClassNode per class file. It checks extendsComponent by walking superclasses using project.getJavaClassFolders. It collects candidates in class scanning phase and registered names from manifest. Then afterCheckEachProject reports unregistered. The tests fail: expect warnings but get none. So candidates likely not collected or matching wrong. Need inspect likely issue: Scope.CLASS_FILE_SCOPE vs Scope.MANIFEST_SCOPE in Implementation maybe not proper. Also afterCheckEachProject may not run? Need understand Lint API.
+
+Test names: RegistrationDetectorTest likely from Android Lint built-in tests. We need reproduce behavior. Need know actual implementation in Android Lint codebase. There's a built-in RegistrationDetector? I recall Android Lint has a detector named RegistrationDetector in com.android.tools.lint.checks. It checks activities, services, providers not registered. I think I have seen it. Let's recall actual implementation. It likely uses a ClassScanner and XmlScanner. It stores list of classes discovered during class analysis, and in manifest visit stores registered names. Then in afterCheckProject reports unregistered.
+
+But the failing code's issue might be using context.getLocation(classNode) which may not work? Or perhaps the ClassContext.getLocation(node) is not available or not correct? Actually ClassContext has getLocation(ClassNode) maybe yes. But issue: Scope.CLASS_FILE_SCOPE in new API uses UAST? Actually old ASM-based detector implements ClassScanner and JavaPsiScanner? Hmm.
+
+Let's recall built-in RegistrationDetector. Search memory. I think there is a file in tools/base/lint/libs/lint-checks/src/main/java/com/android/tools/lint/checks/RegistrationDetector.java. It has issues Registered. It implements Detector.ClassScanner, Detector.XmlScanner. It likely uses classNode.superName chain and API resolve classes. It might have a static inner class? Let's reconstruct from memory or design.
+
+The test expected message: "The <activity> test.pkg.MyActivity2 is not registered in the manifest [Registered]" at line 5. So our report message should be "The <component> <class> is not registered in the manifest". Also location should be class node name? Actually expected line 5, column? "public class MyActivity2 extends Activity {" line. So location should be on class name.
+
+Thus we need adapt message. Also need detect component type (activity/service/provider) and report tag label.
+
+Test testNotRegistered probably checks multiple components and messages contain "[Registered]" and "not registered". Need output that.
+
+The previous code message "Class X is not registered in the manifest" doesn't match expected message. Also detection missing because maybe candidate list not matched. Need fix.
+
+Need fully implement correct. Let's design robust RegistrationDetector.
+
+Important: Lint's ClassScanner checkClass may run only for classes within scope. Implementation scope includes CLASS_FILE_SCOPE and MANIFEST_SCOPE. The old API: Implementation(RegistrationDetector.class, Scope.CLASS_FILE_SCOPE, Scope.MANIFEST_SCOPE). That's probably fine.
+
+But there might be issue: beforeCheckEachProject and afterCheckEachProject not called? They are in Detector base. Yes.
+
+The earlier code maybe fails because project.getJavaClassFolders() might be empty in test? In test lint infrastructure, compiled classes may not be present? The test uses source .java files and lint compiles? In Lint test infrastructure, .java source is included but class files might be generated? For ASM-based detectors, lint compiles source to bytecode? Hmm.
+
+The built-in test likely compiles the test source using lint's test infrastructure, which creates class files. If getSuperClass fails to find superclass because android.jar classes are not in java class folders (Activity etc are not compiled), our code would return null and not detect. But we check superName equals ACTIVITY etc. The immediate superName of MyActivity2 is "android/app/Activity", because extends Activity. So extendsComponent returns true without needing to resolve. Unless the test uses extends android.app.Activity and classNode.superName is "android/app/Activity". That should match. So why no candidates? Could be classNode.access includes ACC_SUPER; abstract? No.
+
+Maybe the issue is ClassScanner checkClass is not called for classes in source because scope maybe Scope.JAVA_FILE_SCOPE? But Implementation with CLASS_FILE_SCOPE should call checkClass. In new Lint API, maybe ClassScanner is deprecated and not invoked unless scope includes Scope.CLASS_FILE_SCOPE. The Implementation constructor requires a scope set, not varargs of Scope? Implementation(Implementation(Class<? extends Detector>, EnumSet<Scope>)?). Wait they used new Implementation(RegistrationDetector.class, Scope.CLASS_FILE_SCOPE, Scope.MANIFEST_SCOPE). There are constructors: Implementation(Class<? extends Detector>, EnumSet<Scope>) and Implementation(Class<? extends Detector>, Scope, Scope...). I think okay.
+
+Maybe afterCheckEachProject is invoked before checkClass? In lint, detectors with both class and xml scanners run across project. Need see lifecycle. It could be that checkClass runs after afterCheckEachProject? Actually Lint visits all files then afterCheckProject. For ASM, class files are read during class scan after manifest? Usually class scanner runs after other? Not sure. But afterCheckProject should be after all.
+
+Maybe problem: mCandidates is empty because checkClass not invoked due to missing `getApplicableCallNames`? No ClassScanner.
+
+Let's inspect actual built-in RegistrationDetector to ensure correct. I can try to recall or infer from AOSP. Let's search memory: I have seen code:
+
+public class RegistrationDetector extends Detector implements Detector.ClassScanner, Detector.XmlScanner {
+    private static final String ACTIVITY = "android/app/Activity";
+    private static final String SERVICE = "android/app/Service";
+    private static final String PROVIDER = "android/content/ContentProvider";
+
+    public static final Issue ISSUE = Issue.create("Registered", "Class is not registered in the manifest", ..., Category.CORRECTNESS, 6, Severity.WARNING, new Implementation(RegistrationDetector.class, Scope.CLASS_FILE_SCOPE, Scope.MANIFEST_SCOPE));
+
+    private List<ClassNode> mClasses;
+    private Set<String> mManifestNames;
+    private String mPackage;
+
+    @Override
+    public void beforeCheckProject(Context context) { mClasses = new ArrayList<>(); mManifestNames = new HashSet<>(); mPackage = null; }
+    @Override
+    public void afterCheckProject(Context context) { ... }
+
+    @Override
+    public void checkClass(ClassContext context, ClassNode classNode) {
+        if ((classNode.access & Opcodes.ACC_ABSTRACT) != 0 || (classNode.access & Opcodes.ACC_INTERFACE) != 0) return;
+        String name = classNode.name;
+        if (name == null) return;
+        if (isComponent(context, classNode)) { mClasses.add(classNode); }
+    }
+
+    private boolean isComponent(ClassContext context, ClassNode classNode) {
+        ClassNode cls = classNode;
+        while (cls != null) {
+            if (ACTIVITY.equals(cls.superName) || SERVICE.equals(cls.superName) || PROVIDER.equals(cls.superName)) return true;
+            cls = getParentClass(context, cls);
+        }
+        return false;
+    }
+
+    @Nullable
+    private ClassNode getParentClass(ClassContext context, ClassNode classNode) {
+        if (classNode.superName == null || classNode.superName.equals("java/lang/Object")) return null;
+        try { ClassReader reader = context.getDriver().getClassReader(classNode.superName); ... }
+        catch (IOException e) { return null; }
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() { return Arrays.asList(TAG_MANIFEST, TAG_ACTIVITY, TAG_SERVICE, TAG_PROVIDER); }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        String tag = element.getTagName();
+        if (TAG_MANIFEST.equals(tag)) { mPackage = element.getAttribute(ATTR_PACKAGE); return; }
+        String name = element.getAttributeNS(ANDROID_URI, ATTR_NAME);
+        if (name == null || name.isEmpty()) return;
+        if (mPackage == null) mPackage = context.getProject().getPackage();
+        mManifestNames.add(resolve(name, mPackage));
+    }
+
+    private String resolve(String name, String pkg) { ... }
+}
+
+But actual may use `context.getDriver().getClassReader` to read superclasses, not project class folders. Our previous code used project class folders, which may fail in test because test classes compiled? Actually if MyActivity2 extends Activity, immediate superName matched. But to know if an inner parent class extends Activity, maybe need walk. But testNotRegistered likely has abstract parent? Need know tests.
+
+Let's find actual test source? We can infer from test names.
+
+Test `testDocumentationExample` expected warning for `test.pkg.MyActivity2 extends Activity` and message "The <activity> test.pkg.MyActivity2 is not registered in the manifest". The manifest probably registers MyActivity but not MyActivity2. Or something.
+
+Test `testNotRegistered` expects output contains "[Registered]" and "not registered" and maybe multiple classes. Need handle service/provider.
+
+Why previous code produced no warnings? Could be because message format mismatched and also maybe `checkClass` location issue? But it would still report something. Since output "No warnings" means no candidates matched/added. Let's debug.
+
+Possible cause: In old Lint API, `Detector.ClassScanner.checkClass` receives `ClassNode` but the name is in slashed form; location from `context.getLocation(classNode)` maybe not available. But that wouldn't prevent reporting. More likely the class file scanning is not happening because `getApplicableFiles` not overridden? Hmm.
+
+Actually a critical detail: For detectors implementing `ClassScanner`, Lint scans Java bytecode only if there are `.class` files in the project. In test infrastructure, sources are compiled? The test may use `TestFiles.java` and `TestFiles.manifest`. I think lint compiles them. If compilation fails or uses incomplete classpath, classes may not extend Activity? But expected test passes normally.
+
+Could it be that `beforeCheckEachProject`/`afterCheckEachProject` are not the right hooks; maybe should be `beforeCheckProject`/`afterCheckProject`. In newer API, both exist? `beforeCheckEachProject` is for multi-project; but `afterCheckEachProject` might be called before XmlScanner? Actually lifecycle: `beforeCheckProject` called at start of all checks for project. `beforeCheckEachProject` maybe called before each detector runs? Let's recall. The base Detector has:
+- beforeCheckProject(Context)
+- beforeCheckEachProject(Context) 
+- afterCheckEachProject(Context)
+- afterCheckProject(Context)
+In multi-project module, `beforeCheckEachProject` called for each project. I think fine.
+
+But maybe `afterCheckEachProject` is called after Java source scanning but before class file scanning? If so our candidates empty. Let's check actual Lint lifecycle. I recall: For each project, the driver runs through resources and Java files, then class files, then calls afterCheckProject. Actually class files may be scanned after Java files. The `afterCheckEachProject` might be called at end of each project after all files. So fine.
+
+Let's think about the Implementation scope. The old API maybe requires Scope.JAVA_FILE_SCOPE for source scanning? But ClassScanner works on class files. The test might not generate class files if scope lacks class? Wait the lint test harness determines which files to compile based on detector scope. If Implementation includes CLASS_FILE_SCOPE, it should compile Java sources to class files? I think yes.
+
+But the previous code used `Scope.CLASS_FILE_SCOPE, Scope.MANIFEST_SCOPE`. The lint driver runs class scanner on compiled classes. It should.
+
+Potential issue: `checkClass` method signature changed. In modern Lint, `Detector.ClassScanner` has `void checkClass(ClassContext context, ClassNode classNode)`. That's correct.
+
+Maybe the issue is that `classNode.name` is e.g. "test/pkg/MyActivity2". `context.getLocation(classNode)` might return location of class file, not source line, maybe not exact but still reports.
+
+But no warnings suggests none added.
+
+Wait maybe `extendsComponent` incorrectly returns false because `classNode.superName` is not direct "android/app/Activity" if test source uses `android.app.Activity`. In compiled class, yes.
+
+Maybe `classNode.superName` is `android/app/Activity` and check returns true, candidate added. Then `afterCheckEachProject` should report if not in registered names. But manifest registers something. Let's see testDocumentationExample. It expects MyActivity2 not registered. Maybe manifest registers MyActivity. If candidate MyActivity registered, MyActivity2 not. So warning. Unless our registered names include MyActivity2 due to wrong name or manifest has both? The expected only MyActivity2. So manifest likely registers MyActivity only. Then our detector should report. If no warning, either MyActivity2 not candidate or registeredNames contains it.
+
+Could be that `mManifestPackage` is null because visitElement on manifest didn't set? We set from package attribute. Fine.
+
+Maybe `afterCheckEachProject` not called? If no candidates, no warnings. So candidate missing. Let's examine `getSuperClass` code. It loops while current != null && superName != null. It checks superName equals component. Good. But maybe `getSuperClass` throws or returns current incorrectly causing infinite? It sets current = getSuperClass. If getSuperClass returns same node? Not.
+
+Maybe in test, class file for MyActivity2 extends AppCompatActivity? But message says Activity. No.
+
+Could be ASM `ClassNode.superName` includes leading 'L' or something? No.
+
+Maybe checkClass not invoked because class scanner must return `getApplicableCallNames`? No.
+
+Let's search memory of actual class. I think there is a subtlety: The ClassScanner method is `void checkClass(@NonNull ClassContext context, @NonNull ClassNode classNode);` and is invoked for every class, but only if the detector does not also implement `PsiScanner`? It implements XmlScanner only, so fine.
+
+I suspect the actual built-in detector doesn't use beforeCheckEachProject/afterCheckEachProject but uses `afterCheckRootProject`? Hmm.
+
+Alternatively, maybe the issue is with `beforeCheckEachProject` and `afterCheckEachProject` being called per project, but the class scanning and manifest scanning happen in different projects? In library vs main? For the test, only main project. Fine.
+
+Let's try to locate actual code mentally. I recall reading `RegistrationDetector.java` around AOSP. It had:
+
+```
+public class RegistrationDetector extends Detector
+        implements Detector.ClassScanner, Detector.XmlScanner {
+    private static final String ACTIVITY = "android/app/Activity";
+    private static final String SERVICE = "android/app/Service";
+    private static final String PROVIDER = "android/content/ContentProvider";
+
+    public static final Issue ISSUE = Issue.create(
+            "Registered",
+            "Class is not registered in the manifest",
+            "Activities, services and content providers should be registered ...",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(
+                    RegistrationDetector.class,
+                    Scope.CLASS_FILE_SCOPE,
+                    Scope.MANIFEST_SCOPE));
+
+    private List<ClassNode> mClasses;
+    private Set<String> mManifestNames;
+    private String mPackage;
+
+    @Override
+    public void beforeCheckProject(@NonNull Context context) {
+        mClasses = new ArrayList<>();
+        mManifestNames = new HashSet<>();
+        mPackage = null;
+    }
+
+    @Override
+    public void afterCheckProject(@NonNull Context context) {
+        for (ClassNode classNode : mClasses) {
+            String name = classNode.name.replace('/', '.');
+            if (!mManifestNames.contains(name)) {
+                // determine type
+                String component = getComponentType(classNode); // activity/service/provider
+                context.report(ISSUE, getLocation(context, classNode),
+                    String.format("The <%s> %s is not registered in the manifest", component, name));
+            }
+        }
+    }
+
+    @Override
+    public void checkClass(@NonNull ClassContext context, @NonNull ClassNode classNode) {
+        if ((classNode.access & Opcodes.ACC_ABSTRACT) != 0) {
+            return;
+        }
+        if ((classNode.access & Opcodes.ACC_INTERFACE) != 0) {
+            return;
+        }
+        if (classNode.name == null) {
+            return;
+        }
+        if (isComponent(context, classNode)) {
+            mClasses.add(classNode);
+        }
+    }
+
+    private boolean isComponent(ClassContext context, ClassNode classNode) {
+        ClassNode cls = classNode;
+        while (cls != null) {
+            if (ACTIVITY.equals(cls.superName)
+                    || SERVICE.equals(cls.superName)
+                    || PROVIDER.equals(cls.superName)) {
+                return true;
+            }
+            cls = getParentClass(context, cls);
+        }
+        return false;
+    }
+
+    @Nullable
+    private ClassNode getParentClass(ClassContext context, ClassNode classNode) {
+        String superName = classNode.superName;
+        if (superName == null || superName.equals("java/lang/Object")) {
+            return null;
+        }
+        try {
+            ClassReader reader = context.getDriver().getClassReader(superName);
+            ClassNode node = new ClassNode();
+            reader.accept(node, 0);
+            return node;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Arrays.asList(TAG_MANIFEST, TAG_ACTIVITY, TAG_SERVICE, TAG_PROVIDER);
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        String tag = element.getTagName();
+        if (TAG_MANIFEST.equals(tag)) {
+            mPackage = element.getAttribute(ATTR_PACKAGE);
+            return;
+        }
+        String name = element.getAttributeNS(ANDROID_URI, ATTR_NAME);
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+        if (mPackage == null) {
+            mPackage = context.getProject().getPackage();
+        }
+        mManifestNames.add(resolveClassName(name, mPackage));
+    }
+
+    private static String resolveClassName(String name, String packageName) {
+        if (name.startsWith(".")) {
+            return packageName + name;
+        }
+        if (name.indexOf('.') == -1) {
+            return packageName + '.' + name;
+        }
+        return name;
+    }
+}
+```
+
+Maybe `getLocation` uses `context.getLocation(classNode)`. In afterCheckProject, context is `Context` not `ClassContext`. Need location stored from class scan. The built-in likely stores `Location` in Candidate. The previous code stores location. But we need message and component type.
+
+Maybe the actual issue causing no warnings is that `afterCheckProject` uses `Context` not `ClassContext`, and `context.report` may require a location. That is fine. But previous used `afterCheckEachProject` and `context.report(ISSUE, candidate.location, ...)` should work.
+
+Hmm.
+
+Let's think of test infrastructure. It might use `TestLintTask.lint().files(...).run().expect(...)` with `TestFiles.java` source. If Implementation scope includes `CLASS_FILE_SCOPE`, the test harness compiles Java files. But if there are compile errors, maybe class files not generated. The test source likely just extends `Activity` with no imports? Maybe uses `import android.app.Activity;`. The test harness uses stub android.jar? It should.
+
+Another critical possibility: The test may be run with `compileSdkVersion` and the Java source extends `android.app.Activity`, but the compiled class's superName might be `android/app/Activity`. Good.
+
+Maybe the previous code's `beforeCheckEachProject`/`afterCheckEachProject` methods are not being called because the detector also implements `XmlScanner` and lifecycle methods differ? Actually they are called regardless.
+
+Wait, maybe there is a name collision: The class is `RegistrationDetector` and there is a built-in `RegistrationDetector` in Android SDK? In tests, they import com.android.tools.lint.checks.RegistrationDetector. Our class overrides built-in? No, we are implementing same. Tests test our class.
+
+Let's inspect error details more. It says testNotRegistered: Not true that "[Registered]" is found in lint output "No warnings." So the entire output no warnings. That means afterCheck reported no candidates. Could candidates be all registered incorrectly? If manifest registers all? Test name `testNotRegistered` might have classes not registered, so manifest empty. If candidates empty -> no warnings. If candidates exist and registeredNames empty, warnings. So candidate empty.
+
+Why candidates empty? Maybe `checkClass` not called at all due to `beforeCheckEachProject` clearing after class scan? No.
+
+Wait, `beforeCheckEachProject` might be called between class scan and xml scan? Actually in Lint driver, the sequence for a detector:
+1. beforeCheckProject
+2. For each resource file (XML) -> applicable detectors run.
+3. For each Java source or class file? 
+4. afterCheckProject
+But `beforeCheckEachProject` is called at start of each project? I think it's before each phase? Let's recall more precisely. There are:
+- `beforeCheckProject(Context)` / `beforeCheckEachProject(Context)`: invoked before a project is checked.
+- `afterCheckProject(Context)` / `afterCheckEachProject(Context)`: invoked after project is checked.
+The "Each" variants are for multi-project; maybe called per project, while without Each is whole root. If class scanning and manifest scanning both happen during project check, before/after each only once.
+
+So not issue.
+
+Maybe the previous code has a bug in `extendsComponent`: It checks `current.superName` first, but if class extends Application? not. But for Activity direct, returns true. Wait `current` initialized `classNode`. It checks `current.superName`. For MyActivity2, superName = "android/app/Activity" -> returns true. Good.
+
+Unless classNode.superName is "java/lang/Object" because the test source is not compiled (source .class stub). In lint test, the compiled class may not extend Activity because android.jar not on classpath; source compiled against stubs that extend Object. Hmm. If android.jar not included, the source file `extends Activity` would fail compilation unless Activity stub class exists. Test harness likely includes stub. So superName should be Activity.
+
+But maybe the test uses `android.app.Activity` stub whose superName is `android/view/ContextThemeWrapper` etc. Our method checks direct superName equals Activity. For a class extending Activity, direct superName is Activity. Good.
+
+Maybe the test uses `extends android.app.Activity` but our constant is `android/app/Activity`. Correct.
+
+Let's see if maybe class scanning not invoked because Implementation scope is wrong. In modern lint, there is `Scope.CLASS_FILE_SCOPE` but detector must also implement `FileScanner`? No.
+
+Could it be that `Scope.CLASS_FILE_SCOPE` does not include `Scope.ALL_RESOURCE_FILES`? The lint driver runs both scanners by union of scopes. Implementation constructor `Implementation(Class<? extends Detector>, Scope, Scope...)` sets analysisScopes. If analysisScopes = {CLASS_FILE_SCOPE, MANIFEST_SCOPE}, then detector runs on class files and manifest. Fine.
+
+Maybe issue is that the test's expected output includes `src/test/pkg/MyActivity2.java:5:` which is source file path, not class file. If we report location from class file, line number may be absent or path to `.class`. The expected location line 5 in `.java`. Does `ClassContext.getLocation(classNode)` map to source? I think yes, it uses class file line numbers to produce source location. But maybe in the previous code, `context.getLocation(classNode)` returned a location pointing to `.class` file, but still reports. However line numbers maybe not recognized. But test expects `.java:5`. We need ensure location maps to source. The built-in uses `context.getLocation(classNode)` likely works.
+
+Could be that `context.getLocation(classNode)` in ClassContext takes a ClassNode and returns location of the class declaration. Yes.
+
+Need output final code. Need ensure it passes tests. We need know exact expected messages for all cases. Let's reconstruct from expected output snippets. For `testDocumentationExample`, expected exactly:
+```
+src/test/pkg/MyActivity2.java:5: Warning: The <activity> test.pkg.MyActivity2 is not registered in the manifest [Registered]
+public class MyActivity2 extends Activity {
+             ~~~~~~~~~~~
+0 errors, 1 warnings
+```
+
+So message format: "The <activity> test.pkg.MyActivity2 is not registered in the manifest". Note "activity" singular lower-case tag name. For services/providers, likely "service"/"provider". The class name in dot notation. Location highlight class name. `context.report` with location of the class node should produce highlight ~ tilde under class name. Good.
+
+For testNotRegistered, expected output contains "[Registered]" and "not registered". Might be multiple warnings. Need ensure service/provider detection.
+
+Now why previous code produced no warnings. Maybe because in `visitElement` it adds registered names, and in `afterCheckEachProject` it checks candidate names. But if candidate list empty, no warnings. Maybe candidate list empty due to `extendsComponent` requiring resolving superclasses and failing for direct? Hmm.
+
+Wait, in `extendsComponent`, the while condition is `current != null && current.superName != null`. It checks `current.superName` before moving. Direct superName is Activity. Good. But maybe `classNode.superName` is null in some class file format? No.
+
+But if `classNode.name` null, skip. Not.
+
+Could it be that `checkClass` is invoked with `ClassNode` whose `access` includes ACC_SUPER (0x0020) always; doesn't matter.
+
+Maybe abstract? Not.
+
+Let's think about test source. Maybe MyActivity2 is inside a static nested class? No, expected line 5.
+
+Maybe the class is in a library module and class scanning not run? Unlikely.
+
+Maybe the test uses `lint().allowMissingSdk()` and compiled classes use stub android.jar. Hmm.
+
+Let's search memory: I think I have seen actual built-in RegistrationDetector. It doesn't use `beforeCheckEachProject` but `beforeCheckProject`. It stores `List<ClassInfo>` maybe not ClassNode. Actually I recall maybe it uses `LintClient.runReadAction`? No.
+
+Could it be that the issue is `Scope.CLASS_FILE_SCOPE` means it only checks `.class` files, but test harness's `.java` source is not compiled when the only scope is CLASS_FILE? Wait TestLintTask probably compiles Java files to a temporary directory when scope includes Java or class. But maybe with only CLASS_FILE_SCOPE, it does not compile source files; instead it uses existing `.class` files. Since test files are source .java, there are no class files, so checkClass never called. Is that possible? In lint tests, if you provide `java(...)` source files, the harness compiles them if needed. Which scopes trigger compilation? I think it compiles for any scope that includes Java/class. But maybe `Scope.CLASS_FILE_SCOPE` specifically expects pre-existing class files, while `Scope.JAVA_FILE_SCOPE` triggers source scanning. Hmm.
+
+Actually in Lint, `Scope.CLASS_FILE_SCOPE` corresponds to Java bytecode class files. The test harness may compile source to class files when detector scope includes CLASS_FILE_SCOPE. There is logic in TestLintTask that compiles Java sources based on scopes: if scope includes `Scope.JAVA_FILE_SCOPE` or `Scope.CLASS_FILE_SCOPE`, compile. I think yes.
+
+But maybe it compiles only if `allowCompilation()` and there is an Issue with `Scope.JAVA_FILE_SCOPE`. If Implementation only has CLASS_FILE_SCOPE, maybe not compile? Let's inspect TestLintTask logic from memory. It determines which files to create and whether to compile. It likely compiles for `Scope.JAVA_FILE_SCOPE` and `Scope.CLASS_FILE_SCOPE`. But not sure.
+
+If compilation not triggered, no class files -> checkClass not called -> no warnings. That would explain. The actual built-in RegistrationDetector's Implementation might use `Scope.JAVA_FILE_SCOPE`? But it implements ClassScanner, so it needs class files. However the tests may provide compiled `.class` files directly? In lint test infrastructure, `TestFiles.class(...)`? Not likely.
+
+Maybe the test uses `TestFiles.java(...)` and the harness always compiles Java files regardless of scope. If not, then built-in would also fail.
+
+Let's consider actual built-in uses `Scope.JAVA_FILE_SCOPE`? But ClassScanner needs class files; maybe old API has `Scope.ALL_CLASS_FILES`? Hmm.
+
+Alternative: In newer Lint, the preferred way is implementing `SourceCodeScanner` with `applicableSuperclasses` and UAST, not ASM. But the test expected message style matches built-in old detector. Maybe the built-in has been updated to UAST? But class name RegistrationDetector likely still ASM in older versions. The question explicitly says "Lint Detector implementations in Java that are correct, idiomatic, and compile cleanly against the Android Lint API." And issue ID Registered. The built-in may indeed be ASM.
+
+We need figure out the exact API in this environment. The previous code compiled cleanly (per prompt says compile cleanly? It failed tests). So API includes ClassScanner, ClassContext.getLocation, etc. The previous code compiled. The error is runtime tests. So fix logic, not API.
+
+Why previous runtime failed? Let's maybe simulate. The candidate list may have been cleared before class scan? `beforeCheckEachProject` clears. If class scan occurs before beforeCheckEachProject? That would clear candidates. Wait order could be: For each project, the driver might call `beforeCheckEachProject` before each *type* of check? No. But maybe `beforeCheckEachProject` is called before XML scanning, but after class scanning? Let's verify. The Lint driver probably runs class scanners before resource scanners? Or maybe class file scanning is part of `checkIndividualClassFiles` which is invoked at beginning. The `beforeCheckEachProject` method is invoked in `runClassDetectors`? I need to know exact sequence.
+
+Actually I recall lifecycle: 
+- `beforeCheckProject` / `beforeCheckEachProject`: called before any files are checked.
+- Resource files, Java files, class files checked.
+- `afterCheckEachProject`: called after all files in project.
+- `afterCheckProject`: called after all projects.
+
+So clearing before class scan would empty previous project only. Not issue.
+
+Maybe the detector instance is reused across projects, and `beforeCheckEachProject` clears after XML but before class? If driver calls XML scanning first, then `beforeCheckEachProject`? No.
+
+Could there be a concurrency issue? No.
+
+Let's think about `getSuperClass` returning same node leading to infinite? Not causing no warnings, would hang.
+
+Maybe `checkClass` is invoked but candidate is abstract? Test uses `public class MyActivity2 extends Activity` not abstract.
+
+Let's read testDocumentationExample source to see line numbers. It expects at line 5. Source maybe:
+```
+package test.pkg;
+
+import android.app.Activity;
+
+public class MyActivity2 extends Activity {
+}
+```
+Line 5 is class declaration. Good.
+
+Maybe the issue is that `context.getLocation(classNode)` in `checkClass` is invoked in ClassContext, but in `afterCheckEachProject` the `candidate.location` might not be valid because the ClassContext no longer exists? Location objects are static though.
+
+Maybe `afterCheckEachProject` is not called because we used `Context context` not `ClassContext`? No.
+
+Wait, maybe `afterCheckEachProject` signature changed? In Detector base, there is `protected void afterCheckEachProject(@NonNull Context context)`. Yes.
+
+Maybe the issue is `beforeCheckEachProject` clears too late: class files are scanned in a global phase before `beforeCheckEachProject`? Let's search memory of Lint driver: It might call `mClassDetectors` in `checkProject`? I recall `LintDriver.runClassDetectors` is called within `checkProject` after `runFileDetectors`? Hmm.
+
+Let's look at actual AOSP `LintDriver` lifecycle. There is `runFileDetectors` for resources. For Java, there is `runJavaScanner` (source) and `runClassScanner` (bytecode). The order maybe:
+1. runClassDetectors (for incremental and class files)
+2. runFileDetectors (XML)
+3. runJavaScanner? 
+But `beforeCheckEachProject` is called at start of `checkProject`. So class scanning after.
+
+Could `afterCheckEachProject` be called before class scanning in some mode? Unlikely.
+
+Maybe the old built-in uses `afterCheckRootProject` or `beforeCheckRootProject` because registered names might be in manifest of main project while classes in library? No.
+
+Let's see if `mRegisteredNames` includes candidate due to package resolution. Suppose manifest has `package="test.pkg"` and `<activity android:name=".MyActivity" />`. `resolveClassName` returns `test.pkg.MyActivity`. Candidate MyActivity2 name `test.pkg.MyActivity2` not in set. So warning. Unless candidate name computed wrong? It replaces '/' with '.': `test.pkg.MyActivity2`. Good.
+
+Could `mManifestPackage` be set after visitElement for activity because manifest element visited before TAG_MANIFEST? In XML, root manifest is first. Good.
+
+Maybe `context.getProject().getPackage()` returns null, but we set from manifest.
+
+Let's consider potential API differences in `visitElement`: `element.getAttributeNS(ANDROID_URI, ATTR_NAME)` returns empty string if not present. We check null or empty. Fine.
+
+Maybe `element.getAttribute(ATTR_PACKAGE)` returns package with namespace? We used no namespace. `ATTR_PACKAGE` is "package". The manifest element may have `package` attribute with no namespace. `getAttribute` works. Fine.
+
+Why no warnings? Let's think if class scanning happens at all. In Lint, class file scanning is not run unless the detector's `getApplicableFiles` includes class files. By implementing ClassScanner with scope CLASS_FILE_SCOPE, it should.
+
+But perhaps the previous code's `ISSUE` Implementation uses `Scope.CLASS_FILE_SCOPE, Scope.MANIFEST_SCOPE`. In the `Issue.create`, `Scope.CLASS_FILE_SCOPE` may be deprecated/removed in newer Lint? If so, the scope might be empty causing no class scanning. But compile would fail if removed. It compiled. So exists.
+
+Maybe the test harness only runs detectors on scopes that are *all* present in the file set? The test project includes `AndroidManifest.xml` (manifest) and `.java` source. It might compile source to `.class` and class scanning runs. Good.
+
+Maybe `checkClass` is invoked for classes in the project, but `classNode.superName` is not "android/app/Activity" because the source file was compiled with a stub `android.app.Activity` that extends `java.lang.Object`. If the stub is minimal `public class Activity {}`, then superName is Object. Then our `extendsComponent` fails. But the test expects Activity. Usually lint test stubs include `public class Activity extends ContextThemeWrapper` etc. But maybe the test uses `android.jar` from SDK? The test might have a stub `public class Activity { }`. Wait if the stub Activity extends Object, then any class extending it is not an Activity component. But the detector needs to know it's an activity; it would need to check against class name, not superclass chain. However the expected test would fail if stub doesn't extend actual Android Activity. But maybe the test stubs `Activity` as a direct subclass of Object and the detector is expected to treat any class whose direct superclass is named `android/app/Activity` as component. That still works. So superName should be "android/app/Activity".
+
+If the test uses `android.app.Activity` from a real android.jar, superName is not Object. Good.
+
+Wait, but in test expected message, class extends Activity. If Activity stub extends Object, is it still considered Activity? Yes, by direct superName. So fine.
+
+Let's think about `afterCheckEachProject` in our previous code: it iterates mCandidates and reports. If mCandidates has entries, warnings appear. It doesn't. The only way is checkClass not called or not adding.
+
+Maybe `checkClass` is called but `extendsComponent` returns false because `classNode.superName` is not exactly `android/app/Activity` but e.g. `android/app/Activity` with some prefix? No.
+
+Let's maybe check ASM `ClassNode.superName` for `class MyActivity2 extends Activity`. It returns `android/app/Activity`. Correct.
+
+Maybe `extendsComponent` infinite recursion? No.
+
+Maybe `getSuperClass` returns same node because `relativePath` uses superName e.g. `android/app/Activity.class` and project class folders includes Android jar? But it reads from class folders and finds a class file for Activity stub, reads it. That returns Activity ClassNode whose superName maybe Object. Then loop checks Activity.superName (not component) then getSuperClass returns null. But direct match already returned true before reading. So fine.
+
+Wait in `extendsComponent`, for direct Activity, the condition `superName.equals(ACTIVITY)` triggers return true before calling getSuperClass. So no reading needed.
+
+Thus candidates should be added.
+
+Unless the `classNode.access & Opcodes.ACC_ABSTRACT` is true? For a regular class, access includes ACC_SUPER (0x20), not abstract. So no.
+
+Maybe `classNode.name` is something like `test/pkg/MyActivity2$1`? No.
+
+Let's try to think about test harness output: If there are candidates and registeredNames, but all registered, output no warnings. For testDocumentationExample, manifest registers `.MyActivity` only. Candidate MyActivity2 not registered. So warning. Unless manifest also registers `.MyActivity2`? The expected says not. So if candidates empty, no warning.
+
+Maybe the test source uses `public class MyActivity2 extends MyActivity` where MyActivity is registered. Then our detector needs to walk superclass chain to see MyActivity extends Activity. In that case, direct superName is `test/pkg/MyActivity`, not a component. Our `getSuperClass` tries to load `test/pkg/MyActivity.class` from project class folders. If class folders exist, it works. If not, it returns null, and we miss. But expected line is `extends Activity` not extends MyActivity. So not.
+
+Maybe test source for documentation example has `MyActivity2 extends Activity` and manifest registers `MyActivity` (not MyActivity2). That matches expected.
+
+Could the issue be that `mRegisteredNames` includes `test.pkg.MyActivity2` because manifest uses `android:name="test.pkg.MyActivity2"`? No expected says not.
+
+Wait, maybe the test expected snippet from user is from `testDocumentationExample` and expected only MyActivity2. The manifest might be:
+```
+<manifest package="test.pkg">
+    <application>
+        <activity android:name=".MyActivity" />
+    </application>
+</manifest>
+```
+source:
+```
+package test.pkg;
+import android.app.Activity;
+public class MyActivity extends Activity { }
+public class MyActivity2 extends Activity { }
+```
+So candidate MyActivity registered, MyActivity2 not. Good.
+
+Given this, our code should produce warning. It doesn't. So maybe class scanning indeed not happening.
+
+Let's see if the previous code used `Scope.MANIFEST_SCOPE` but not resource scope. The Implementation constructor in old Lint: `Implementation(Class<? extends Detector>, Scope, Scope...)` stores `analysisScope` as the *combined* set. If you pass CLASS_FILE_SCOPE and MANIFEST_SCOPE, the detector will run on class files and manifest. The test harness should compile. But maybe the harness only compiles when scope includes `Scope.JAVA_FILE_SCOPE` or `Scope.ALL_JAVA_FILES`. If CLASS_FILE_SCOPE alone doesn't trigger compilation. But the built-in detector must have been passing tests, so either it used a different scope or the harness compiles for class scope.
+
+Maybe built-in RegistrationDetector uses `Scope.JAVA_FILE_SCOPE` and implements `JavaScanner`/`UElementHandler` instead of ClassScanner. But the user wants RegistrationDetector in Java. However the test expected message includes `<activity>` tag, which can be done from source scanning. But class scanning easier.
+
+Let's search memory of AOSP `RegistrationDetectorTest`. I recall it tests issues like "Class is not registered in the manifest" and uses ASM. The source files are `.java`. The harness probably compiles them. So why fail?
+
+Maybe the previous code used `context.getLocation(classNode)` in ClassContext which in newer API may not support ClassNode and instead must use `context.getLocation(Node)`? It compiled though. If it threw at runtime, maybe caught? It wouldn't produce warnings. But exceptions would be logged? Not sure.
+
+Could there be a problem with `Location` from class context: in `afterCheckEachProject`, `context` is a `Context`, not `ClassContext`, and `context.report` may not accept a `Location` created by `ClassContext`? It should.
+
+Maybe the candidate list is populated during class scan, but `afterCheckEachProject` runs in a different detector instance? In Lint, a single detector instance is used per driver run, I think. If not, fields would not persist. But built-in stores fields, so instance persists.
+
+Wait, does Lint reuse detector instances across projects? Yes.
+
+Could `beforeCheckEachProject` be called after class scan but before manifest, clearing candidates? Let's examine driver code mentally. The `checkProject` method might do:
+```
+mDriver.fireBeforeCheckEachProject(project);
+runFileDetectors(...); // XML
+runJavaScanner(...); // source
+runClassScanner(...); // bytecode
+mDriver.fireAfterCheckEachProject(project);
+```
+If so, class scan happens before `beforeCheckEachProject`? No, beforeCheck at top. So okay.
+
+But maybe `runClassScanner` is called in `checkProject` before `fireBeforeCheckEachProject`? Unlikely.
+
+Let's check AOSP `LintDriver` around `runClassDetectors`. I recall there is `checkProject` that calls `fireBeforeCheckEachProject` near the start. Then it might run class detectors at the end? There is also `runExtraPhases`. Hmm.
+
+Maybe the previous code's `beforeCheckEachProject` clears after class detectors have already been run? If `runClassDetectors` is called before `fireBeforeCheckEachProject`, then class candidates collected, then beforeCheck clears them, then XML, then afterCheck empty. That would explain no warnings! Is that possible? Let's check lifecycle naming: `beforeCheckEachProject` might be called before checking *each individual file type* (resource, java, class) rather than whole project. Actually the "EachProject" suffix suggests per project but there is also `beforeCheckProject` for all projects. Hmm. But maybe Lint driver runs class detectors in a separate phase and calls `beforeCheckEachProject` before each project but *after* class detectors for incremental reasons? Need verify.
+
+Look at `Detector` javadoc:
+- `beforeCheckProject(Context)`: Called before any files are checked for the given project. This is a good opportunity to do initialization.
+- `beforeCheckEachProject(Context)`: Like `beforeCheckProject`, but called for each project, including library projects. Maybe called before each project? The difference is `beforeCheckProject` called for main? Actually:
+   - `beforeCheckProject`: Called before checking a project (and all its module dependencies).
+   - `beforeCheckEachProject`: Called before checking each project individually.
+So both before checks.
+
+- `afterCheckEachProject`: Called after each project checked.
+- `afterCheckProject`: after root project.
+
+So clearing in beforeCheckEachProject safe.
+
+But maybe class scanning is done in a separate pass before `beforeCheckEachProject`? No.
+
+Let's consider if there is a separate `beforeCheckRootProject`. Not.
+
+Maybe the issue is that `checkClass` is called in a pass before `beforeCheckEachProject` because class scanning is incremental and may happen before the project's detectors are initialized? Hmm.
+
+Let's search memory of actual built-in RegistrationDetector. It likely uses `beforeCheckProject` not `beforeCheckEachProject`, and `afterCheckProject`. Does that avoid the issue? If `beforeCheckProject` is called before class scan but `beforeCheckEachProject` after, then using `beforeCheckProject` would fix. But is that the case? Let's see: `beforeCheckProject` is called for the root project before any checks, including dependencies. `beforeCheckEachProject` is called before each project (including dependencies) check, but maybe after class files? No.
+
+Maybe there is nuance: `beforeCheckProject` is called once for main project; class scanning may happen for the main project then, and `beforeCheckEachProject` is called for each library before their checks. If the test has only main, both called. No difference.
+
+Let's not get stuck; design a correct implementation matching built-in. We should store candidates and locations. Use `context.getDriver().getClassReader` for superclass resolution (more robust). Use `beforeCheckProject` and `afterCheckProject` maybe. Ensure message format.
+
+But to be safe, we might implement both `beforeCheckProject` and `beforeCheckEachProject`? We can store fields and only clear in `beforeCheckProject`. But if `checkClass` is called before `beforeCheckProject`, fields default empty then populated; `beforeCheckProject` would clear them. So if class scan before beforeCheck, clearing in beforeCheckProject also bad. So need know order.
+
+Actually if we initialize fields at declaration (final list) and clear in `beforeCheckProject`/`beforeCheckEachProject`, any class scan before that would be lost. To avoid, perhaps don't clear at all? But then across test runs fields persist (detector instance reused) causing stale data. However in a single lint run, not clearing is okay if initialized once per detector instance. But if detector instance is reused across test methods within same JVM, stale data. Usually Lint creates new detector instance per run? Actually Implementation creates new instance each run? The driver uses detector class and instantiates maybe once per run. Test runs create new tasks, likely new driver, new detector. So we could lazily initialize in `beforeCheckProject` only. But if class scan before beforeCheckProject, still lost. Hmm.
+
+Maybe better to not rely on fields across phases? But we need combine class scan and manifest. Could collect in a static field? Bad.
+
+Maybe the driver instantiates detector after all scans? No.
+
+Let's look at actual built-in code to see which lifecycle methods it uses. I strongly think it uses `beforeCheckProject` and `afterCheckProject`, storing lists. That works in tests. If class scan were before beforeCheckProject, built-in would fail. So it must be after. The previous code used `beforeCheckEachProject`; maybe there is a bug where `beforeCheckEachProject` is called *after* class scanning for the main project? Let's investigate by reading actual `Detector` lifecycle from AOSP.
+
+From AOSP `Detector.java`:
+```
+/**
+ * Called before any files are checked for the given project. This is a good
+ * opportunity to do initialization.
+ */
+public void beforeCheckProject(@NonNull Context context) { }
+
+/**
+ * Like {@link #beforeCheckProject(Context)}, but called for each project,
+ * including library projects.
+ */
+public void beforeCheckEachProject(@NonNull Context context) { }
+
+/**
+ * Called after all files have been checked for the given project.
+ */
+public void afterCheckEachProject(@NonNull Context context) { }
+
+/**
+ * Called after all files have been checked for the root project.
+ */
+public void afterCheckProject(@NonNull Context context) { }
+```
+
+In `LintDriver`, there is `checkProject` that calls `fireBeforeCheckEachProject` and `fireBeforeCheckProject`. Let's recall ordering from `LintDriver.checkProject`:
+```
+private void checkProject(@NonNull Project project, @NonNull Project main) {
+    ...
+    fireBeforeCheckEachProject(project);
+    fireBeforeCheckProject(project); // maybe not
+    ...
+}
+```
+Actually I think it calls `fireBeforeCheckProject` then `fireBeforeCheckEachProject`. Hmm.
+
+Search memory: In `LintDriver.runFileDetectors` maybe calls `fireBeforeCheckEachProject` before each resource folder. No.
+
+I can try to recall `lint-cli` code: `checkProject` sets up, then calls `runClassDetectors`? There is `runClassDetectors` at the beginning? The driver might first run class detectors for all projects, then run resource detectors. The lifecycle hooks might be called around `checkProject` but class detectors maybe run in `checkProject` as part of file detection. Let's find approximate.
+
+Actually I recall lint's `LintDriver`:
+1. Runs `runClassDetectors` over all projects. This reads `.class` files and runs class scanners. It may call `beforeCheckProject`? The class detectors are run in a batch across all projects because class files from dependencies needed. If so, `checkClass` could be called before `beforeCheckProject`. But then fields not initialized. However built-in stores fields initialized in declaration, and perhaps uses `afterCheckProject` after all. But manifest scanning uses `visitElement` during resource phase, which is after class scanning. So if class scan before `beforeCheckProject`, candidate list populated. Then `beforeCheckProject` clears it -> lost. So built-in must not clear there either, or class scan after.
+
+Maybe class detectors are run *after* resource detectors but before after hooks. Let's find more reliable.
+
+I found memory: `LintDriver` has method `checkIndividualClassFiles` that runs class detectors on all class files in project. It's called in `checkProject` after `runFileDetectors` and `runJavaScanner`. There is also `runClassDetectors` called after `runFileDetectors`. The lifecycle hooks `beforeCheckProject` are called at beginning of `checkProject`, and `afterCheckProject` at end. So class scan after beforeCheck. Good.
+
+Then previous code's use of `beforeCheckEachProject` is fine. So why no warnings? Maybe due to some other bug.
+
+Let's consider the possibility that `checkClass` is called but `extendsComponent` returns false because `classNode.superName` is not `android/app/Activity` but `android/app/Activity` with a `null`? No.
+
+Wait, maybe the test source uses `extends android.app.Activity` but compiled class extends `android/app/Activity` only if source compiled with Android SDK. The lint test may compile source using a stub `android.app.Activity` that is a direct subclass of `java.lang.Object`, but still superName is `android/app/Activity`. So our check matches.
+
+Could the issue be with `classNode.name` containing `$` for inner? Not.
+
+Let's examine the previous code's `afterCheckEachProject`: it reports `context.report(ISSUE, candidate.location, "Class " + candidate.name + " is not registered in the manifest");`. If candidate exists and not registered, warning appears. Tests would see warnings, but message wrong. But error says no warnings. So candidate missing.
+
+Maybe `checkClass` is not invoked because the detector's `getApplicableFiles` is not overridden. For `Detector.ClassScanner`, the driver determines class files from scope. It should call. But perhaps `Detector.ClassScanner` requires overriding `getApplicableCallNames` or `applicableFields`? No, those are for bytecode instruction scanners. The class scanner's `checkClass` is called for every class file.
+
+But wait, in Lint API, `ClassScanner` has multiple methods: `checkClass(ClassContext, ClassNode)`, `getApplicableCallNames()`, etc. The `checkClass` method may only be called if the detector returns `getApplicableFiles`? Let's check. Actually `ClassScanner` interface includes `checkClass` and `getApplicableCallNames`. The driver might only call `checkClass` for detectors that also override `applicableFiles`? No, `checkClass` is the class-level callback.
+
+Maybe the previous code compiled but `checkClass` is never called because the detector must also implement `FileScanner` and return class files? In old Lint, class scanning is done by `ClassScanner` and driver uses scope to find class files. It should.
+
+Let's test with a simple class: If we had a detector with only ClassScanner and checkClass printing, would it run in lint tests? I believe yes.
+
+Maybe the previous code didn't include `@Override` for `checkClass`? It did. Good.
+
+Maybe `ClassContext` is in package `com.android.tools.lint.detector.api.ClassContext`. Good.
+
+Maybe the issue is `mCandidates` is `final List` and `beforeCheckEachProject` clears. If `checkClass` is called after `beforeCheckEachProject`, okay. But if `afterCheckEachProject` called after `beforeCheckEachProject` of next project? For single project, no.
+
+Wait maybe `beforeCheckEachProject` is called multiple times: once for the main project and once for each phase? If called between class scan and manifest scan, then class candidates cleared before manifest registration, but afterCheck still uses empty candidates -> no warnings. That could explain. Let's see if Lint calls `beforeCheckEachProject` before each *scanner type* (resource, class, java). I doubt, but the name "EachProject" might mean for each project, not each phase. However there is also `beforeCheckFile` for files.
+
+Maybe `beforeCheckEachProject` is called before XML scanning but after class scanning because class scanning is considered pre-check. Hmm.
+
+Let's search memory: I recall `Detector` has `beforeCheckProject` and `beforeCheckEachProject`. In `LintDriver`, there are methods like `runClassDetectors` which call `mClient.runAction` and maybe `mCurrentProject`. The `beforeCheckEachProject` is invoked in `checkProject` at start. So no.
+
+Alternative explanation: The previous code's `afterCheckEachProject` was not called because it threw an exception due to null candidate.location? But that would show error, not no warnings.
+
+Maybe `checkClass` was not called because the test only included source `.java` files and the Implementation scope `Scope.CLASS_FILE_SCOPE` caused lint to look for `.class` files, not compile. In that case no class scan. To fix, use `Scope.JAVA_FILE_SCOPE` and implement source scanner? But the API in previous code is ASM. If we change to source scanner, the class name issue can be detected by `applicableSuperClasses`? Let's explore possibility.
+
+In modern Lint (UAST), you can implement `SourceCodeScanner` with `getApplicableUastTypes` and handle `UClass`. But the prompt's previous code uses ASM, and tests may expect ASM. However the expected message has line and column in `.java`, which both ASM (with debug line info) and source scanner can provide.
+
+The issue ID "Registered" might be from older Lint; the built-in may be ASM. If the test harness doesn't compile for CLASS_FILE_SCOPE, then built-in would fail. So likely it does compile. But maybe in the version of lint used by tests, `Scope.CLASS_FILE_SCOPE` is not enough; the Implementation should use `Scope.ALL_CLASS_FILES`? Let's check Scope constants.
+
+Scope options:
+- ALL_RESOURCE_FILES
+- RESOURCE_FILE_SCOPE
+- BINARY_RESOURCE_FILE_SCOPE
+- ALL_JAVA_FILES
+- JAVA_FILE_SCOPE
+- CLASS_FILE_SCOPE
+- ALL_CLASS_FILES
+- MANIFEST_SCOPE
+- GRADLE_SCOPE
+- PROGUARD_SCOPE
+- OTHER
+- ALL
+
+`Scope.CLASS_FILE_SCOPE` vs `Scope.ALL_CLASS_FILES`. The difference: `CLASS_FILE_SCOPE` means one class file at a time; `ALL_CLASS_FILES` means all class files. Implementation probably uses `Scope.CLASS_FILE_SCOPE` for detectors that analyze individual class files. The driver uses scope to find class files. Both likely fine.
+
+Maybe the test harness compiles only if scope includes `Scope.JAVA_FILE_SCOPE` or `Scope.ALL_JAVA_FILES`. If we use `Scope.CLASS_FILE_SCOPE`, it might not compile, and there are no class files. To confirm, we could check `TestLintTask` source. I recall it builds a fake project; if any issue scope includes `Scope.CLASS_FILE_SCOPE`, it compiles Java files to class files. Actually it might compile only if `mAllowCompilation` and there are Java files and scope includes `Scope.JAVA_FILE_SCOPE` or `Scope.ALL_JAVA_FILES`. Because class file scope might be used to scan compiled library classes, not source. Hmm.
+
+Let's search memory: In `TestLintTask`, there is a method `createProject` and `compile`. It checks `if (needsClassFiles())`. `needsClassFiles` probably checks if scope includes `Scope.CLASS_FILE_SCOPE` or `Scope.ALL_CLASS_FILES` or `Scope.ALL_JAVA_FILES`. I think yes.
+
+If not, then changing to `Scope.ALL_JAVA_FILES` might compile. But then ASM class scanner not invoked. We could implement Java scanner.
+
+Let's think: The built-in RegistrationDetector in AOSP may actually have been migrated to `SourceCodeScanner` in newer versions. But the prompt asks for Java class using Lint API; doesn't specify ASM. The previous code attempted ASM and failed. The correction may be to switch to source scanning if class scanning not working. But expected message format can be produced with UAST.
+
+Need determine the API version. The previous code imports `org.objectweb.asm.tree.ClassNode`, `com.android.annotations.NonNull`. This is older lint (maybe 26.x). In that version, `SourceCodeScanner` (UAST) maybe exists but not used. The built-in RegistrationDetector likely still ASM. But tests failing in their environment; maybe they are using a harness that doesn't compile class files for `CLASS_FILE_SCOPE`? But the built-in test passes. Hmm.
+
+Let's consider if the previous code's `afterCheckEachProject` not called because the detector also implements `XmlScanner` and the driver only calls afterCheck at `afterCheckProject`? No.
+
+Maybe the issue is that `beforeCheckEachProject` and `afterCheckEachProject` are not called for detectors implementing `ClassScanner` because class scanning runs in a global phase not tied to a project? Wait class files can be in dependencies. The driver might run class scanners in a separate pass after all projects, with `Context` for main project. If so, `beforeCheckEachProject` might not be called before checkClass, but `checkClass` is called with a ClassContext that has project. Then fields initialized at declaration, candidates populated. Then manifest scanning `visitElement` called in XML phase. Then `afterCheckEachProject` called at end of main project, reports. So should work. Unless `beforeCheckEachProject` is called *after* class scanning, clearing candidates. If class scanning is global before projects, then beforeCheckEachProject of main clears. But built-in would also have this issue if it clears in beforeCheckProject. Maybe built-in doesn't clear and relies on new instance per lint run. But across test runs within same JVM? Could be issue.
+
+Wait, perhaps Lint creates new detector instance per `lint()` run. So fields can be initialized in constructor and no clearing needed. The previous code clears in beforeCheckEachProject. If class scan happens before that, cleared. Maybe built-in uses constructor initialization and `beforeCheckProject` clearing but class scan after. Hmm.
+
+To be robust, we can avoid clearing in lifecycle methods that might run after class scanning. Instead, initialize fields in the constructor and not clear. But if the same detector instance is reused across multiple `lint()` runs in one test method? Usually one run. If reused across test methods, stale data. The test harness likely creates new instances. But to be safe, we can clear in `beforeCheckProject` (or `beforeCheckEachProject`) only if we know class scanning occurs after. Since uncertain, maybe we can use `ThreadLocal`? No.
+
+Alternatively, we can collect candidates and registered names in static maps keyed by project? But lifecycle no project parameter? Context has project. We can use `context.getProject().getReferenceDir()` as key. Then clearing not needed. But static data across runs bad but with project keys may be okay. However if same project reused, old entries overwritten when re-collected. But if not collected, stale. Hmm.
+
+Maybe better approach: Use `context.getProject()` in checkClass and visitElement to store per-project in a `Map<Project, Set<String>>`. But we need afterCheck to know project. `afterCheckEachProject(Context context)` gives project. We can store in maps keyed by project. Initialize maps in `beforeCheckProject`. But class scan before beforeCheck could still be lost if not initialized. If maps initialized lazily in checkClass/visitElement and afterCheck aggregates, we avoid clearing. Let's design:
+
+```
+private final Map<Project, List<Candidate>> mCandidates = new HashMap<>();
+private final Map<Project, Set<String>> mRegistered = new HashMap<>();
+```
+In checkClass: `Project project = context.getProject(); mCandidates.computeIfAbsent(project, k -> new ArrayList<>()).add(candidate);`
+In visitElement: `Project project = context.getProject(); mRegistered.computeIfAbsent(project, k -> new HashSet<>()).add(...);`
+In afterCheckEachProject: `Project project = context.getProject(); List<Candidate> candidates = mCandidates.get(project); Set<String> registered = mRegistered.get(project); report unregistered.`
+This avoids lifecycle ordering. However if `afterCheckEachProject` not called for some reason, no report. We can also implement `afterCheckProject` for safety? But not needed.
+
+But if same detector instance across lint runs, maps accumulate. We can clear all in `beforeCheckProject` (if called) or maybe in `afterCheckProject`. But if class scan before beforeCheck and we clear, lost. To avoid, we can clear in `afterCheckProject` (after all reports) and maybe in `beforeCheckProject` only after copying? Hmm.
+
+Actually if we clear in `afterCheckProject`, then before next run maps empty. But if beforeCheckProject runs before class scan, maps empty anyway. If class scan before beforeCheckProject, maps get entries, then beforeCheckProject could clear them. So don't clear in beforeCheck. Clear in afterCheckProject. But what if class scan before beforeCheck and afterCheckProject not called? It is called. So safe.
+
+But if the same test runs multiple lint tasks sequentially with same detector instance, afterCheckProject clears before next. Good. If the driver doesn't call afterCheckProject for some reason (e.g., exception), stale for next run, but okay.
+
+This map approach might solve ordering issue.
+
+However, the core issue might still be `checkClass` not invoked. If class scanning doesn't happen, we need source scanning.
+
+Let's determine whether to use ASM or UAST by inferring from expected output. Expected output path `src/test/pkg/MyActivity2.java:5`. If using ASM with debug info, class files contain line numbers, and `ClassContext.getLocation(classNode)` maps to source `.java` line. So possible.
+
+The previous code's location maybe from class node. The message was wrong but location maybe correct. But no warnings means no candidate.
+
+Let's consider switching to `SourceCodeScanner` (UAST) to avoid class file compilation concerns. We can detect classes extending Activity/Service/ContentProvider by overriding `applicableSuperClasses`? Actually `SourceCodeScanner` has `getApplicableUastTypes` and visitor. In older API (around 26.x), there might be `JavaScanner` with `applicableSuperClasses`. But the expected built-in old uses ASM. However the prompt's previous code already uses ASM imports, and they want to fix that.
+
+We need choose an implementation that compiles and passes tests. The simplest robust approach: implement `Detector.ClassScanner` and `Detector.XmlScanner` as built-in. Use `beforeCheckProject`/`afterCheckProject` or per-project maps. Use `context.getDriver().getClassReader` for superclass chain. Use correct message.
+
+But if class scanning not invoked, we need source scanning. Maybe the tests actually compile class files, so class scanning works. The previous code's failure could be due to message or due to clearing order. Let's look at previous code: It used `beforeCheckEachProject` and `afterCheckEachProject`. Maybe `beforeCheckEachProject` is called *after* class scanning? If so, using `beforeCheckProject` could fix because it's called before class scanning? But uncertain.
+
+Let's search memory of actual `LintDriver.checkProject` order more concretely. I can try to recall from reading AOSP source:
+
+```
+private void checkProject(@NonNull Project project, @NonNull Project main) {
+    ...
+    mClient.registerProject(project, ...);
+    fireBeforeCheckEachProject(project); // maybe
+    fireBeforeCheckProject(project); // maybe
+    checkProjectDependencies(project, main);
+
+    List<? extends Detector> detectors = ...;
+    runClassDetectors(project, main); // maybe
+    runFileDetectors(project, main, ...);
+    runBinaryResourceDetectors(...);
+    ...
+    fireAfterCheckEachProject(project);
+    fireAfterCheckProject(project);
+}
+```
+
+Actually I think class detectors run as part of `runFileDetectors`? There is `Scope.CLASS_FILE_SCOPE` considered a file scope. The driver iterates over files matching scopes and calls detectors. So class files are processed like resource files. beforeCheckEachProject before any files. So previous code should work.
+
+Could the previous code's `checkClass` be called for Activity itself? Activity is abstract? Not. But candidate for Activity would be registered? Not. But no warnings for our classes? Hmm.
+
+Wait maybe `checkClass` is called but `extendsComponent` for `MyActivity2` returns false because `classNode.superName` is `android/app/Activity` but `classNode.access` includes `ACC_ABSTRACT`? No.
+
+Let's test mentally with actual ASM: `ClassNode` from `ClassReader.accept(classNode, 0)`. For `public class MyActivity2 extends Activity`, `access` = ACC_PUBLIC | ACC_SUPER = 0x21. `name` = "test/pkg/MyActivity2". `superName` = "android/app/Activity". Our code: skip abstract/interface, name non-null. extendsComponent: current=classNode, superName="android/app/Activity" equals ACTIVITY -> return true. Add candidate name "test.pkg.MyActivity2". So candidates list not empty. Then manifest visit: package "test.pkg", activity name ".MyActivity" -> resolve "test.pkg.MyActivity". Registered set contains that. afterCheck: candidate not in set -> report. So previous code should produce warning with message "Class test.pkg.MyActivity2 is not registered in the manifest". The test expects message "The <activity> test.pkg.MyActivity2 is not registered in the manifest". The test error, however, says "No warnings." not message mismatch. So maybe the previous code did not produce warning because of something else. But logically it should. Unless the test harness doesn't compile class files. That would explain.
+
+Maybe the test expected path `.java:5` and the harness only supports source-level reporting, not class scanning. Wait if no class files, no class scanning. So candidate missing. So the harness likely doesn't compile for class scope. Then the fix is to use source scanning (Java/UAST). Let's verify by checking if previous code compiled with `Scope.CLASS_FILE_SCOPE` but test harness doesn't compile. The previous code would compile and run, but no class scanning -> no warnings.
+
+But built-in RegistrationDetector must have passed tests historically. Maybe it used `Scope.JAVA_FILE_SCOPE` and `JavaScanner`. Let's see if there is a built-in RegistrationDetector using JavaPsiScanner. I can search memory of `RegistrationDetector.java` source. I vaguely recall it uses `ClassScanner` and `XmlScanner`. But maybe it's in an older version that uses class scanning and tests compile. If in the test environment of this prompt, class scanning isn't compiled. But the harness error includes `TestLintResult.expectContains`, which is from lint-checks infrastructure. The test likely uses `lint().files(...).run()`. In that infrastructure, class scanning is supported. So why fail?
+
+Maybe the test uses `testFiles` source with `targetSdkVersion` and the class file scope triggers compilation. It should.
+
+Let's inspect the actual test source `RegistrationDetectorTest`. It might define source and expected. The previous code likely based on built-in but omitted handling of `abstract` inner classes or `broadcast receiver`? Not.
+
+The test failures specifically: `testNotRegistered` and `testDocumentationExample`. There may be other tests that pass (e.g., testRegistered, testAbstract, testInner). If previous code failed only these, maybe candidate detection works for some but not for MyActivity2 due to indirect superclass. But both fail with no warnings. Hmm.
+
+Maybe `testDocumentationExample` source has `MyActivity2 extends MyActivity`? The expected snippet says `public class MyActivity2 extends Activity {`. So direct.
+
+Could it be that the previous code's `afterCheckEachProject` is not called because it uses `@Override` but the method signature changed to require `ClassContext`? No, `afterCheckEachProject(Context)` exists.
+
+Wait, maybe `afterCheckEachProject` is only called when the detector also implements `FileScanner`? No.
+
+Let's think about `Issue.create` severity. Warning. Good.
+
+Maybe the previous code's `ISSUE` Implementation uses `Scope.CLASS_FILE_SCOPE, Scope.MANIFEST_SCOPE`. However `Issue.create` has an overload requiring `EnumSet<Scope>`? No.
+
+Maybe the issue is that `Scope.CLASS_FILE_SCOPE` is not included in `Scope.JAVA_FILE_SCOPE`, and the test's Java source files are not compiled because the test does not enable compilation. In `TestLintTask`, compilation is enabled by default? I think `lint()` tasks may or may not compile. There is `.allowCompilation()` and `.allowMissingSdk()`. By default, if there are Java files and the detector scope includes Java/class, compilation is attempted. But maybe if scope is only CLASS_FILE, it won't compile.
+
+If that's the case, switching scope to `Scope.JAVA_FILE_SCOPE` and implementing a Java scanner would fix. But then we cannot use ASM checkClass. Need implement Java source scanning. Let's see if API supports `applicableSuperClasses`. In old API (JavaScanner), there is `List<String> applicableSuperClasses()` and `void checkClass(@NonNull JavaContext, @NonNull PsiClass, @NonNull PsiClass)`. Actually `JavaScanner` (later `JavaPsiScanner`) has:
+```
+List<String> applicableSuperClasses();
+void checkClass(@NonNull JavaContext context, @NonNull PsiClass classNode, @NonNull PsiClass declaration);
+```
+This is source-level and can detect subclasses. It might be more appropriate and produce source locations directly. The previous code imports `org.objectweb.asm` but maybe the environment also supports JavaScanner.
+
+But the prompt says "Android Lint custom checks" and "compile cleanly against the Android Lint API". It doesn't require ASM. We can choose whichever passes.
+
+Given the previous ASM code produced no warnings, maybe the fix is to switch to JavaPsiScanner. But let's not jump. We need determine likely test harness behavior.
+
+Let's look at actual built-in `RegistrationDetector` in AOSP. I will try to recall exact source. I think I have seen it as using `ClassScanner`. It might be:
+
+```
+public class RegistrationDetector extends Detector
+        implements Detector.ClassScanner, Detector.XmlScanner {
+    private static final String ACTIVITY = "android/app/Activity";
+    private static final String SERVICE = "android/app/Service";
+    private static final String PROVIDER = "android/content/ContentProvider";
+
+    public static final Issue ISSUE = Issue.create(...,
+        new Implementation(RegistrationDetector.class,
+            EnumSet.of(Scope.CLASS_FILE_SCOPE, Scope.MANIFEST_SCOPE)));
+
+    private List<ClassNode> mClasses;
+    private Set<String> mManifestEntries;
+    private String mPackage;
+
+    @Override
+    public void beforeCheckProject(@NonNull Context context) {
+        mClasses = new ArrayList<>();
+        mManifestEntries = new HashSet<>();
+        mPackage = null;
+    }
+
+    @Override
+    public void afterCheckProject(@NonNull Context context) {
+        for (ClassNode classNode : mClasses) {
+            String name = classNode.name.replace('/', '.');
+            if (!mManifestEntries.contains(name)) {
+                String type = getType(classNode);
+                Location location = ...; // stored?
+                context.report(ISSUE, location,
+                    String.format("The <%s> %s is not registered in the manifest", type, name));
+            }
+        }
+    }
+
+    @Override
+    public void checkClass(@NonNull ClassContext context, @NonNull ClassNode classNode) {
+        if ((classNode.access & Opcodes.ACC_ABSTRACT) != 0) return;
+        if ((classNode.access & Opcodes.ACC_INTERFACE) != 0) return;
+        if (isRegistered(context, classNode)) {
+            mClasses.add(classNode);
+        }
+    }
+    ...
+}
+```
+
+It stores `ClassNode` in list, but after project, the `ClassContext` is gone; location may not be retrievable from ClassNode alone. It likely stores location in a separate list. Hmm.
+
+I think actual built-in uses `mClasses` storing ClassNode and then in afterCheckProject computes location via `context.getDriver().getClassReader`? No.
+
+Maybe built-in uses `context.getLocation(classNode)` during checkClass and stores in a map. Let's search memory more. I recall reading a file where it had a `static class Class`? No.
+
+Actually I think built-in `RegistrationDetector` uses `List<Node>`? No.
+
+Let's reason: In `afterCheckProject(Context)`, `context` is a generic Context, not ClassContext. It can call `context.report(ISSUE, location, message)`. The location must have been created earlier and stored. Built-in likely stores `Location` objects in a list alongside class names.
+
+Our final code can store a small internal class `ClassInfo` with name, location, component type (or determine later). Determine component type from classNode; we can store type string. But to determine type, need walk superclass. We can walk during checkClass and store type. Or store classNode and re-walk? But ClassNode can be stored; after project, we can still read superName. We might need to resolve superclasses again; but we can store type.
+
+But the key fix is likely message and perhaps lifecycle.
+
+Wait the user prompt includes the previous attempt code and test errors. It asks to fix so it compiles cleanly and all tests pass. We should not output explanation. We need produce corrected source. We can design robust implementation.
+
+Given uncertainty about class scanning compilation, maybe we should implement both ASM and source scanning? A detector can implement multiple scanners. The Implementation scope can include both `Scope.JAVA_FILE_SCOPE` and `Scope.CLASS_FILE_SCOPE` and `Scope.MANIFEST_SCOPE`. Then we can detect candidates from both Java source and class files. But implementing JavaScanner may be more complex. However if class scanning works, we can rely on it. Adding JavaScanner may duplicate candidates. We need avoid duplicate reports.
+
+Better to implement `SourceCodeScanner` (or `JavaPsiScanner`) and not ASM, if class scanning not compiled. But if the test environment actually supports class scanning and the previous code failed due to message/lifecycle, switching to source scanning also works. We need decide which API to use to be safe and compile.
+
+Let's examine available imports. The previous code uses `com.android.annotations.NonNull`, `com.android.tools.lint.detector.api.*`, `org.objectweb.asm.*`. The prompt says "compile cleanly against the Android Lint API". In the lint-checks module, both ASM and JavaPsiScanner are available. We can use `JavaPsiScanner` if we want. But `JavaPsiScanner` is older (replaced by `SourceCodeScanner` in newer). Since imports are older, `JavaPsiScanner` likely exists. But implementing it requires knowledge of PsiClass. Let's see.
+
+`Detector.JavaScanner` interface (older) has:
+```
+boolean appliesToResourceRefs();
+List<String> applicableCallNames();
+... 
+List<String> applicableSuperClasses();
+void checkClass(@NonNull JavaContext context, @NonNull PsiClass classNode, @NonNull PsiClass declaration, @NonNull JavaElementVisitor visitor, @NonNull JavaVisitor visitor);
+```
+Actually signatures varied. The one I recall: `void checkClass(@NonNull JavaContext context, @NonNull PsiClass classNode, @NonNull PsiClass declaration);` maybe.
+
+This could be used to detect subclasses of Activity etc. The location can be `context.getLocation(declaration.getNameIdentifier())` or `context.getLocation(declaration)`.
+
+But if we implement JavaPsiScanner and ClassScanner both, scope includes JAVA_FILE and MANIFEST. We can skip ASM. Let's consider if that passes tests. The expected message location line/column in `.java` file, which JavaPsiScanner can provide precisely.
+
+However, the test source might not have a `package` declaration? It does. We need resolve class names: package from manifest. If manifest package missing, use project package. Good.
+
+Potential issue: JavaPsiScanner's `applicableSuperClasses` returns list of fully qualified super class names like "android.app.Activity". Then `checkClass` is called for any class whose superclass chain includes those. It passes the class and the declaration. We can get qualified name via `classNode.getQualifiedName()`. Then in afterCheckProject compare with registered names. Good.
+
+But is `JavaPsiScanner` available in this environment? The previous code compiled with ASM, but JavaPsiScanner may also. However the prompt's expected class `RegistrationDetector` likely originally uses ClassScanner. But the tests don't care about implementation.
+
+Need be careful with `Issue.create` Implementation scope. If implementing `JavaPsiScanner`, scope should include `Scope.JAVA_FILE_SCOPE` and `Scope.MANIFEST_SCOPE`. If also implement ClassScanner, include CLASS_FILE_SCOPE. But if we only implement JavaPsiScanner, use `Scope.JAVA_FILE_SCOPE, Scope.MANIFEST_SCOPE`.
+
+Will the test harness compile Java files for `Scope.JAVA_FILE_SCOPE`? Yes, definitely. Because source scanning needs Java files parsed (not necessarily compiled). `JAVA_FILE_SCOPE` uses PSI parsing, not compilation. So safer.
+
+But the test may provide source files with no `android.jar` stubs. JavaPsiScanner parsing doesn't need to resolve super classes to actual bytecode; it just uses AST and `applicableSuperClasses` by name. It will match `extends Activity` if we register "android.app.Activity". Actually `applicableSuperClasses` matches by fully qualified name? The API checks if class extends one of the named super classes. If source has `import android.app.Activity; extends Activity`, it resolves to `android.app.Activity`. Good.
+
+But if source uses `extends Activity` without import and Activity not in scope, it won't resolve. In tests, likely imports.
+
+If source extends a subclass of Activity (e.g., AppCompatActivity), `applicableSuperClasses` might not match unless we include those. The built-in detector likely checks all the way up via bytecode; but tests may use direct extends. The spec says activities, services, providers; should detect indirect subclasses. We can implement JavaPsiScanner that walks PsiClass extends chain via `PsiClass.getSuperClass()` to detect indirect. But `applicableSuperClasses` is just optimization; we can return empty and inspect all classes? There is `applicableTopLevels` or `getApplicablePsiTypes`. Hmm.
+
+Better: Use `SourceCodeScanner` with `UElementHandler` for `UClass` and walk up. But old API maybe `JavaPsiScanner`. Let's check `Detector.JavaPsiScanner` methods. I recall:
+```
+List<Class<? extends PsiElement>> getApplicablePsiTypes();
+void visitClass(@NonNull JavaContext context, @NonNull PsiClass psiClass);
+```
+Actually there is `JavaPsiScanner` with `getApplicablePsiTypes` and `visitClass` etc. We can return `PsiClass.class` and visit all class declarations, check superclass chain. That avoids `applicableSuperClasses` limitations. This is available in older lint.
+
+If we implement `JavaPsiScanner`, we can detect all concrete classes extending Activity/Service/ContentProvider (direct or indirect) by walking `psiClass.getSuperClass()`. We need resolve superclass references across project; Psi may resolve if stubs present. For indirect subclasses of Activity, it works if Psi resolves. If not, maybe direct only. But tests likely direct.
+
+However, if a class extends a project class that extends Activity, Psi can resolve within project. Good.
+
+But there may be a problem: `JavaPsiScanner` is deprecated/removed in newer Lint? The prompt says "expert Android developer specialising in Android Lint custom checks" and "compile cleanly against the Android Lint API". Could be older API. We should use whatever is stable.
+
+Alternatively, use `SourceCodeScanner` (UAST) introduced later. But older environment may not have it. The previous code uses ASM and `org.objectweb.asm.tree.ClassNode`, which is older (pre-UAST). So `JavaPsiScanner` is more consistent.
+
+Let's look at the imports in previous code: `com.android.tools.lint.detector.api.Detector`. It uses `Detector.ClassScanner, Detector.XmlScanner`. There is also `Detector.JavaPsiScanner` maybe. In old lint, `Detector` has nested interfaces: `ClassScanner`, `JavaScanner`, `XmlScanner`, `GradleScanner`, etc. Actually `JavaScanner` was renamed `JavaPsiScanner`? Let's recall: In lint 24.x, `Detector` had `ClassScanner`, `XmlScanner`, `JavaScanner` (for Eclipse AST). Later `JavaPsiScanner` for IntelliJ PSI. In lint 25+, `Detector.JavaPsiScanner`. The previous code uses old ASM `ClassScanner`, not JavaPsiScanner.
+
+Given the test expected output path and line numbers, source scanning would give exact. ASM class scanning with debug info also gives exact. Which is more likely to pass? Need decide.
+
+The previous ASM code had no warnings. If we keep ASM and fix only message/lifecycle, will it pass? The test errors show no warnings, suggesting ASM detection not working. Unless it's due to message mismatch? No, message mismatch would still produce warnings but test expected contains "[Registered]" would fail with different text, not "No warnings." The error for testNotRegistered says "Not true that "[Registered]" is found in lint output "No warnings." So indeed no warnings.
+
+Thus candidate detection failed. Why? Could be lifecycle clearing before class scanning. If we move to `beforeCheckProject` instead of `beforeCheckEachProject`, maybe class scanning happens after and it works. But we don't know. Could also be class scanning not compiled. Let's see if using `beforeCheckProject` and not clearing before class scan can be done.
+
+Actually we can avoid any lifecycle clearing and use per-project maps. That would fix clearing-order issues. But if class scanning never runs, still no candidates.
+
+Maybe we can implement both ASM and JavaPsiScanner to maximize coverage. Use `Scope.ALL_JAVA_FILES`? Wait `Scope.JAVA_FILE_SCOPE` for source and `Scope.CLASS_FILE_SCOPE` for class files. We can implement both scanners: ClassScanner for bytecode and JavaPsiScanner for source. We collect candidates from whichever runs. If both run, duplicates; use a Set of class names to avoid duplicate reports. But if both detect same class, registered set works, no duplicate because we check set. However we might add same candidate twice; if not registered, report twice. Use a Set of reported names or candidate map keyed by name. In checkClass and visitClass, put into a map keyed by class name, last location wins. In afterCheck, report map values. That handles duplicates. Scope includes JAVA_FILE, CLASS_FILE, MANIFEST. But will the test harness run both source and class scanning? It may compile and run class scanning, plus source scanning, causing duplicates if not deduped. We dedupe by map.
+
+But is implementing both allowed? A detector can implement multiple scanner interfaces. The Implementation scope union determines which scanners run. Yes.
+
+If source scanning works, we get candidates. If class scanning also works, map dedupes. Good.
+
+But implementing JavaPsiScanner may require more imports and API knowledge. Let's design using `Detector.JavaPsiScanner` with `getApplicablePsiTypes` returning `PsiClass.class` and `visitClass`. However if we also implement `ClassScanner`, the detector has many methods. Need ensure no conflicts.
+
+Alternatively, implement `SourceCodeScanner` (UAST) with `getApplicableUastTypes` returning `UClass.class`. UAST is newer and maybe more stable. But older environment? The previous code uses ASM, which is definitely old. UAST may be available. Hmm.
+
+Given the target package `com.android.tools.lint.checks`, this is the lint-checks module. In recent versions, it uses UAST. But the previous code with ASM might be from a version where UAST not used. However the user just generated that code; not necessarily reflecting API version.
+
+We need an answer that is likely correct. Let's consider implementing with `Detector.ClassScanner` only but using per-project maps and correct message. If the root cause is lifecycle clearing, this fixes. If root cause is compilation, it doesn't.
+
+Implementing both ASM and JavaPsiScanner increases robustness. Let's see if it's feasible and idiomatic. We need imports for Psi classes. The package `com.android.tools.lint.checks` can import `com.intellij.psi.PsiClass` etc. But to avoid heavy dependencies, maybe use UAST? The lint API includes `com.android.tools.lint.detector.api.JavaContext` and `org.jetbrains.uast.UClass`. Actually UAST is in `org.jetbrains.uast.*`.
+
+But the prompt says "compile cleanly against the Android Lint API". UAST classes are part of lint API dependencies. Should be okay.
+
+However, if we implement both, the Implementation scope should include `Scope.JAVA_FILE_SCOPE` and `Scope.CLASS_FILE_SCOPE` and `Scope.MANIFEST_SCOPE`. In older API, `Scope.JAVA_FILE_SCOPE` might be `Scope.ALL_JAVA_FILES`? Let's check constants. I think `Scope.JAVA_FILE_SCOPE` exists. Also `Scope.ALL_JAVA_FILES`. The difference: `JAVA_FILE_SCOPE` means one Java file at a time; `ALL_JAVA_FILES` means all. For `JavaPsiScanner`, use `Scope.JAVA_FILE_SCOPE`. For `ClassScanner`, `Scope.CLASS_FILE_SCOPE`.
+
+But if we include both, the lint driver may complain that the detector implements scanners not matching scope? No.
+
+Let's attempt to write a detector implementing `ClassScanner` and `XmlScanner` only but use a source scanner? Actually we can implement `JavaPsiScanner` as well.
+
+Potential problem: The test `testNotRegistered` may check no extra warnings. If both scanners detect same unregistered class, map dedupes by name. Good.
+
+But if source scanner detects an abstract class? We skip abstract. Good.
+
+If source scanner detects a class that extends Activity but is in a library and registered in manifest? We collect. Good.
+
+Let's design using `Detector.JavaPsiScanner` (older PSI) because it can visit `PsiClass` and we can check superclass chain. But we need `JavaContext.getLocation(PsiElement)`. In old API, `JavaContext` extends `Context` and has `getLocation(PsiElement)`. Actually `JavaContext` has `getLocation(PsiElement)`. It also has `getEvaluator()` maybe.
+
+Alternatively, use `Detector.SourceCodeScanner` (UAST) with `UElementHandler`. `JavaContext` has `getLocation(UElement)`. `SourceCodeScanner` interface (if available) has `createUastHandler(JavaContext)` and `getApplicableUastTypes()`. This is more modern.
+
+Which one exists in the environment? The previous code uses `com.android.annotations.NonNull` and ASM. In the same lint version (around 26.0.0), `SourceCodeScanner` exists? I think UAST was introduced around 2.3/3.0 (lint 25.3). So yes, `SourceCodeScanner` exists. The built-in `RegistrationDetector` might have been updated to UAST? Not sure.
+
+Let's search memory of actual built-in RegistrationDetector in newer AOSP. I think it might now extend `LayoutDetector`? No.
+
+I recall a file `RegistrationDetector.java` in `tools/base/lint/libs/lint-checks/src/main/java/com/android/tools/lint/checks/`. It uses `ClassScanner`. It has comments about needing to check classes even if they are abstract? It uses `ClassNode`. I think it's ASM. So likely the intended solution is ASM. The previous code's issue might be a small bug causing no warnings. Let's try to identify that bug by comparing with built-in.
+
+Search memory: Built-in `RegistrationDetector` uses `mClasses` and `mManifestEntries`. It uses `beforeCheckProject` and `afterCheckProject`. It resolves class names using `resolveClassName`. It might have a subtle difference in `checkClass`: it only adds classes whose direct superclass is Activity/Service/Provider? Let's recall.
+
+Maybe the bug in previous code is that `getSuperClass` reads from `project.getJavaClassFolders()` but returns `ClassNode` whose `name` is not set? No.
+
+Wait, maybe `project.getJavaClassFolders()` returns folders that don't include the compiled test classes because the test harness compiles to a `classes` folder but `getJavaClassFolders()` might not include it? But for direct superclass, we don't need getSuperClass.
+
+Maybe `extendsComponent` returns true, candidate added, but then `mCandidates` is cleared by `beforeCheckEachProject` called after `checkClass` because the driver calls class detectors before `beforeCheckEachProject`. If built-in uses `beforeCheckProject`, maybe class detectors are called between `beforeCheckProject` and `beforeCheckEachProject`? Let's see.
+
+Actually `beforeCheckProject` might be called for the root project only, and `beforeCheckEachProject` for each project including dependencies. If class scanning happens for all projects after `beforeCheckProject` but before `beforeCheckEachProject`? Then clearing in `beforeCheckEachProject` loses candidates. Using `beforeCheckProject` would not clear after class scan. But the previous code used `beforeCheckEachProject`. Maybe that's the bug! Let's test: Suppose driver order:
+1. `beforeCheckProject(main)` - initialize list.
+2. Class scan for main - add candidates.
+3. `beforeCheckEachProject(main)` - clear list! Oops.
+4. XML scan - add registered names.
+5. `afterCheckEachProject(main)` - empty candidates -> no warnings.
+6. `afterCheckProject(main)`.
+
+Is this plausible? The "EachProject" hook might be called after class scanning but before resource scanning? The naming suggests per-project, but maybe it's called just before checking project files (resources), not class files. Class files might be considered part of a pre-check. If so, using `beforeCheckProject` avoids clearing after class scan. The built-in uses `beforeCheckProject`. The previous code used `beforeCheckEachProject`, causing the bug. That seems plausible and explains "No warnings." Because class scanning might indeed run before `beforeCheckEachProject`.
+
+Let's verify by looking at built-in code memory: I think built-in uses `beforeCheckProject` and `afterCheckProject` (without Each). Why? Because `beforeCheckEachProject` might be intended for per-library initialization, but the class scan is project-wide? Hmm. But if `beforeCheckProject` is called before class scan and `beforeCheckEachProject` after, then built-in clearing in `beforeCheckProject` works. The previous code clearing in `beforeCheckEachProject` clears after class scan. So simply switching to `beforeCheckProject` might fix detection. Then we also need correct message.
+
+But `afterCheckProject` vs `afterCheckEachProject`: If we use `beforeCheckProject` to clear and `afterCheckProject` to report, we should use same. But if manifest scanning for library projects uses `beforeCheckEachProject`? The registered names for main are enough. Using `afterCheckProject` reports after all projects. Fine.
+
+However, if the detector is run on library projects too, `beforeCheckProject` is called only for root? Actually `beforeCheckProject` is called for each project? The javadoc: "Called before any files are checked for the given project." It might be called for each project, while `beforeCheckEachProject` is also called for each? There is duplication. Let's not overcomplicate. Use `beforeCheckProject` to clear and `afterCheckProject` to report. Or use per-project maps to avoid lifecycle issues.
+
+Given this plausible root cause, the corrected code using `beforeCheckProject`/`afterCheckProject` with correct message should pass.
+
+But we also need ensure that class scanning works. If it does, great.
+
+Let's design final code as ASM-based ClassScanner + XmlScanner. Use `beforeCheckProject` and `afterCheckProject` (not Each). Use maps keyed by project or just fields since single project. But to avoid multi-project issues, use fields and clear in `beforeCheckProject`. If class scan occurs before `beforeCheckProject`, then lost. But built-in presumably works. Alternatively use `beforeCheckProject` and also a flag to not clear if already populated? Hmm.
+
+Maybe better: Use `beforeCheckProject` to clear and also `beforeCheckEachProject` to not clear? No.
+
+Let's use per-project maps and clear maps in `afterCheckProject` only. Initialize lazily. This avoids any before-check clearing that might lose class-scan data. But if `beforeCheckProject` is called before class scan, maps still empty. If `afterCheckProject` is called after, reports. If `beforeCheckProject` not called, maps empty initially, populated, reports, then `afterCheckProject` clears. Good. The only risk is if the driver runs multiple lint runs with same instance and `afterCheckProject` not called, maps persist. But `afterCheckProject` should be called. We can also clear in `beforeCheckProject` after storing previous? No.
+
+Actually clearing in `beforeCheckProject` is safe if it runs before class scan. If it runs after class scan, not safe. Since we don't know, avoid clearing in before. Use lazy maps. At end `afterCheckProject` clear. This is robust.
+
+But if the same detector instance is used for multiple projects in one run (e.g., app + library), maps keyed by project keep them separate. `afterCheckProject` is called after root project; we could clear all or just keep. But if library classes need to be checked against library manifest? The issue spec says manifest of project. For libraries, manifest may be merged; but likely test only main. We can report for each project in `afterCheckEachProject` and clear that project's entries. But if class scan before `beforeCheckEachProject`, clearing there loses. Hmm.
+
+Maybe use `afterCheckEachProject` to report and remove project entries, and do not clear in before. That works if afterCheckEachProject is called after all scans for that project. It might be. Then library also reported. Good. We won't clear in before at all. We'll initialize lazily. That avoids ordering.
+
+But what about `afterCheckProject`? Not needed. Use `afterCheckEachProject`. Since the previous code used it but cleared there? It reported there. The issue was clearing in `beforeCheckEachProject` before class scan. So just don't clear there.
+
+Let's design with per-project maps and `afterCheckEachProject` reports. We can also call `afterCheckProject` for safety? No.
+
+But storing maps across projects could cause memory but fine.
+
+However, if the driver instantiates a new detector per project? Then maps only have one entry. Fine.
+
+Now, message: "The <activity> test.pkg.MyActivity2 is not registered in the manifest". Need determine component type. During checkClass, we walk superclass chain; we can record which component it is. Or determine from direct superclass or chain. We can create `Candidate` with name, location, type string. If class extends Activity, type "activity". If Service, "service". If Provider, "provider". If a class could be both? No.
+
+We also need handle abstract class skip: "If your activity is simply a parent class intended to be subclassed by other 'real' activities, make it an abstract class." So skip abstract. Also skip interfaces.
+
+We also need handle classes that extend BroadcastReceiver? Spec doesn't mention receivers; but broadcast receivers also should be registered? Actually spec only activity/service/provider. The issue maybe only those. Built-in maybe includes broadcast receivers? The issue description says Activities, services and content providers. So ignore receivers.
+
+Now, superclass chain resolution: For direct extends Activity, fine. For indirect, need resolve. The previous code used project class folders; we can improve using `context.getDriver().getClassReader(superName)`. Does `LintDriver.getClassReader(String)` exist? I think yes: `ClassReader getClassReader(String internalClassName)` returns a ClassReader for a class by name, searching project and dependencies. In ClassContext, you can call `context.getDriver().getClassReader(name)`. This is the idiomatic way. Let's use it. If not available, fallback to project class folders. But compile? The previous code compiled using project.getJavaClassFolders. `context.getDriver().getClassReader` is part of LintDriver API. It may throw IOException. We'll catch.
+
+If `getClassReader` not in API, compilation fails. Need know. In old Lint, `LintDriver` has `public ClassReader getClassReader(String internalName) throws IOException`. Yes, I recall. It also has `getClassReader` returning reader for class name. So safe.
+
+Now, location: `ClassContext.getLocation(classNode)` returns source location. We store it. We need `Location` class. Good.
+
+Now, manifest parsing: Use `getApplicableElements` includes manifest and activity/service/provider. In `visitElement`, if tag is manifest, store package in a map keyed by project. If tag is component, get android:name, resolve with package, add to registered set for project.
+
+We need `ANDROID_URI`, `ATTR_NAME`, `ATTR_PACKAGE`, `TAG_MANIFEST`, `TAG_ACTIVITY`, `TAG_SERVICE`, `TAG_PROVIDER`. Use SdkConstants. Good.
+
+Now, `resolveClassName`: If name starts with ".", prepend package. If no dot, prepend package + '.'. Else fully qualified. Also handle if package is null/empty.
+
+Edge: Manifest activity name can be a shorthand with no dot and package: "MyActivity" -> package.MyActivity. Good.
+
+Now, final report: In `afterCheckEachProject(Context context)`, get project, candidates, registered. For each candidate not registered, report. Use `context.report(ISSUE, candidate.location, String.format("The <%s> %s is not registered in the manifest", candidate.type, candidate.name));`.
+
+Need ensure severity warning. Good.
+
+Now, if we use per-project maps, we don't need fields mManifestPackage. Use maps.
+
+Implementing maps:
+```
+private final Map<Project, List<Candidate>> mCandidates = new HashMap<>();
+private final Map<Project, Set<String>> mRegisteredNames = new HashMap<>();
+private final Map<Project, String> mManifestPackages = new HashMap<>();
+```
+In `getProject(context)` method:
+```
+private static Project getProject(Context context) { return context.getProject(); }
+```
+For `XmlContext` and `ClassContext` both have getProject.
+
+In `checkClass`:
+```
+Project project = context.getProject();
+if (isComponent(context, classNode)) {
+    String name = classNode.name.replace('/', '.');
+    String type = getComponentType(context, classNode); // maybe from first match
+    Location location = context.getLocation(classNode);
+    getCandidates(project).add(new Candidate(name, location, type));
+}
+```
+But `getComponentType` requires walking superclass again. We can combine with `isComponent` to return type.
+
+`getComponentType(ClassContext, ClassNode)`:
+```
+ClassNode current = classNode;
+while (current != null && current.superName != null) {
+    String superName = current.superName;
+    if (superName.equals(ACTIVITY)) return "activity";
+    if (superName.equals(SERVICE)) return "service";
+    if (superName.equals(PROVIDER)) return "provider";
+    current = getSuperClass(context, current);
+}
+return null;
+```
+Then skip if null.
+
+`isComponent` can be `getComponentType(...) != null`.
+
+`getSuperClass` using driver:
+```
+private static ClassNode getSuperClass(ClassContext context, ClassNode classNode) {
+    String superName = classNode.superName;
+    if (superName == null || superName.equals("java/lang/Object")) return null;
+    try {
+        ClassReader reader = context.getDriver().getClassReader(superName);
+        ClassNode node = new ClassNode();
+        reader.accept(node, 0);
+        return node;
+    } catch (IOException e) {
+        return null;
+    }
+}
+```
+
+Need import `java.io.IOException`, `org.objectweb.asm.ClassReader`, `org.objectweb.asm.Opcodes`, `org.objectweb.asm.tree.ClassNode`.
+
+Now, `afterCheckEachProject`:
+```
+@Override
+public void afterCheckEachProject(@NonNull Context context) {
+    Project project = context.getProject();
+    List<Candidate> candidates = mCandidates.get(project);
+    Set<String> registered = mRegisteredNames.get(project);
+    if (candidates == null) return;
+    if (registered == null) registered = Collections.emptySet();
+    for (Candidate c : candidates) {
+        if (!registered.contains(c.name)) {
+            context.report(ISSUE, c.location,
+                "The <" + c.type + "> " + c.name + " is not registered in the manifest");
+        }
+    }
+}
+```
+
+We might also want to clear project entries after reporting to avoid duplicate if `afterCheckProject` called? But if afterCheckEachProject called per project, clearing fine. However if the same project is checked twice? Not. We can leave to avoid issues. But to not accumulate, remove maps for project. But if afterCheckProject also called and we removed, no issue. We can remove to free memory.
+
+But if we remove and `afterCheckProject` not used, fine. Let's not remove to keep simple. Or remove.
+
+Now, `beforeCheckProject` not needed. But maybe we should override `beforeCheckProject` to clear maps for a fresh run? If detector instance reused, maps stale. If `beforeCheckProject` called before class scan, clearing safe. But if class scan before beforeCheckProject, clearing loses. Hmm. But if detector instance reused, afterCheckProject of previous run should have cleared. We can clear in `afterCheckProject`. Let's implement `afterCheckProject` to clear maps. That ensures fresh next run. It also reports? No, reporting in afterCheckEachProject. Good.
+
+But if `afterCheckProject` not called for some reason, stale. Accept.
+
+Maybe better to clear in `beforeCheckProject` only if we want fresh start. But to avoid losing class scan data, don't. However, if detector instance reused and afterCheckProject not called, stale. But afterCheckProject is called.
+
+We can also clear in `beforeCheckProject` after reporting? No.
+
+Let's consider if maps accumulate across projects within one run and we don't clear until afterCheckProject. That's fine; afterCheckEachProject reports per project. afterCheckProject clears all.
+
+Now, we need also ensure that `mManifestPackages` map is used. In `visitElement`, get package from manifest; if tag manifest, put in map. For component, if package not set, use `context.getProject().getPackage()`. Then resolve and add to registered set.
+
+Potential issue: `context.getProject().getPackage()` may be null if manifest missing package. But manifest has package.
+
+Now, what about `Implementation` scope? Keep `Scope.CLASS_FILE_SCOPE, Scope.MANIFEST_SCOPE`. If class scanning works, good. If not, no warnings. Should we add `Scope.JAVA_FILE_SCOPE` and implement source scanner? That would be safer if class scanning not compiled. But implementing JavaPsiScanner may be heavy. We can implement a `JavaPsiScanner` that also detects candidates and adds to same maps. But then the Implementation scope should include `Scope.JAVA_FILE_SCOPE`. However if the test harness compiles class files and also runs source scanner, duplicates handled by map. If it only runs source scanner (no class), still detects. So adding JavaPsiScanner makes it robust.
+
+But is it idiomatic to implement both? It might be overkill, but could pass. However, if JavaPsiScanner runs, it will parse source and detect candidates. It also means we don't need ClassScanner. But if we keep both, the detector becomes larger. The prompt asks for complete source. We can include both. But is there a risk of compilation errors due to missing `JavaPsiScanner` interface in API? We need know.
+
+Given the previous code compiled with `Detector.ClassScanner` and `Detector.XmlScanner`, the `Detector` nested interface `JavaPsiScanner` exists in older lint. It might be deprecated but present. If we implement it, we need imports for `com.intellij.psi.PsiClass` and maybe `PsiElement`. The lint-checks module depends on IntelliJ. Should compile.
+
+But maybe the environment doesn't have `JavaPsiScanner` because it was removed in newer Lint in favor of `SourceCodeScanner`. If we use `SourceCodeScanner`, it's modern. The previous code uses ASM; but `SourceCodeScanner` may exist. Let's check imports: `com.android.tools.lint.detector.api.Detector.SourceCodeScanner` exists in lint API. It has methods:
+```
+List<Class<? extends UElement>> getApplicableUastTypes();
+UElementHandler createUastHandler(JavaContext context);
+```
+It also has `applicableSuperClasses` maybe. This is available in lint 26+. Since previous code uses `com.android.annotations.NonNull` (older), but `SourceCodeScanner` might also exist. Hard to know.
+
+Maybe the simplest robust approach is to implement `Detector.ClassScanner` and `Detector.XmlScanner` but also add `Scope.JAVA_FILE_SCOPE` and a simple `JavaPsiScanner`? No, scope must match implemented scanner. If we add JAVA_FILE_SCOPE but don't implement scanner, lint may ignore or warn. If we implement JavaPsiScanner, compile risk.
+
+Alternative: Change from ClassScanner to `SourceCodeScanner` and use `Scope.JAVA_FILE_SCOPE, Scope.MANIFEST_SCOPE`. This avoids class file compilation. It will definitely run on source files. It can detect direct and indirect extends by walking UClass superclasses. Message and location exact. This is likely to pass. Is it idiomatic? Yes, modern Lint uses UAST. The previous code used ASM; but the corrected code can use UAST. The prompt doesn't forbid.
+
+Let's explore implementing with `SourceCodeScanner`. We need detect classes extending `android.app.Activity`, `android.app.Service`, `android.content.ContentProvider`. We can implement `getApplicableUastTypes` returning `UClass.class`. In `createUastHandler`, return handler that visits `UClass` and checks `uClass.getUastSuperTypes()`? Better to use `context.getEvaluator().extendsClass(uClass, "android.app.Activity", false)`. In UAST, `JavaEvaluator` has `extendsClass(UClass, String, boolean)` or `extendsClass(PsiClass, String, boolean)`. We can use `context.getEvaluator().extendsClass(cls, ACTIVITY, false)`. This handles indirect subclasses and classes named Activity. It resolves via Psi. This is robust.
+
+Then get qualified name: `cls.getQualifiedName()`. If null, skip. Skip abstract/interface. Determine component type by checking which superclass it extends. We can check direct chain: use evaluator extendsClass for each. But if class extends AppCompatActivity (indirect), it extends Activity. We need label "activity". We can determine by checking `extendsClass(cls, ACTIVITY, false)`, `extendsClass(cls, SERVICE, false)`, `extendsClass(cls, PROVIDER, false)`. The order matters if multiple (unlikely). Then add candidate.
+
+Location: `context.getLocation(cls.getNameIdentifier())` or `context.getLocation(cls)`. To highlight class name like expected, use `context.getLocation(cls.getNameIdentifier())`. In UAST, `UClass` extends `PsiClass`; you can call `context.getLocation((PsiElement) cls.getNameIdentifier())`. Actually `JavaContext.getLocation(UElement)` maybe available. We can use `context.getLocation(cls)` and the range may be the class keyword to name? Expected highlight is `~~~~~~~~~~~` under class name. `context.getLocation(cls.getNameIdentifier())` gives exactly name. Let's use that.
+
+But we need compile against API. `UClass.getNameIdentifier()` returns `PsiIdentifier?` In UAST, `UClass` has `getNameIdentifier()`? I think `UClass` (org.jetbrains.uast.UClass) extends `UDeclaration` and `PsiClass`; it has `getNameIdentifier()` from PsiClass. `JavaContext` has `getLocation(PsiElement)`. Good.
+
+If `cls.getNameIdentifier()` null, fallback `context.getLocation(cls)`.
+
+Then store candidate in map keyed by project.
+
+For manifest, same as before.
+
+This approach avoids ASM and class file compilation concerns. But the issue spec says "Class is not registered in the manifest" and maybe the built-in uses class scanning. Tests should pass with source scanning. Let's ensure we handle inner classes: `getQualifiedName()` for inner uses `$`; but manifest uses `.`? Actually Android manifest uses `$` for inner? It uses dot for nested? Usually inner class name `com.example.Outer$Inner` or `com.example.Outer.Inner`. The expected tests probably use top-level. We can convert '$' to '.'? For safety, replace '$' with '.'? But the registered set from manifest likely uses dot notation for package and class, maybe with `$` for inner. Let's not overcomplicate.
+
+But source scanning may not detect classes that are not Java (e.g., Kotlin). UAST handles both Java and Kotlin. Good.
+
+Now, is `SourceCodeScanner` available and `UClass`? Let's confirm API signatures. In lint API:
+```
+public interface SourceCodeScanner {
+    @Nullable List<Class<? extends UElement>> getApplicableUastTypes();
+    @Nullable UElementHandler createUastHandler(@NonNull JavaContext context);
+    default List<String> applicableSuperClasses() { return null; }
+    ...
+}
+```
+`UElementHandler` has `visitClass(@NotNull UClass node)`. Actually `UElementHandler` has methods for each UElement type, including `visitClass(UClass node)`. We can override.
+
+`JavaContext` extends `Context`. It has `getEvaluator()`. It has `getLocation(PsiElement)` and maybe `getLocation(UElement)`.
+
+This is modern and likely compiles in current lint-checks. The previous code used ASM because user wrote it, not because API lacks UAST.
+
+However, the test expected output path `src/test/pkg/MyActivity2.java:5`. SourceCodeScanner will produce that. Good.
+
+But is there any chance the test uses `TestFiles.class` (precompiled .class) instead of `.java` source? If source files are `.java`, source scanner works. If they are `.class` files, source scanner doesn't run. The expected path `.java` indicates source. Good.
+
+Let's decide: Implement using `SourceCodeScanner` + `XmlScanner`. This is robust and modern. But the class name `RegistrationDetector` might be expected to implement `ClassScanner` in some lint versions. However tests only check behavior. We can include both: implement `SourceCodeScanner` and `ClassScanner` and `XmlScanner`, with scope `Scope.JAVA_FILE_SCOPE, Scope.CLASS_FILE_SCOPE, Scope.MANIFEST_SCOPE`. Then whichever works. But if we implement `SourceCodeScanner`, `ClassScanner` not needed. If we include both, we need ensure no duplicate reports. Map keyed by class name dedupes.
+
+But implementing `ClassScanner` may cause issues if class files not available. It won't run, no harm. But the Implementation scope includes CLASS_FILE_SCOPE; the lint driver might try to find class files and maybe not compile. It could still run. Fine.
+
+However, if we implement `SourceCodeScanner`, we can drop ASM and its dependencies. The code becomes cleaner. The prompt says "compile cleanly against the Android Lint API." UAST is part of it.
+
+Let's check if `Scope.JAVA_FILE_SCOPE` is correct for `SourceCodeScanner`. In modern lint, `Scope.JAVA_FILE_SCOPE` is for source code (Java/Kotlin). The Implementation should be `new Implementation(RegistrationDetector.class, Scope.JAVA_FILE_SCOPE, Scope.MANIFEST_SCOPE)`. For Kotlin, maybe `Scope.JAVA_FILE_SCOPE` includes Kotlin too. Good.
+
+Now, we need ensure `JavaContext.getProject()` returns project. Yes.
+
+Now, we need handle `UClass` abstract/interface. `cls.isAbstract()` or `UastUtils.isAbstractClass`. `UClass` extends PsiClass which has `isInterface()`, `isAbstract()`, `isEnum()`, etc. Skip abstract, interface, annotations.
+
+Now, resolve component type: Use `context.getEvaluator().extendsClass(cls, ACTIVITY, false)`. The signature may be `extendsClass(PsiClass, String, boolean)` or `extendsClass(UClass, String, boolean)`. Since `UClass` extends `PsiClass`, both work if method takes PsiClass. In `JavaEvaluator`, there is `boolean extendsClass(@Nullable PsiClass clazz, @NonNull String className, boolean strict)`. It takes PsiClass. Good. Use `context.getEvaluator().extendsClass(cls, ACTIVITY, false)`. The third parameter `strict` if true requires superclass, not class itself. Since cls is not Activity itself (but could be a project class named Activity? unlikely), false is fine.
+
+But for a class `MyActivity extends Activity`, `extendsClass(cls, ACTIVITY, false)` returns true. For `MyActivity2 extends MyActivity` where MyActivity extends Activity, also true if Psi resolves. Good.
+
+We determine type: if extends Activity -> activity; else if Service -> service; else if Provider -> provider. Since a class can't extend multiple, order fine.
+
+Potential issue: `extendsClass` may be expensive, but only for UClasses.
+
+Now, location of class name: `PsiElement nameIdentifier = cls.getNameIdentifier();` In UAST, `UClass` is a PsiClass; `getNameIdentifier()` returns PsiIdentifier. Then `context.getLocation(nameIdentifier)`. If null, use `context.getLocation(cls)`.
+
+Now, manifest parsing same.
+
+Now, per-project maps. Use `afterCheckEachProject` to report. Do not clear in before. Maybe clear in `afterCheckProject`. But if we only use source scanner and XML, lifecycle order is: beforeCheckProject -> source scan -> XML scan -> afterCheckEachProject. So clearing in beforeCheckProject is safe. But to be robust, use lazy maps and clear in afterCheckProject. However if `afterCheckProject` is called after `afterCheckEachProject`, clearing there fine. But if `afterCheckProject` not called (should be). We'll clear in `afterCheckProject`.
+
+But if same detector instance reused and afterCheckProject called, fresh. Good.
+
+But if `beforeCheckProject` is called and class scanning (if any) before it, we don't clear, so candidates from previous project not lost? Wait previous run cleared in afterCheckProject. Good.
+
+Within a run with multiple projects, maps keyed by project. afterCheckEachProject reports and maybe removes that project's entries. afterCheckProject clears all. Let's remove project entries in afterCheckEachProject after reporting to avoid duplicate in afterCheckProject? Not needed.
+
+Actually if afterCheckProject clears all, fine. But if afterCheckEachProject not called for a project (library) and afterCheckProject reports? We don't report in afterCheckProject. So use afterCheckEachProject.
+
+Now, one more thing: If we use `SourceCodeScanner`, the `getApplicableUastTypes` returns `Collections.singletonList(UClass.class)`. `createUastHandler` returns new `UElementHandler` with `visitClass(UClass cls)`. Good.
+
+Now, will `SourceCodeScanner` run on all UClasses, including inner classes? Yes. We can skip inner? The spec says parent classes abstract skip; but nested concrete activities? Should be registered maybe. Keep.
+
+Now, we need ensure `Issue.create` description matches expected? The issue description from prompt is long. The `briefDisplayText` maybe "Class is not registered in the manifest". The `explanation` as provided. Use that.
+
+Priority 6, Severity.WARNING, Category.CORRECTNESS. Implementation scope `Scope.JAVA_FILE_SCOPE, Scope.MANIFEST_SCOPE`. If we also include `Scope.CLASS_FILE_SCOPE` with ClassScanner, we could, but not needed. Let's not include ClassScanner to avoid ASM and compilation ambiguity. Use pure source scanning. This should produce warnings on source files.
+
+But wait: The previous code used ASM; if we switch to source scanning, will `afterCheckEachProject` see candidates? Yes.
+
+Need be careful: `SourceCodeScanner` may not visit classes if the source has compile errors (e.g., missing Activity import). In tests, source should be valid.
+
+Now, let's think about `TestLintTask` and `SourceCodeScanner`. It parses Java files using PSI. It may require `allowCompilation()`? No, source scanning parses. It may need android stubs for `extendsClass` to resolve Activity. But `extendsClass` uses string class names and resolves via Psi; if Activity not in classpath, it still matches by name? Let's check `JavaEvaluator.extendsClass` implementation: It likely checks if the class's qualified name equals the target, or if any superclass's qualified name equals target. If super class cannot be resolved to a PsiClass (because stub missing), it may still use the text of the `extends` reference? I think it resolves. If `Activity` is not in classpath, the reference `Activity` may resolve to a PsiClass stub created by lint test? The test harness usually includes android stubs. But if not, `extendsClass` might fail. The previous code using ASM didn't need to resolve Activity (it just compared superName string). Source scanning relies on Psi resolution. However `extendsClass` may compare the text of unresolved references? Not sure.
+
+Maybe `extendsClass` uses `InheritanceUtil.isInheritor` which requires PsiClass. If Activity is not in classpath, the reference `Activity` might be unresolved and `extendsClass` returns false. Then no warning. But tests should include android stubs. The `TestFiles.java` source likely has `import android.app.Activity;` and the harness provides android.jar stubs. So resolution works.
+
+Alternatively, we can avoid relying on Psi resolution and manually inspect `UClass.getUastSuperTypes()` text. For direct `extends Activity`, we can check if the super type reference name (text) is "Activity" or "android.app.Activity". But for indirect, harder. We can use `UClass.getQualifiedName()` chain? Not.
+
+Using `extendsClass` is standard.
+
+But maybe safer: Implement both source scanning and class scanning. Source scanning can detect direct extends by text if Psi resolution fails; class scanning detects by bytecode. But implementing both complex.
+
+Let's consider the built-in ASM approach with `beforeCheckProject` fix. If class scanning works, it's simpler and doesn't rely on Psi resolution. The expected test path `.java` is still produced by class debug info. The previous code failed because of lifecycle (maybe). We can fix that and message. This is likely what the evaluator expects: a corrected version of the provided ASM detector. The prompt says "Your previous attempt failed. Here is the code you generated... Fix the detector so that it compiles cleanly and all tests pass." It might expect us to fix the existing approach, not switch to UAST. But either passes tests if correct.
+
+We need choose the most likely correct answer. The previous code's structure is ASM. The test failures are no warnings. The likely fix is message and lifecycle ordering, maybe also use `context.getDriver().getClassReader`. Let's compare with actual built-in if possible.
+
+Let's search memory of actual built-in RegistrationDetector source. I'll try to reconstruct from snippets.
+
+I think built-in code:
+```
+public class RegistrationDetector extends Detector
+        implements Detector.ClassScanner, Detector.XmlScanner {
+    /** The issue documented by this detector */
+    @SuppressWarnings("unchecked")
+    public static final Issue ISSUE = Issue.create(
+            "Registered", //$NON-NLS-1$
+            "Class is not registered in the manifest",
+            ...
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(
+                    RegistrationDetector.class,
+                    Scope.CLASS_FILE_SCOPE,
+                    Scope.MANIFEST_SCOPE));
+
+    private static final String ACTIVITY = "android/app/Activity"; //$NON-NLS-1$
+    private static final String SERVICE = "android/app/Service"; //$NON-NLS-1$
+    private static final String PROVIDER = "android/content/ContentProvider"; //$NON-NLS-1$
+
+    private List<ClassNode> mClasses;
+    private Set<String> mManifestEntries;
+    private String mPackage;
+
+    @Override
+    public void beforeCheckProject(@NonNull Context context) {
+        mClasses = new ArrayList<>();
+        mManifestEntries = new HashSet<>();
+    }
+
+    @Override
+    public void afterCheckProject(@NonNull Context context) {
+        if (mClasses == null) return;
+        for (ClassNode classNode : mClasses) {
+            String name = classNode.name.replace('/', '.');
+            if (!mManifestEntries.contains(name)) {
+                String type = getComponentType(classNode);
+                context.report(ISSUE, getLocation(classNode),
+                    String.format("The <%s> %s is not registered in the manifest", type, name));
+            }
+        }
+    }
+
+    @Override
+    public void checkClass(@NonNull ClassContext context, @NonNull ClassNode classNode) {
+        if ((classNode.access & Opcodes.ACC_ABSTRACT) != 0) return;
+        if ((classNode.access & Opcodes.ACC_INTERFACE) != 0) return;
+        if (isComponent(classNode)) {
+            mClasses.add(classNode);
+        }
+    }
+
+    private static boolean isComponent(ClassNode classNode) {
+        ClassNode current = classNode;
+        while (current != null) {
+            String superName = current.superName;
+            if (ACTIVITY.equals(superName) || SERVICE.equals(superName) || PROVIDER.equals(superName)) {
+                return true;
+            }
+            current = getParentClass(current);
+        }
+        return false;
+    }
+
+    @Nullable
+    private static ClassNode getParentClass(@NonNull ClassNode classNode) { ... uses context? }
+```
+Wait `getParentClass` needs context. It might use `ClassContext.getDriver().getClassReader`. The built-in likely uses `context.getDriver().getClassReader`.
+
+`getLocation` in afterCheckProject: It doesn't have ClassContext. But maybe it stores `Location` in a list. Actually built-in might store `ClassNode` and then in afterCheckProject use `context.getDriver().getClassReader(classNode.name)` to get a `Location`? Hmm.
+
+Wait `Context` has a method `getLocation(File)` not class node. `ClassContext` has `getLocation(ClassNode)`. In afterCheckProject, context is generic. So built-in must store location. Or it stores `ClassNode` and uses `context.getDriver().findClassFile`? Not.
+
+Maybe built-in uses `afterCheckProject` but has stored `Location` objects in `mLocations` list parallel to `mClasses`. Or it uses a map. The previous code stored location in Candidate. Good.
+
+Now, the built-in might not call `beforeCheckEachProject` but `beforeCheckProject`. If the driver order is as I suspected (class scan between beforeCheckProject and beforeCheckEachProject), then built-in works. The previous code's use of `beforeCheckEachProject` clears after class scan. That is likely the bug. Also message format and component type.
+
+Let's verify by checking `LintDriver` lifecycle from AOSP. I can try to recall `LintDriver.checkProject` code snippet:
+```
+private void checkProject(@NonNull Project project, @NonNull Project main, @NonNull List<? extends Detector> detectors) {
+    ...
+    fireBeforeCheckProject(project);
+    fireBeforeCheckEachProject(project);
+    ...
+    checkProjectDependencies(project, main);
+    ...
+    runClassDetectors(project, main);
+    runFileDetectors(project, main, ...);
+    ...
+    fireAfterCheckEachProject(project);
+    fireAfterCheckProject(project);
+}
+```
+If class scan is after `beforeCheckEachProject`, then previous code's clearing doesn't lose. But built-in uses beforeCheckProject. Hmm.
+
+Maybe `beforeCheckProject` is called before class scan, and `beforeCheckEachProject` is called after class scan. Let's search memory of actual order. I recall in `LintDriver.run` there is:
+```
+for (Project project : projects) {
+    mDriver.fireBeforeCheckProject(project);
+}
+for (Project project : projects) {
+    mDriver.fireBeforeCheckEachProject(project);
+}
+```
+Not.
+
+Actually `beforeCheckProject` might be called for the main/root project only, while `beforeCheckEachProject` for each project. In a single project, both called. The order maybe `beforeCheckProject(main)`, then for each project `beforeCheckEachProject(project)`. Class scanning might happen in the per-project loop before `beforeCheckEachProject`. If so, built-in clearing in `beforeCheckProject` (before class scan) works. Previous code clearing in `beforeCheckEachProject` (after class scan) loses. That fits.
+
+Thus fix: use `beforeCheckProject` to initialize/clear and `afterCheckProject` to report. Or use lazy maps.
+
+Let's adopt a hybrid: use fields and `beforeCheckProject` to initialize. This matches built-in. Also use correct message and component type. Also use `context.getDriver().getClassReader` for superclass resolution. Also store location.
+
+But if the test harness doesn't compile class files, this still fails. However, given built-in uses this, likely harness compiles. And the previous code's bug was lifecycle/message.
+
+Let's design final ASM code:
+
+```
+package com.android.tools.lint.checks;
+
+import static com.android.SdkConstants.ANDROID_URI;
+import static com.android.SdkConstants.ATTR_NAME;
+import static com.android.SdkConstants.ATTR_PACKAGE;
+import static com.android.SdkConstants.TAG_ACTIVITY;
+import static com.android.SdkConstants.TAG_MANIFEST;
+import static com.android.SdkConstants.TAG_PROVIDER;
+import static com.android.SdkConstants.TAG_SERVICE;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.ClassContext;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.ClassNode;
+import org.w3c.dom.Element;
+
+public class RegistrationDetector extends Detector
+        implements Detector.ClassScanner, Detector.XmlScanner {
+
+    private static final String ACTIVITY = "android/app/Activity";
+    private static final String SERVICE = "android/app/Service";
+    private static final String PROVIDER = "android/content/ContentProvider";
+
+    public static final Issue ISSUE =
+            Issue.create(
+                    "Registered",
+                    "Class is not registered in the manifest",
+                    "Activities, services and content providers should be registered in the "
+                            + "`AndroidManifest.xml` file using `<activity>`, `<service>` and "
+                            + "`<provider>` tags.\n\n"
+                            + "If your activity is simply a parent class intended to be subclassed "
+                            + "by other \"real\" activities, make it an abstract class.",
+                    Category.CORRECTNESS,
+                    6,
+                    Severity.WARNING,
+                    new Implementation(
+                            RegistrationDetector.class,
+                            Scope.CLASS_FILE_SCOPE,
+                            Scope.MANIFEST_SCOPE));
+
+    private static class Candidate {
+        final String name;
+        final Location location;
+        final String type;
+
+        Candidate(String name, Location location, String type) {
+            this.name = name;
+            this.location = location;
+            this.type = type;
+        }
+    }
+
+    private List<Candidate> mCandidates;
+    private Set<String> mRegisteredNames;
+    private String mManifestPackage;
+
+    @Override
+    public void beforeCheckProject(@NonNull Context context) {
+        mCandidates = new ArrayList<>();
+        mRegisteredNames = new HashSet<>();
+        mManifestPackage = null;
+    }
+
+    @Override
+    public void afterCheckProject(@NonNull Context context) {
+        if (mCandidates == null || mRegisteredNames == null) {
+            return;
+        }
+        for (Candidate candidate : mCandidates) {
+            if (!mRegisteredNames.contains(candidate.name)) {
+                context.report(
+                        ISSUE,
+                        candidate.location,
+                        "The <" + candidate.type + "> " + candidate.name
+                                + " is not registered in the manifest");
+            }
+        }
+    }
+
+    @Override
+    public void checkClass(@NonNull ClassContext context, @NonNull ClassNode classNode) {
+        if ((classNode.access & Opcodes.ACC_ABSTRACT) != 0) {
+            return;
+        }
+        if ((classNode.access & Opcodes.ACC_INTERFACE) != 0) {
+            return;
+        }
+        if (classNode.name == null) {
+            return;
+        }
+
+        String type = getComponentType(context, classNode);
+        if (type == null) {
+            return;
+        }
+
+        String name = classNode.name.replace('/', '.');
+        Location location = context.getLocation(classNode);
+        mCandidates.add(new Candidate(name, location, type));
+    }
+
+    @Nullable
+    private static String getComponentType(@NonNull ClassContext context, @NonNull ClassNode classNode) {
+        ClassNode current = classNode;
+        while (current != null && current.superName != null) {
+            String superName = current.superName;
+            if (superName.equals(ACTIVITY)) {
+                return "activity";
+            }
+            if (superName.equals(SERVICE)) {
+                return "service";
+            }
+            if (superName.equals(PROVIDER)) {
+                return "provider";
+            }
+            current = getSuperClass(context, current);
+        }
+        return null;
+    }
+
+    @Nullable
+    private static ClassNode getSuperClass(
+            @NonNull ClassContext context, @NonNull ClassNode classNode) {
+        String superName = classNode.superName;
+        if (superName == null || superName.equals("java/lang/Object")) {
+            return null;
+        }
+        try {
+            ClassReader reader = context.getDriver().getClassReader(superName);
+            ClassNode node = new ClassNode();
+            reader.accept(node, 0);
+            return node;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Arrays.asList(TAG_MANIFEST, TAG_ACTIVITY, TAG_SERVICE, TAG_PROVIDER);
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        String tag = element.getTagName();
+        if (TAG_MANIFEST.equals(tag)) {
+            String pkg = element.getAttribute(ATTR_PACKAGE);
+            if (pkg != null && !pkg.isEmpty()) {
+                mManifestPackage = pkg;
+            }
+            return;
+        }
+
+        String className = element.getAttributeNS(ANDROID_URI, ATTR_NAME);
+        if (className == null || className.isEmpty()) {
+            return;
+        }
+
+        if (mManifestPackage == null || mManifestPackage.isEmpty()) {
+            mManifestPackage = context.getProject().getPackage();
+        }
+
+        mRegisteredNames.add(resolveClassName(className, mManifestPackage));
+    }
+
+    @NonNull
+    private static String resolveClassName(@NonNull String name, @Nullable String packageName) {
+        if (name.startsWith(".")) {
+            if (packageName == null || packageName.isEmpty()) {
+                return name;
+            }
+            return packageName + name;
+        }
+
+        if (name.indexOf('.') == -1) {
+            if (packageName == null || packageName.isEmpty()) {
+                return name;
+            }
+            return packageName + '.' + name;
+        }
+
+        return name;
+    }
+}
+```
+
+Will this compile? `context.getDriver().getClassReader(superName)` may not exist? Let's verify. In LintDriver, there is method `public ClassReader getClassReader(String fqcn) throws IOException`. It takes internal name? I think yes. The ASM ClassReader constructor takes class file bytes. `getClassReader` returns a ClassReader. Good.
+
+But in some versions, the method might be `context.getDriver().getClassReader(String, boolean)` or `findClassReader`. Need be sure. If it doesn't compile, we can revert to previous getSuperClass using project class folders. The previous code compiled. We can keep that approach but fix lifecycle/message. It might fail to resolve indirect superclasses if class folders missing, but direct works. For tests, direct. So safer to use project class folders to ensure compilation. But using driver.getClassReader is more idiomatic. However if not available, compilation error. Since previous code used project.getJavaClassFolders and compiled, we can keep that but improve. But if `getJavaClassFolders` returns empty, indirect fails. Not relevant for direct.
+
+Actually we can implement `getSuperClass` using both: try driver.getClassReader, fallback to class folders. But if driver.getClassReader doesn't compile, can't. Since uncertain, use project class folders to match previous code. But we can remove File/Files imports? We need them. The previous code had them. We'll keep for robustness.
+
+Wait the previous code used `java.nio.file.Files.readAllBytes` and `java.io.File`. It compiled. Good.
+
+But the previous code's `getSuperClass` had a subtle bug: It constructs `File classFile = new File(dir, relativePath);` and reads. This works for compiled project classes. For Android framework classes (Activity), not in project class folders, returns null. For direct extends Activity, no need to resolve Activity. For indirect extends MyBase extends Activity, resolves MyBase from class folders. Good.
+
+If we use `context.getDriver().getClassReader`, it can resolve framework classes too. But not necessary.
+
+Now, the lifecycle fix is key. Let's think: If class scanning happens before `beforeCheckProject`, then using `beforeCheckProject` to initialize loses candidates. But built-in uses it and presumably passes. So okay.
+
+Alternatively, to be safer, we can initialize fields at declaration and only reset in `beforeCheckProject` if not already? Hmm. If class scan before beforeCheckProject, fields are initialized (empty) and populated. Then beforeCheckProject would clear them if we call clear. We currently assign new ArrayList in beforeCheckProject, clearing. So if class scan before, lost. To avoid, we could not override beforeCheckProject and initialize fields lazily. But then across test runs stale. We can clear in afterCheckProject. Let's consider using lazy initialization and no beforeCheckProject. That would handle both orders. But if the same instance is reused across runs and afterCheckProject not called, stale. But afterCheckProject is called. This is safer. However, it deviates from built-in. But correctness robust.
+
+Let's adopt lazy maps? Or fields with `if (mCandidates == null) mCandidates = new ArrayList<>()` in checkClass/visitElement. And override `afterCheckProject` to clear. This avoids clearing before class scan. But we need also handle multiple projects? Fields not keyed by project. If multiple projects, candidates/registered from all projects mix. The issue might be cross-project false positives/negatives. But tests single project. Could key by project for correctness.
+
+But if we use fields (single project) and lazy init, and clear in afterCheckProject, class scan before/after doesn't matter. This is robust to ordering. Let's do that. But we also need to ensure `afterCheckEachProject` reports. If afterCheckEachProject called after all scans, fine. If afterCheckProject is after all, we could also report there. But expected warnings per project. We'll use afterCheckEachProject.
+
+Actually if class scan and XML scan happen, afterCheckEachProject reports. Good. If afterCheckProject then clears.
+
+But what if `afterCheckEachProject` is called before XML scan? Unlikely. If so, registered names missing. But built-in uses afterCheckProject? Hmm.
+
+Let's use `afterCheckProject` to report instead of afterCheckEachProject? That would be after all scans for root project. But for multi-project, library classes might not be reported. Tests single. Using afterCheckProject ensures all scans done. But the expected testDocumentationExample is single project. The message location line from class. Fine.
+
+But if `afterCheckProject` is called after `beforeCheckProject`? Yes.
+
+However, if we report in `afterCheckProject` and clear there, and also implement `afterCheckEachProject` for cross-project, could duplicate. Not needed.
+
+Let's stick with `afterCheckEachProject` for reporting per project and `afterCheckProject` for cleanup. Since tests single project, both work. But if `afterCheckEachProject` not called? It is.
+
+Now, to avoid clearing-before-scan, we can skip `beforeCheckProject`. Use lazy init. But then if same detector instance is reused and afterCheckProject called, fields cleared. Good.
+
+But what about `mManifestPackage` field? If multiple manifests? For single project, fine. If library, last manifest package persists. Better to use per-project maps or reset per project. For simplicity, use per-project maps keyed by Project. Then no field package needed.
+
+Let's design final with per-project maps and lazy init, no beforeCheckProject, report in afterCheckEachProject, clear in afterCheckProject. This is robust.
+
+```
+private final Map<Project, List<Candidate>> mCandidates = new HashMap<>();
+private final Map<Project, Set<String>> mRegisteredNames = new HashMap<>();
+private final Map<Project, String> mManifestPackages = new HashMap<>();
+```
+
+In checkClass: `Project project = context.getProject(); List<Candidate> list = mCandidates.computeIfAbsent(project, k -> new ArrayList<>()); list.add(candidate);`
+In visitElement: `Project project = context.getProject();` etc.
+In afterCheckEachProject: get project, list, registered. Report. Optionally remove entries. But if we remove, afterCheckProject clear not needed. We can remove to be clean.
+In afterCheckProject: clear maps (if any leftover).
+
+This avoids lifecycle ordering and multi-project issues. It also doesn't need beforeCheckProject.
+
+But if `afterCheckEachProject` is called and we remove entries, and there are multiple projects, fine. `afterCheckProject` clears all leftovers.
+
+Now, will this compile? `Project` is `com.android.tools.lint.detector.api.Project`. Yes.
+
+Now, one concern: `checkClass` may be called with `ClassContext` whose `getProject()` returns a project. Good.
+
+Now, `getSuperClass` using project class folders might need `context.getProject()`. Our method signature includes `ClassContext context`, so can get project. Fine.
+
+Now, message format: use candidate.type. Good.
+
+Let's also ensure we handle `classNode.name` for inner classes: replace '/' with '.', but inner classes in bytecode use '$'. Manifest uses '$' or '.'? For inner classes, the component class name in manifest is usually `Outer$Inner` or `Outer.Inner`. The registered set will contain whatever the manifest has. Our candidate name from bytecode will have `$`. If manifest uses `.`, mismatch. But tests likely top-level. We could convert `$` to `.`? But that might cause false negatives if manifest uses `$`. Android supports `$` for inner classes. Actually in manifest, you can use `.Outer$Inner` or `Outer$Inner`. The `$` is needed? Let's leave as is.
+
+Now, do we need to skip classes that are not public? Non-public activities can be registered? Usually they must be public. But spec doesn't say. Keep.
+
+Now, let's produce final code with ASM + maps. But we need decide whether to include `beforeCheckProject` or not. I think lazy maps are safer. Let's write.
+
+But we should test against expected output: For `testDocumentationExample`, source MyActivity2 extends Activity. checkClass adds candidate. Manifest visit adds registered MyActivity. afterCheckEachProject reports MyActivity2. Message "The <activity> test.pkg.MyActivity2 is not registered in the manifest". Location from classNode maps to java line 5. Good.
+
+For `testNotRegistered`, likely manifest empty or no components. afterCheck reports all concrete components. Good.
+
+Now, could `afterCheckEachProject` be called before `visitElement` or `checkClass` due to lifecycle? If so, maps empty, no report. But built-in uses afterCheckProject and works. Let's check actual order: In `LintDriver`, after each project checked, afterCheckEachProject called. So all file visits done. Good.
+
+Now, potential issue: If we don't override `beforeCheckProject`, and the same detector instance is used for multiple test runs, maps may have stale entries if afterCheckProject not called. But afterCheckProject is called. Good.
+
+But what about `afterCheckEachProject` removing entries and then `afterCheckProject` clearing? Fine.
+
+Now, one more subtlety: `context.getLocation(classNode)` in ClassContext might need the class file to have line numbers. If class files compiled with debug info. Test harness compiles with debug? Usually yes. If not, location may be unknown but still report. Expected line 5 suggests debug info. Fine.
+
+Now, let's consider if `context.getDriver().getClassReader` is better and compile. I think it's safe. But to avoid compilation uncertainty, use project class folders as previous. However, the previous code used `Files.readAllBytes` and `java.io.File`. Let's keep. It compiles. We can also add fallback to driver? No.
+
+Wait, the previous code's `getSuperClass` had a potential issue: It didn't check if `superName` is `java/lang/Object`? It did: `if (superName == null || superName.equals("java/lang/Object")) return null;`. Good.
+
+Now, we need import `java.io.File`, `java.io.IOException`, `java.nio.file.Files`, `java.util.*`, etc.
+
+Let's write final code with maps and correct message. Also remove `mManifestPackage` field; use map.
+
+But note: In `visitElement`, for the manifest tag, we set package in map. For component tags, if package not yet in map, fallback to `context.getProject().getPackage()`. Good.
+
+Now, `resolveClassName`: Should handle `packageName` null. If `name` starts with "." and package null, return name (without dot)? Actually if package null, cannot resolve. But return name maybe. We'll do as before.
+
+Now, we need to consider `TAG_APPLICATION`? Not needed.
+
+Now, let's think about whether `getApplicableElements` should include `TAG_RECEIVER`? Spec doesn't mention. Exclude.
+
+Now, final code.
+
+But before final, let's consider potential issue: If class scanning not invoked at all due to scope, this still fails. To mitigate, we could add `Scope.JAVA_FILE_SCOPE` and implement `JavaPsiScanner` or `SourceCodeScanner` to also collect candidates from source. This would make it robust. But is it worth the complexity and risk? Let's examine the test harness: It likely compiles for CLASS_FILE_SCOPE. The previous code's failure likely due to clearing in beforeCheckEachProject. So ASM fix should pass. But to be safe, maybe implement source scanner as primary and remove ASM. Which is more likely to compile? Source scanner requires UAST/Psi; ASM requires objectweb. Both present.
+
+Given the prompt gave previous ASM code and asked to fix, the expected answer likely stays within ASM. Switching to UAST might be considered not fixing but rewriting. But the user just wants passing tests. However the system says "You are an expert Android developer specialising in Android Lint custom checks. You write Lint Detector implementations in Java that are correct, idiomatic, and compile cleanly against the Android Lint API." It doesn't say keep ASM. So either is fine if passes.
+
+Let's consider idiomatic modern Lint: Use `SourceCodeScanner` (UAST). It is more idiomatic than ASM for detecting class hierarchy. The issue is about Java classes, so source scanning is natural. It avoids bytecode. It also handles Kotlin. The expected output uses Java source line. I'd lean toward UAST solution. But we need ensure `extendsClass` works without compilation. Actually source scanning doesn't compile; it parses. The `extendsClass` evaluator resolves super classes via PSI. If the test source references `Activity` and the harness includes android stubs, it works. If not, we can also manually inspect super types as fallback.
+
+Let's design a UAST-based detector. It might be simpler and more robust. But we need be sure of API signatures. Let's write a detector implementing `Detector.SourceCodeScanner, Detector.XmlScanner`.
+
+```
+public class RegistrationDetector extends Detector implements SourceCodeScanner, XmlScanner {
+    private static final String ACTIVITY = "android.app.Activity";
+    private static final String SERVICE = "android.app.Service";
+    private static final String PROVIDER = "android.content.ContentProvider";
+
+    public static final Issue ISSUE = Issue.create(...,
+        new Implementation(RegistrationDetector.class, Scope.JAVA_FILE_SCOPE, Scope.MANIFEST_SCOPE));
+
+    private static class Candidate { String name; Location location; String type; }
+
+    private final Map<Project, List<Candidate>> mCandidates = new HashMap<>();
+    private final Map<Project, Set<String>> mRegistered = new HashMap<>();
+    private final Map<Project, String> mPackages = new HashMap<>();
+
+    @Override
+    public List<Class<? extends UElement>> getApplicableUastTypes() {
+        return Collections.singletonList(UClass.class);
+    }
+
+    @Override
+    public UElementHandler createUastHandler(JavaContext context) {
+        return new UElementHandler() {
+            @Override
+            public void visitClass(UClass cls) {
+                if (cls.isInterface() || cls.isAbstract() || cls.isAnnotationType()) return;
+                String name = cls.getQualifiedName();
+                if (name == null) return;
+                JavaEvaluator evaluator = context.getEvaluator();
+                String type = null;
+                if (evaluator.extendsClass(cls, ACTIVITY, false)) type = "activity";
+                else if (evaluator.extendsClass(cls, SERVICE, false)) type = "service";
+                else if (evaluator.extendsClass(cls, PROVIDER, false)) type = "provider";
+                if (type == null) return;
+                PsiElement nameIdentifier = cls.getNameIdentifier();
+                Location location = nameIdentifier != null ? context.getLocation(nameIdentifier) : context.getLocation(cls);
+                Project project = context.getProject();
+                mCandidates.computeIfAbsent(project, k -> new ArrayList<>()).add(new Candidate(name, location, type));
+            }
+        };
+    }
+
+    // XmlScanner methods same
+    // afterCheckEachProject same
+}
+```
+
+This is clean. But does `JavaEvaluator.extendsClass` accept `UClass`? It accepts `PsiClass`. `UClass` extends `PsiClass` (because UAST classes implement Psi). So okay.
+
+But wait, `UClass` may be a `PsiClass` wrapper; `cls.getQualifiedName()` returns Java-qualified name with `.` for package and `$` for inner. Good.
+
+`context.getLocation(PsiElement)` exists. `cls.getNameIdentifier()` returns `PsiIdentifier`? For Kotlin maybe null. Tests Java. Fallback.
+
+Now, what about classes extending `android.support.v7.app.AppCompatActivity`? `extendsClass(cls, ACTIVITY, false)` should return true because AppCompatActivity extends Activity (if stubs chain present). Good.
+
+Now, will source scanner run on classes that don't import Activity but fully qualify `extends android.app.Activity`? Yes, Psi resolves.
+
+Now, the Implementation scope `Scope.JAVA_FILE_SCOPE` ensures source scanning. The test harness parses Java files. It does not need android.jar compiled; but Psi resolution of Activity may need it. The harness likely includes stubs.
+
+Now, potential issue: `SourceCodeScanner` interface might require `applicableSuperClasses()` or other methods? No, if `getApplicableUastTypes` returns non-null, only those are needed. It also has default `applicableSuperClasses` returning null. Good.
+
+But if the lint API version is older and `SourceCodeScanner` doesn't exist, compilation fails. The previous code with ASM suggests older API. However `SourceCodeScanner` was introduced around lint 2.3 (2017). If the environment is older (e.g., lint 24), it might not exist. But the issue ID "Registered" and package `com.android.tools.lint.checks` suggests the lint-checks module, which historically used ASM. The test `RegistrationDetectorTest` likely from older lint. But we can't be sure.
+
+Given the previous code uses ASM and the prompt says "compile cleanly against the Android Lint API" (the same API), `SourceCodeScanner` might be available. But to minimize risk, using ASM is safer because we know it compiled. The previous code's only runtime issue likely lifecycle/message. So fixing ASM is lower risk of API mismatch.
+
+Let's verify if `context.getDriver().getClassReader` compiles. The previous code didn't use it; if it doesn't exist, compile error. So use project class folders (known to compile). Good.
+
+Now, the ASM fix with lazy maps. Let's also consider whether `ClassContext.getLocation(classNode)` is valid. Previous code used it. Good.
+
+Now, let's produce the ASM-based corrected source. Use lazy maps and `afterCheckEachProject`. Include `afterCheckProject` to clear maps. No `beforeCheckProject`. This should avoid the lifecycle clearing bug.
+
+But is it safe to not clear at start? If the same detector instance is reused across multiple `lint()` runs and `afterCheckProject` is called, maps cleared. Good. If `afterCheckProject` is not called (shouldn't), stale. But `beforeCheckProject` could be used to clear if we want. However if class scan before beforeCheckProject, clearing loses. Since we don't know order, skip. But maybe the lint driver expects detectors to initialize in `beforeCheckProject`. Not initializing there is okay.
+
+Actually maybe `beforeCheckProject` is called before class scan, and we can clear there safely. But to be robust to both orders, we can do:
+- In `beforeCheckProject`, if maps are not empty, clear them (fresh run). But if class scan already happened before `beforeCheckProject`, we would clear. So not.
+
+Unless class scan cannot happen before `beforeCheckProject`. Built-in assumes that. But previous code's bug was using `beforeCheckEachProject` after class scan. So if we use `beforeCheckProject`, class scan is after. That fixes. Then we don't need maps. But using maps and no clear also works.
+
+Let's decide: Use simple fields and `beforeCheckProject`/`afterCheckProject` like built-in. This is idiomatic and likely correct. The previous code used `beforeCheckEachProject` which was wrong. Let's trust that class scan is after `beforeCheckProject`. This yields cleaner code. But if I'm wrong about ordering, tests still fail. However built-in uses this and passes, so likely correct.
+
+Let's verify with actual AOSP. I can search memory of `LintDriver.run` more. In `LintDriver`, there is a method `runClassDetectors` called from `checkProject` after `fireBeforeCheckProject`? Let's try to recall code snippet:
+
+```
+private void checkProject(@NonNull Project project, @NonNull Project main) {
+    ...
+    fireBeforeCheckProject(project);
+    checkProjectDependencies(project, main);
+    ...
+    fireBeforeCheckEachProject(project);
+    ...
+    runClassDetectors(project, main);
+    runFileDetectors(project, main, ...);
+    ...
+    fireAfterCheckEachProject(project);
+    fireAfterCheckProject(project);
+}
+```
+Actually if `beforeCheckEachProject` is after `beforeCheckProject` and class scan after both, then previous code's clearing in beforeCheckEachProject wouldn't lose. But it did lose (no warnings). So maybe class scan is before `beforeCheckEachProject`. That suggests order:
+- beforeCheckProject
+- class scan
+- beforeCheckEachProject
+- XML scan
+- afterCheckEachProject
+- afterCheckProject
+Thus clearing in beforeCheckEachProject loses. Using beforeCheckProject to clear is safe. Good.
+
+So use `beforeCheckProject` and `afterCheckProject`. That matches built-in.
+
+Now, does `afterCheckProject` get called after XML scan? Yes. Good.
+
+Thus final ASM code with fields and beforeCheckProject/afterCheckProject should pass.
+
+But we also need correct message and component type. Let's write.
+
+One more nuance: In `afterCheckProject`, we need to report using `context.report`. The `context` is generic. The `Location` stored from `ClassContext.getLocation(classNode)` should be valid. Good.
+
+Now, `getComponentType` uses `getSuperClass`. For indirect, resolves. Good.
+
+Now, `getSuperClass` using project class folders. It may not resolve Activity framework, but direct match before resolving. For indirect (MyBase extends Activity), it resolves MyBase from class folders. Good.
+
+Now, let's ensure we import `java.util.*` and `java.io.*`.
+
+Now, final code. Let's craft carefully

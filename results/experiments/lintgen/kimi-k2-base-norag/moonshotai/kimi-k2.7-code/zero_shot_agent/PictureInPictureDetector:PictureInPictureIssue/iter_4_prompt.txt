@@ -1,0 +1,313 @@
+=== SYSTEM ===
+You are an expert Android developer specialising in Android Lint custom checks.
+You write Lint Detector implementations in Kotlin that are correct, idiomatic,
+and compile cleanly against the Android Lint API.
+
+- Output ONLY the detector source file. No explanation, no markdown fences.
+- Use the exact package: com.android.tools.lint.checks
+- The class name must be: PictureInPictureDetector
+
+
+=== USER ===
+Implement an Android Lint Detector named PictureInPictureDetector in Kotlin for the following issue.
+
+Issue ID: PictureInPictureIssue
+
+Specification:
+Picture In Picture best practices not followed
+
+Starting in Android 12, the recommended approach for enabling picture-in-picture (PiP)  has changed. If your app does not use the new approach, your app's transition animations  will be of poor quality compared to other apps. The new approach requires calling  `setAutoEnterEnabled(true)` and `setSourceRectHint(...)`.
+
+Reference documentation:
+  - https://developer.android.com/develop/ui/views/picture-in-picture#smoother-transition
+
+Generate the complete PictureInPictureDetector.kt source file now.
+
+---
+
+Your previous attempt failed. Here is the code you generated:
+
+```kt
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.JavaContext
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.SourceCodeScanner
+import com.intellij.psi.PsiType
+import org.jetbrains.uast.UCallExpression
+import org.jetbrains.uast.UElement
+import org.jetbrains.uast.UExpression
+import org.jetbrains.uast.ULambdaExpression
+import org.jetbrains.uast.ULiteralExpression
+import org.jetbrains.uast.UMethod
+import org.jetbrains.uast.USimpleNameReferenceExpression
+import org.jetbrains.uast.getParentOfType
+import org.jetbrains.uast.visitor.AbstractUastVisitor
+import org.jetbrains.uast.visitor.UElementHandler
+
+class PictureInPictureDetector : Detector(), SourceCodeScanner {
+
+    private val reported = mutableSetOf<UCallExpression>()
+
+    override fun beforeCheckFile(context: Context) {
+        reported.clear()
+    }
+
+    override fun getApplicableUastTypes(): List<Class<out UElement>>? =
+        listOf(UCallExpression::class.java)
+
+    override fun createUastHandler(context: JavaContext): UElementHandler? =
+        object : UElementHandler() {
+            override fun visitCallExpression(node: UCallExpression) {
+                if (context.project.targetSdk < 31) {
+                    return
+                }
+
+                val methodName = node.methodName ?: return
+
+                if (methodName == "build" && isPictureInPictureParamsBuilderBuild(context, node)) {
+                    checkBuilder(context, node)
+                } else if (methodName == "enterPictureInPictureMode" && node.valueArguments.isEmpty()) {
+                    reportMissingEnter(context, node)
+                }
+            }
+        }
+
+    private fun checkBuilder(context: JavaContext, buildCall: UCallExpression) {
+        if (reported.contains(buildCall)) {
+            return
+        }
+
+        val receiver = buildCall.receiver
+        var (hasAutoEnter, hasSourceRect) = collectCallChain(context, buildCall)
+
+        if (receiver is USimpleNameReferenceExpression) {
+            val (varAuto, varSrc) = findBuilderSettersOnVariable(context, buildCall, receiver)
+            hasAutoEnter = hasAutoEnter || varAuto
+            hasSourceRect = hasSourceRect || varSrc
+        }
+
+        if (!hasAutoEnter || !hasSourceRect) {
+            val (lambdaAuto, lambdaSrc) = findEnclosingLambdaSetters(context, buildCall)
+            hasAutoEnter = hasAutoEnter || lambdaAuto
+            hasSourceRect = hasSourceRect || lambdaSrc
+        }
+
+        if (!hasAutoEnter || !hasSourceRect) {
+            val missing = buildList {
+                if (!hasAutoEnter) add("setAutoEnterEnabled(true)")
+                if (!hasSourceRect) add("setSourceRectHint(...)")
+            }.joinToString(" and ")
+
+            context.report(
+                ISSUE,
+                buildCall,
+                context.getLocation(buildCall),
+                "PictureInPictureParams.Builder is missing required call(s): $missing. " +
+                    "Starting in Android 12, call setAutoEnterEnabled(true) and setSourceRectHint(...) " +
+                    "for a smoother PiP transition."
+            )
+            reported.add(buildCall)
+        }
+    }
+
+    private fun reportMissingEnter(context: JavaContext, node: UCallExpression) {
+        context.report(
+            ISSUE,
+            node,
+            context.getLocation(node),
+            "Use PictureInPictureParams.Builder with setAutoEnterEnabled(true) and setSourceRectHint(...) " +
+                "for a smoother PiP transition on Android 12+."
+        )
+    }
+
+    private fun isPictureInPictureParamsBuilderBuild(
+        context: JavaContext,
+        node: UCallExpression
+    ): Boolean {
+        if (node.methodName != "build") {
+            return false
+        }
+        val receiver = node.receiver ?: return false
+        val receiverType = receiver.getExpressionType() ?: return false
+        return isBuilderType(context, receiverType)
+    }
+
+    private fun collectCallChain(context: JavaContext, node: UCallExpression): Pair<Boolean, Boolean> {
+        val scopingFunctions = setOf("apply", "also", "run", "let", "with")
+        var hasAutoEnter = false
+        var hasSourceRect = false
+        var current: UExpression? = node
+        while (current != null) {
+            val call = current as? UCallExpression ?: break
+            val name = call.methodName ?: break
+            when (name) {
+                "setAutoEnterEnabled" -> {
+                    val arg = call.valueArguments.firstOrNull()
+                    if (arg is ULiteralExpression && arg.value == true) {
+                        hasAutoEnter = true
+                    }
+                }
+                "setSourceRectHint" -> hasSourceRect = true
+                in scopingFunctions -> {
+                    if (isScopingCallOnBuilder(context, call)) {
+                        val lambda = call.valueArguments.find { it is ULambdaExpression } as? ULambdaExpression
+                        if (lambda != null) {
+                            val (auto, src) = findSettersInLambda(lambda)
+                            hasAutoEnter = hasAutoEnter || auto
+                            hasSourceRect = hasSourceRect || src
+                        }
+                    }
+                }
+            }
+            current = call.receiver
+        }
+        return Pair(hasAutoEnter, hasSourceRect)
+    }
+
+    private fun isScopingCallOnBuilder(context: JavaContext, call: UCallExpression): Boolean {
+        return when (call.methodName) {
+            "apply", "also", "run", "let" -> isBuilderType(context, call.receiver?.getExpressionType())
+            "with" -> isBuilderType(context, call.valueArguments.firstOrNull()?.getExpressionType())
+            else -> false
+        }
+    }
+
+    private fun findSettersInLambda(lambda: ULambdaExpression): Pair<Boolean, Boolean> {
+        var hasAutoEnter = false
+        var hasSourceRect = false
+        val body = lambda.body ?: return Pair(false, false)
+        body.accept(object : AbstractUastVisitor() {
+            override fun visitCallExpression(node: UCallExpression): Boolean {
+                val name = node.methodName ?: return super.visitCallExpression(node)
+                when (name) {
+                    "setAutoEnterEnabled" -> {
+                        val arg = node.valueArguments.firstOrNull()
+                        if (arg is ULiteralExpression && arg.value == true) {
+                            hasAutoEnter = true
+                        }
+                    }
+                    "setSourceRectHint" -> hasSourceRect = true
+                }
+                return super.visitCallExpression(node)
+            }
+        })
+        return Pair(hasAutoEnter, hasSourceRect)
+    }
+
+    private fun findEnclosingLambdaSetters(
+        context: JavaContext,
+        buildCall: UCallExpression
+    ): Pair<Boolean, Boolean> {
+        val lambda = buildCall.getParentOfType(ULambdaExpression::class.java)
+            ?: return Pair(false, false)
+        val parentCall = lambda.uastParent as? UCallExpression
+            ?: return Pair(false, false)
+        if (!isScopingCallOnBuilder(context, parentCall)) {
+            return Pair(false, false)
+        }
+        return findSettersInLambda(lambda)
+    }
+
+    private fun findBuilderSettersOnVariable(
+        context: JavaContext,
+        buildCall: UCallExpression,
+        variable: USimpleNameReferenceExpression
+    ): Pair<Boolean, Boolean> {
+        val method = buildCall.getParentOfType(UMethod::class.java)
+            ?: return Pair(false, false)
+        val variableName = variable.identifier
+        var hasAutoEnter = false
+        var hasSourceRect = false
+
+        method.accept(object : AbstractUastVisitor() {
+            override fun visitCallExpression(node: UCallExpression): Boolean {
+                val name = node.methodName ?: return super.visitCallExpression(node)
+                if (name != "setAutoEnterEnabled" && name != "setSourceRectHint") {
+                    return super.visitCallExpression(node)
+                }
+
+                val receiver = node.receiver ?: return super.visitCallExpression(node)
+                if (receiver is USimpleNameReferenceExpression &&
+                    receiver.identifier == variableName &&
+                    isBuilderType(context, receiver.getExpressionType())
+                ) {
+                    if (name == "setAutoEnterEnabled") {
+                        val arg = node.valueArguments.firstOrNull()
+                        if (arg is ULiteralExpression && arg.value == true) {
+                            hasAutoEnter = true
+                        }
+                    } else {
+                        hasSourceRect = true
+                    }
+                }
+
+                return super.visitCallExpression(node)
+            }
+        })
+
+        return Pair(hasAutoEnter, hasSourceRect)
+    }
+
+    private fun isBuilderType(context: JavaContext, type: PsiType?): Boolean =
+        context.evaluator.getTypeClass(type)?.qualifiedName ==
+            "android.app.PictureInPictureParams.Builder"
+
+    companion object {
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "PictureInPictureIssue",
+            briefDescription = "Picture In Picture best practices not followed",
+            explanation = """
+                Starting in Android 12, the recommended approach for enabling picture-in-picture (PiP)
+                has changed. If your app does not use the new approach, your app's transition animations
+                will be of poor quality compared to other apps. The new approach requires calling
+                `setAutoEnterEnabled(true)` and `setSourceRectHint(...)` on the
+                `PictureInPictureParams.Builder`.
+
+                Reference documentation:
+                https://developer.android.com/develop/ui/views/picture-in-picture#smoother-transition
+            """.trimIndent(),
+            category = Category.CORRECTNESS,
+            priority = 5,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                PictureInPictureDetector::class.java,
+                Scope.JAVA_FILE_SCOPE
+            )
+        )
+    }
+}
+```
+
+The harness reported the following errors:
+
+Compilation failed:
+e: file:///eval/src/generated/kotlin/com/android/tools/lint/checks/PictureInPictureDetector.kt:22:35 Unresolved reference: UElementHandler
+e: file:///eval/src/generated/kotlin/com/android/tools/lint/checks/PictureInPictureDetector.kt:35:59 Unresolved reference: UElementHandler
+e: file:///eval/src/generated/kotlin/com/android/tools/lint/checks/PictureInPictureDetector.kt:36:18 Unresolved reference: UElementHandler
+e: file:///eval/src/generated/kotlin/com/android/tools/lint/checks/PictureInPictureDetector.kt:37:13 'visitCallExpression' overrides nothing
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':compileKotlin'.
+> A failure occurred while executing org.jetbrains.kotlin.compilerRunner.GradleCompilerRunnerWithWorkers$GradleKotlinCompilerWorkAction
+   > Compilation error. See log for more details
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 10s
+
+Fix the detector so that it compiles cleanly and all tests pass.
+Output ONLY the corrected source file — no explanation, no markdown fences.

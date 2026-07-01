@@ -1,0 +1,147 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import org.w3c.dom.Element
+
+class WearableConfigurationActionDetector : Detector(), XmlScanner {
+
+    companion object {
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "WearableActionDuplicate",
+            briefDescription = "Duplicate watch face configuration activities found",
+            explanation = """
+                If and only if a watch face service defines `wearableConfigurationAction` metadata, with the value `WATCH_FACE_EDITOR`, there should be an activity in the same package, which has an intent filter for `WATCH_FACE_EDITOR` (with com.google.android.wearable.watchface.category.WEARABLE_CONFIGURATION if minSdkVersion is less than 30).
+            """.trimIndent(),
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                WearableConfigurationActionDetector::class.java,
+                Scope.MANIFEST_SCOPE
+            )
+        )
+    }
+
+    override fun getApplicableElements(): Collection<String>? {
+        return listOf("manifest")
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        if (element.tagName != "manifest") return
+
+        val services = element.getElementsByTagName("service")
+        val activities = element.getElementsByTagName("activity")
+
+        val servicesWithMetadata = mutableListOf<Element>()
+        val metadataElements = mutableListOf<Element>()
+
+        for (i in 0 until services.length) {
+            val service = services.item(i) as Element
+            val metaDatas = service.getElementsByTagName("meta-data")
+            for (j in 0 until metaDatas.length) {
+                val metaData = metaDatas.item(j) as Element
+                val name = metaData.getAttributeNS(SdkConstants.ANDROID_URI, "name")
+                val value = metaData.getAttributeNS(SdkConstants.ANDROID_URI, "value")
+                if ((name == "com.google.android.wearable.watchface.wearableConfigurationAction" || name == "wearableConfigurationAction") &&
+                    value == "WATCH_FACE_EDITOR"
+                ) {
+                    servicesWithMetadata.add(service)
+                    metadataElements.add(metaData)
+                }
+            }
+        }
+
+        val activitiesWithAction = mutableListOf<Element>()
+        val intentFiltersWithAction = mutableListOf<Element>()
+        val activitiesWithActionAndCategory = mutableListOf<Element>()
+
+        for (i in 0 until activities.length) {
+            val activity = activities.item(i) as Element
+            val intentFilters = activity.getElementsByTagName("intent-filter")
+            for (j in 0 until intentFilters.length) {
+                val intentFilter = intentFilters.item(j) as Element
+                val actions = intentFilter.getElementsByTagName("action")
+                var hasAction = false
+                for (k in 0 until actions.length) {
+                    val action = actions.item(k) as Element
+                    val actionName = action.getAttributeNS(SdkConstants.ANDROID_URI, "name")
+                    if (actionName == "WATCH_FACE_EDITOR") {
+                        hasAction = true
+                        break
+                    }
+                }
+
+                if (hasAction) {
+                    activitiesWithAction.add(activity)
+                    intentFiltersWithAction.add(intentFilter)
+
+                    val categories = intentFilter.getElementsByTagName("category")
+                    var hasCategory = false
+                    for (k in 0 until categories.length) {
+                        val category = categories.item(k) as Element
+                        val categoryName = category.getAttributeNS(SdkConstants.ANDROID_URI, "name")
+                        if (categoryName == "com.google.android.wearable.watchface.category.WEARABLE_CONFIGURATION") {
+                            hasCategory = true
+                            break
+                        }
+                    }
+                    if (hasCategory) {
+                        activitiesWithActionAndCategory.add(activity)
+                    }
+                }
+            }
+        }
+
+        val minSdkVersion = context.project.minSdkVersion.apiLevel
+
+        val hasService = servicesWithMetadata.isNotEmpty()
+        val hasActivityWithAction = activitiesWithAction.isNotEmpty()
+        val hasActivityWithActionAndCategory = activitiesWithActionAndCategory.isNotEmpty()
+
+        val satisfiesActivityRequirement = if (minSdkVersion < 30) {
+            hasActivityWithActionAndCategory
+        } else {
+            hasActivityWithAction
+        }
+
+        if (hasService && !satisfiesActivityRequirement) {
+            if (minSdkVersion < 30 && hasActivityWithAction && !hasActivityWithActionAndCategory) {
+                for (intentFilter in intentFiltersWithAction) {
+                    context.report(
+                        ISSUE,
+                        intentFilter,
+                        context.getLocation(intentFilter),
+                        "Activity with WATCH_FACE_EDITOR action must also include com.google.android.wearable.watchface.category.WEARABLE_CONFIGURATION category when minSdkVersion < 30"
+                    )
+                }
+            } else {
+                for (metaData in metadataElements) {
+                    context.report(
+                        ISSUE,
+                        metaData,
+                        context.getLocation(metaData),
+                        "A watch face service with WATCH_FACE_EDITOR configuration action requires a corresponding activity with WATCH_FACE_EDITOR intent filter"
+                    )
+                }
+            }
+        } else if (!hasService && hasActivityWithAction) {
+            for (intentFilter in intentFiltersWithAction) {
+                context.report(
+                    ISSUE,
+                    intentFilter,
+                    context.getLocation(intentFilter),
+                    "An activity with WATCH_FACE_EDITOR intent filter requires a corresponding watch face service with com.google.android.wearable.watchface.wearableConfigurationAction metadata"
+                )
+            }
+        }
+    }
+}

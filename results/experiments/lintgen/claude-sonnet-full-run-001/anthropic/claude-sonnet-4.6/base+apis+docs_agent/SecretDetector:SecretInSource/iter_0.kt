@@ -1,0 +1,240 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.JavaContext
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.SourceCodeScanner
+import com.intellij.psi.PsiMethod
+import org.jetbrains.uast.UCallExpression
+import org.jetbrains.uast.UElement
+import org.jetbrains.uast.UExpression
+import org.jetbrains.uast.UField
+import org.jetbrains.uast.ULiteralExpression
+import org.jetbrains.uast.ULocalVariable
+import org.jetbrains.uast.UVariable
+import org.jetbrains.uast.visitor.AbstractUastVisitor
+
+class SecretDetector : Detector(), SourceCodeScanner {
+
+    companion object {
+        private val SECRET_PATTERNS = listOf(
+            // Generic API key patterns
+            Regex("[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]\\s*[:=]\\s*['\"]([A-Za-z0-9_\\-]{16,})['\"]"),
+            Regex("[Aa][Pp][Ii][_-]?[Ss][Ee][Cc][Rr][Ee][Tt]\\s*[:=]\\s*['\"]([A-Za-z0-9_\\-]{16,})['\"]"),
+            // Google API key
+            Regex("AIza[0-9A-Za-z\\-_]{35}"),
+            // Google OAuth
+            Regex("[0-9]+-[0-9A-Za-z_]{32}\\.apps\\.googleusercontent\\.com"),
+            // AWS Access Key
+            Regex("AKIA[0-9A-Z]{16}"),
+            // AWS Secret Key
+            Regex("(?i)aws[_\\-\\s]?secret[_\\-\\s]?(?:access[_\\-\\s]?)?key['\"]?\\s*[:=]\\s*['\"]([A-Za-z0-9/+=]{40})['\"]"),
+            // Generic secret/password/token assignments
+            Regex("(?i)(?:secret|password|passwd|token|auth[_-]?token|access[_-]?token|private[_-]?key)\\s*[:=]\\s*['\"]([A-Za-z0-9_\\-!@#\$%^&*]{8,})['\"]"),
+            // Slack token
+            Regex("xox[baprs]-[0-9A-Za-z]{10,48}"),
+            // GitHub token
+            Regex("ghp_[0-9A-Za-z]{36}"),
+            Regex("gho_[0-9A-Za-z]{36}"),
+            Regex("ghu_[0-9A-Za-z]{36}"),
+            Regex("ghs_[0-9A-Za-z]{36}"),
+            Regex("ghr_[0-9A-Za-z]{36}"),
+            // Stripe API key
+            Regex("sk_live_[0-9a-zA-Z]{24}"),
+            Regex("pk_live_[0-9a-zA-Z]{24}"),
+            // Twilio
+            Regex("SK[0-9a-fA-F]{32}"),
+            // Firebase
+            Regex("AAAA[A-Za-z0-9_-]{7}:[A-Za-z0-9_-]{140}"),
+            // Generic high-entropy strings assigned to secret-sounding variables
+            Regex("(?i)(?:api[_-]?key|apikey|secret[_-]?key|secretkey)\\s*=\\s*['\"]([A-Za-z0-9+/=_\\-]{20,})['\"]")
+        )
+
+        private val SECRET_VARIABLE_NAMES = setOf(
+            "apikey", "api_key", "apiKey",
+            "secret", "secretkey", "secret_key", "secretKey",
+            "password", "passwd", "pwd",
+            "token", "authtoken", "auth_token", "authToken",
+            "accesstoken", "access_token", "accessToken",
+            "privatekey", "private_key", "privateKey",
+            "clientsecret", "client_secret", "clientSecret",
+            "consumerkey", "consumer_key", "consumerKey",
+            "consumersecret", "consumer_secret", "consumerSecret"
+        )
+
+        // Minimum length for a string to be considered a potential secret value
+        private const val MIN_SECRET_LENGTH = 8
+
+        // Patterns that indicate a placeholder/example value (not a real secret)
+        private val PLACEHOLDER_PATTERNS = listOf(
+            Regex("(?i)^(your[_-]?|my[_-]?|enter[_-]?|insert[_-]?|replace[_-]?|<|\\[)"),
+            Regex("(?i)(api[_-]?key|secret|token|password|placeholder|example|sample|test|demo|dummy|fake|xxx+|\\.\\.\\.|here)$"),
+            Regex("^[*]+$"),
+            Regex("^[x]+$", RegexOption.IGNORE_CASE)
+        )
+
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "SecretInSource",
+            briefDescription = "Secret in source code",
+            explanation = """
+                Including secrets, such as API keys, in source code is a security risk. \
+                It is generally best practice to not include API keys in source code, \
+                and instead use something like the Secrets Gradle Plugin for Android.
+            """,
+            category = Category.SECURITY,
+            priority = 8,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                SecretDetector::class.java,
+                Scope.JAVA_FILE_SCOPE
+            ),
+            moreInfo = "https://developers.google.com/maps/documentation/android-sdk/secrets-gradle-plugin"
+        )
+    }
+
+    override fun getApplicableUastTypes(): List<Class<out UElement>> {
+        return listOf(UField::class.java, ULocalVariable::class.java)
+    }
+
+    override fun createUastHandler(context: JavaContext): UElementHandler {
+        return SecretHandler(context)
+    }
+
+    private inner class SecretHandler(private val context: JavaContext) : UElementHandler() {
+
+        override fun visitField(node: UField) {
+            checkVariable(node)
+        }
+
+        override fun visitLocalVariable(node: ULocalVariable) {
+            checkVariable(node)
+        }
+
+        private fun checkVariable(node: UVariable) {
+            val name = node.name ?: return
+            val initializer = node.uastInitializer ?: return
+
+            val stringValue = extractStringValue(initializer) ?: return
+
+            if (isPlaceholder(stringValue)) return
+            if (stringValue.length < MIN_SECRET_LENGTH) return
+
+            val normalizedName = name.lowercase().replace("-", "").replace("_", "")
+
+            if (SECRET_VARIABLE_NAMES.any { it.lowercase().replace("-", "").replace("_", "") == normalizedName }) {
+                if (looksLikeSecret(stringValue)) {
+                    context.report(
+                        ISSUE,
+                        node,
+                        context.getLocation(initializer),
+                        "Possible secret detected in source code. Consider using the Secrets Gradle Plugin for Android instead."
+                    )
+                    return
+                }
+            }
+
+            // Also check the full source text for known secret patterns
+            val sourceText = context.getContents()?.toString() ?: return
+            checkSourceForPatterns(sourceText)
+        }
+
+        private fun extractStringValue(expression: UExpression): String? {
+            if (expression is ULiteralExpression) {
+                val value = expression.value
+                if (value is String) return value
+            }
+            return null
+        }
+
+        private fun isPlaceholder(value: String): Boolean {
+            return PLACEHOLDER_PATTERNS.any { it.containsMatchIn(value) }
+        }
+
+        private fun looksLikeSecret(value: String): Boolean {
+            if (value.length < MIN_SECRET_LENGTH) return false
+            // Check if it has reasonable entropy (mix of character types)
+            val hasUpper = value.any { it.isUpperCase() }
+            val hasLower = value.any { it.isLowerCase() }
+            val hasDigit = value.any { it.isDigit() }
+            val hasSpecial = value.any { !it.isLetterOrDigit() }
+
+            val charTypeCount = listOf(hasUpper, hasLower, hasDigit, hasSpecial).count { it }
+            return charTypeCount >= 2
+        }
+
+        private var checkedSource = false
+
+        private fun checkSourceForPatterns(source: String) {
+            if (checkedSource) return
+            checkedSource = true
+
+            for (pattern in SECRET_PATTERNS) {
+                val matches = pattern.findAll(source)
+                for (match in matches) {
+                    val matchedValue = if (match.groupValues.size > 1 && match.groupValues[1].isNotEmpty()) {
+                        match.groupValues[1]
+                    } else {
+                        match.value
+                    }
+
+                    if (!isPlaceholder(matchedValue) && matchedValue.length >= MIN_SECRET_LENGTH) {
+                        // Find the location in the file
+                        val startOffset = match.range.first
+                        val endOffset = match.range.last + 1
+                        val location = context.getRangeLocation(
+                            context.file,
+                            startOffset,
+                            endOffset - startOffset
+                        )
+                        context.report(
+                            ISSUE,
+                            location,
+                            "Possible secret detected in source code. Consider using the Secrets Gradle Plugin for Android instead."
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    override fun afterCheckFile(context: Context) {
+        // Additional file-level scan for patterns not caught by UAST
+        if (context !is JavaContext) return
+        val source = context.getContents()?.toString() ?: return
+
+        for (pattern in SECRET_PATTERNS) {
+            val matches = pattern.findAll(source)
+            for (match in matches) {
+                val matchedValue = if (match.groupValues.size > 1 && match.groupValues[1].isNotEmpty()) {
+                    match.groupValues[1]
+                } else {
+                    match.value
+                }
+
+                if (!isPlaceholder(matchedValue) && matchedValue.length >= MIN_SECRET_LENGTH) {
+                    val startOffset = match.range.first
+                    val endOffset = match.range.last + 1
+                    val location = context.getRangeLocation(
+                        context.file,
+                        startOffset,
+                        endOffset - startOffset
+                    )
+                    context.report(
+                        ISSUE,
+                        location,
+                        "Possible secret detected in source code. Consider using the Secrets Gradle Plugin for Android instead."
+                    )
+                }
+            }
+        }
+    }
+
+    private fun isPlaceholder(value: String): Boolean {
+        return PLACEHOLDER_PATTERNS.any { it.containsMatchIn(value) }
+    }
+}

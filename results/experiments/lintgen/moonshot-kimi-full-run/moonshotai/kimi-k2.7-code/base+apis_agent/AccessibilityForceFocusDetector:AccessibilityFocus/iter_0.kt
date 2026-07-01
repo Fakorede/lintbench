@@ -1,0 +1,122 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.*
+import com.intellij.psi.PsiField
+import org.jetbrains.uast.UCallExpression
+import org.jetbrains.uast.UExpression
+
+class AccessibilityForceFocusDetector : Detector(), SourceCodeScanner {
+
+    override fun getApplicableMethodNames(): List<String> = listOf(
+        "sendAccessibilityEvent",
+        "sendAccessibilityEventUnchecked",
+        "performAction",
+        "performAccessibilityAction"
+    )
+
+    override fun visitMethodCall(
+        context: JavaContext,
+        node: UCallExpression,
+        visitor: JavaElementVisitor
+    ) {
+        val methodName = node.methodName ?: return
+        val arg = node.valueArguments.firstOrNull()
+
+        when (methodName) {
+            "sendAccessibilityEvent", "sendAccessibilityEventUnchecked" -> {
+                if (isViewMethod(context, node) && isForcedAccessibilityEventType(context, arg)) {
+                    report(context, node)
+                }
+            }
+            "performAction" -> {
+                if (isAccessibilityNodeInfoMethod(context, node) && isForcedAccessibilityAction(context, arg)) {
+                    report(context, node)
+                }
+            }
+            "performAccessibilityAction" -> {
+                if (isViewMethod(context, node) && isForcedAccessibilityAction(context, arg)) {
+                    report(context, node)
+                }
+            }
+        }
+    }
+
+    private fun isViewMethod(context: JavaContext, node: UCallExpression): Boolean {
+        val method = node.resolve() ?: return false
+        val containingClass = method.containingClass ?: return false
+        return context.evaluator.extendsClass(containingClass, "android.view.View", false)
+    }
+
+    private fun isAccessibilityNodeInfoMethod(context: JavaContext, node: UCallExpression): Boolean {
+        val method = node.resolve() ?: return false
+        val containingClass = method.containingClass ?: return false
+        return context.evaluator.extendsClass(
+            containingClass,
+            "android.view.accessibility.AccessibilityNodeInfo",
+            false
+        )
+    }
+
+    private fun isForcedAccessibilityEventType(context: JavaContext, arg: UExpression?): Boolean {
+        if (arg == null) return false
+
+        val field = arg.resolveToUElement()?.javaPsi as? PsiField
+        if (field != null) {
+            val cls = field.containingClass?.qualifiedName
+            val name = field.name
+            if (cls == "android.view.accessibility.AccessibilityEvent" && name == "TYPE_VIEW_FOCUSED") {
+                return true
+            }
+        }
+
+        val value = ConstantEvaluator.evaluate(context, arg) as? Int ?: return false
+        return value == TYPE_VIEW_FOCUSED
+    }
+
+    private fun isForcedAccessibilityAction(context: JavaContext, arg: UExpression?): Boolean {
+        if (arg == null) return false
+
+        val field = arg.resolveToUElement()?.javaPsi as? PsiField
+        if (field != null) {
+            val cls = field.containingClass?.qualifiedName
+            val name = field.name
+            if (cls == "android.view.accessibility.AccessibilityNodeInfo" && name == "ACTION_ACCESSIBILITY_FOCUS") {
+                return true
+            }
+        }
+
+        val value = ConstantEvaluator.evaluate(context, arg) as? Int ?: return false
+        return value == ACTION_ACCESSIBILITY_FOCUS
+    }
+
+    private fun report(context: JavaContext, node: UCallExpression) {
+        context.report(
+            ISSUE,
+            node,
+            context.getLocation(node),
+            "Forcing accessibility focus can interfere with screen readers"
+        )
+    }
+
+    companion object {
+        private const val TYPE_VIEW_FOCUSED = 0x00000008
+        private const val ACTION_ACCESSIBILITY_FOCUS = 0x00000040
+
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "AccessibilityFocus",
+            briefDescription = "Forcing accessibility focus",
+            explanation = """
+                Forcing accessibility focus interferes with screen readers and gives an \
+                inconsistent user experience, especially across apps.
+            """.trimIndent(),
+            category = Category.A11Y,
+            priority = 3,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                AccessibilityForceFocusDetector::class.java,
+                Scope.JAVA_FILE_SCOPE
+            )
+        )
+    }
+}

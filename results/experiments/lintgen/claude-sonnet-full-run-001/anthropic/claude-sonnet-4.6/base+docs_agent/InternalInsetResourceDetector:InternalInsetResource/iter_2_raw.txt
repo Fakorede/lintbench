@@ -1,0 +1,169 @@
+Looking at the test failures, the issue is that the detector only checks XML files but the tests are `testJava` and `testKotlin`, meaning the detector needs to also check Java/Kotlin source files where `Resources.getDimensionPixelSize()` or similar calls reference these internal resources.
+
+The tests are likely checking for code that calls something like `resources.getDimensionPixelSize(R.dimen.status_bar_height)` or uses `context.resources.getIdentifier("status_bar_height", "dimen", "android")` or similar patterns.
+
+Since the tests reference Java and Kotlin source files, the detector needs to scan source code for references to these internal android dimen resources. The most common pattern would be using `Resources.getIdentifier` with these resource names, or accessing them via reflection/identifier lookup.
+
+Let me implement a detector that handles both XML and source code (Java/Kotlin) scanning:
+
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.JavaContext
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import com.intellij.psi.PsiMethod
+import org.jetbrains.uast.UCallExpression
+import org.jetbrains.uast.ULiteralExpression
+import org.jetbrains.uast.evaluateString
+import org.w3c.dom.Attr
+import org.w3c.dom.Element
+import com.android.tools.lint.detector.api.SourceCodeScanner
+import java.util.EnumSet
+
+class InternalInsetResourceDetector : Detector(), XmlScanner, SourceCodeScanner {
+
+    companion object {
+
+        private val INTERNAL_INSET_RESOURCES = setOf(
+            "status_bar_height",
+            "status_bar_height_portrait",
+            "status_bar_height_landscape",
+            "navigation_bar_height",
+            "navigation_bar_height_landscape",
+            "navigation_bar_width",
+            "navigation_bar_frame_height",
+            "system_bar_height",
+            "ime_height",
+            "taskbar_frame_height",
+            "taskbar_height",
+            "gesture_nav_bar_height",
+            "caption_bar_height",
+            "display_cutout_safe_inset_top",
+            "display_cutout_safe_inset_bottom",
+            "display_cutout_safe_inset_left",
+            "display_cutout_safe_inset_right"
+        )
+
+        private const val EXPLANATION =
+            "The internal inset dimension resources are not a supported way to retrieve the " +
+                "relevant insets for your application. The insets are dynamic values that can " +
+                "change while your app is visible, and your app's window may not intersect with " +
+                "the system UI.\n" +
+                "\n" +
+                "To get the relevant value for your app and listen to updates, use " +
+                "`androidx.core.view.WindowInsetsCompat` and related APIs."
+
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "InternalInsetResource",
+            briefDescription = "Using internal inset dimension resource",
+            explanation = EXPLANATION,
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                InternalInsetResourceDetector::class.java,
+                EnumSet.of(Scope.JAVA_FILE, Scope.RESOURCE_FILE),
+                Scope.JAVA_FILE_SCOPE,
+                Scope.RESOURCE_FILE_SCOPE
+            )
+        )
+
+        private const val ANDROID_DIMEN_PREFIX = "@android:dimen/"
+        private const val ANDROID_DIMEN_PREFIX_ALT = "@*android:dimen/"
+
+        private const val GET_IDENTIFIER = "getIdentifier"
+        private val RESOURCES_CLASS = "android.content.res.Resources"
+    }
+
+    // -------------------------------------------------------------------------
+    // XmlScanner implementation
+    // -------------------------------------------------------------------------
+
+    override fun getApplicableElements(): Collection<String>? = null
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val attributes = element.attributes ?: return
+        for (i in 0 until attributes.length) {
+            val attr = attributes.item(i) as? Attr ?: continue
+            checkAttributeValue(context, attr)
+        }
+    }
+
+    private fun checkAttributeValue(context: XmlContext, attr: Attr) {
+        val value = attr.value ?: return
+        val resourceName = extractInternalInsetResourceName(value) ?: return
+        if (resourceName in INTERNAL_INSET_RESOURCES) {
+            val message =
+                "Avoid using internal inset resource `@android:dimen/$resourceName`; " +
+                    "use `androidx.core.view.WindowInsetsCompat` and related APIs instead"
+            context.report(
+                issue = ISSUE,
+                location = context.getValueLocation(attr),
+                message = message
+            )
+        }
+    }
+
+    private fun extractInternalInsetResourceName(value: String): String? {
+        val prefix = when {
+            value.startsWith(ANDROID_DIMEN_PREFIX) -> ANDROID_DIMEN_PREFIX
+            value.startsWith(ANDROID_DIMEN_PREFIX_ALT) -> ANDROID_DIMEN_PREFIX_ALT
+            else -> return null
+        }
+        val name = value.removePrefix(prefix).trim()
+        return name.ifEmpty { null }
+    }
+
+    // -------------------------------------------------------------------------
+    // SourceCodeScanner implementation
+    // -------------------------------------------------------------------------
+
+    override fun getApplicableMethodNames(): List<String> = listOf(GET_IDENTIFIER)
+
+    override fun visitMethodCall(
+        context: JavaContext,
+        node: UCallExpression,
+        method: PsiMethod
+    ) {
+        // Check if this is Resources.getIdentifier(name, defType, defPackage)
+        if (!context.evaluator.isMemberInClass(method, RESOURCES_CLASS)) {
+            return
+        }
+
+        val args = node.valueArguments
+        if (args.size < 3) return
+
+        val nameArg = args[0]
+        val typeArg = args[1]
+        val packageArg = args[2]
+
+        val name = (nameArg as? ULiteralExpression)?.evaluateString()
+            ?: nameArg.evaluateString()
+            ?: return
+        val type = (typeArg as? ULiteralExpression)?.evaluateString()
+            ?: typeArg.evaluateString()
+            ?: return
+        val pkg = (packageArg as? ULiteralExpression)?.evaluateString()
+            ?: packageArg.evaluateString()
+            ?: return
+
+        if (type == "dimen" && pkg == "android" && name in INTERNAL_INSET_RESOURCES) {
+            val message =
+                "Avoid using internal inset resource `@android:dimen/$name`; " +
+                    "use `androidx.core.view.WindowInsetsCompat` and related APIs instead"
+            context.report(
+                issue = ISSUE,
+                scope = node,
+                location = context.getLocation(node),
+                message = message
+            )
+        }
+    }
+}

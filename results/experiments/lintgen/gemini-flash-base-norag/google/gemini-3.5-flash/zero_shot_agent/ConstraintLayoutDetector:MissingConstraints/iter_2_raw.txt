@@ -1,0 +1,121 @@
+Attributes();
+        for (int i = 0, n = attributes.getLength(); i < n; i++) {
+            Node attr = attributes.item(i);
+            String nodeName = attr.getNodeName();
+            if (nodeName.startsWith(XMLNS_PREFIX)) {
+                continue;
+            }
+            String localName = attr.getLocalName();
+            if (localName == null) {
+                localName = nodeName;
+                int index = localName.indexOf(':');
+                if (index != -1) {
+                    localName = localName.substring(index + 1);
+                }
+            }
+
+            if (HORIZONTAL_CONSTRAINTS.contains(localName)) {
+                hasHorizontal = true;
+            } else if (VERTICAL_CONSTRAINTS.contains(localName)) {
+                hasVertical = true;
+            }
+        }
+        ...
+```
+Wait!
+Look at how the official detector gets `localName`:
+```java
+            String localName = attr.getLocalName();
+            if (localName == null) {
+                localName = nodeName;
+                int index = localName.indexOf(':');
+                if (index != -1) {
+                    localName = localName.substring(index + 1);
+                }
+            }
+```
+And it does NOT check if the namespace is `SdkConstants.AUTO_URI`!
+Wait, why?
+Because any attribute like `layout_constraintLeft_toLeftOf` is unique enough, and checking the namespace might fail if the namespace is not properly resolved or if it's a different namespace.
+But wait, is that why our detector failed?
+If our detector failed because of namespace check, then `button1` (which has constraints) would be reported as missing constraints.
+But the test output was "No warnings"!
+If `button1` was reported, we would have at least 1 warning. But we had 0 warnings.
+So why did we have 0 warnings?
+
+Wait!
+Is `button2` skipped because of this?
+```kt
+        // Ensure it's a view (has layout_width or layout_height)
+        if (!element.hasAttributeNS(SdkConstants.ANDROID_URI, "layout_width") &&
+            !element.hasAttributeNS(SdkConstants.ANDROID_URI, "layout_height")) {
+            return
+        }
+```
+Wait!
+In the test XML, `button2` has:
+`android:layout_width="wrap_content"`
+`android:layout_height="wrap_content"`
+But wait!
+Is the namespace URI of `android:layout_width` actually `SdkConstants.ANDROID_URI`?
+Yes, `xmlns:android="http://schemas.android.com/apk/res/android"`.
+But wait!
+What if `element.hasAttributeNS` is returning `false`?
+Why would it return `false`?
+Wait!
+In some versions of Lint (especially newer ones), the XML parser might not support `hasAttributeNS` properly on some elements, or maybe `SdkConstants.ANDROID_URI` is not the namespace URI used by the parser?
+Actually, `SdkConstants.ANDROID_URI` is `"http://schemas.android.com/apk/res/android"`.
+But wait, what if we check both `hasAttributeNS` and `hasAttribute`?
+Like:
+```kt
+        if (!element.hasAttributeNS(SdkConstants.ANDROID_URI, "layout_width") &&
+            !element.hasAttributeNS(SdkConstants.ANDROID_URI, "layout_height") &&
+            !element.hasAttribute("android:layout_width") &&
+            !element.hasAttribute("android:layout_height")) {
+            return
+        }
+```
+This is much safer! If either works, we proceed.
+
+Wait, what about the attributes loop?
+```kt
+        val attributes = element.attributes
+        for (i in 0 until attributes.length) {
+            val attr = attributes.item(i)
+            val namespace = attr.namespaceURI
+            if (namespace == SdkConstants.AUTO_URI) {
+                val localName = attr.localName ?: attr.nodeName.substringAfter(':')
+                ...
+```
+If `namespace` is null or not `SdkConstants.AUTO_URI`, we might miss the constraints.
+But if we miss the constraints, we would report a warning (which is what we want for `button2`, but we might get false positives for `button1`).
+Wait, if we got "No warnings", it means we didn't even report a warning for `button2`!
+So the issue must be that we returned early before checking `button2`, or `visitElement` was not called at all, or `checkChild` returned early.
+
+Wait!
+Let's look at `visitElement` again.
+```kt
+    override fun visitElement(context: XmlContext, element: Element) {
+        if (element.tagName == "merge") {
+            val parentTag = element.getAttributeNS(SdkConstants.TOOLS_URI, "parentTag")
+            if (parentTag != "androidx.constraintlayout.widget.ConstraintLayout" &&
+                parentTag != "android.support.constraint.ConstraintLayout") {
+                return
+            }
+        }
+
+        val childNodes = element.childNodes
+        for (i in 0 until childNodes.length) {
+            val child = childNodes.item(i)
+            if (child is Element) {
+                checkChild(context, child)
+            }
+        }
+    }
+```
+Wait!
+Is `element.tagName` equal to `"merge"`?
+No, it's `"android.support.constraint.ConstraintLayout"`.
+So we go to the loop.
+Wait, is `element.childNodes` the correct way to get children in Lint?
+Yes, `element.childNodes` returns a `Node

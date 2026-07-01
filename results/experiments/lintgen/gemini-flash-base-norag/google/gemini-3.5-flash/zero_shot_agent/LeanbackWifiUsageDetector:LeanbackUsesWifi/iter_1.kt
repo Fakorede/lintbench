@@ -1,0 +1,126 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import org.w3c.dom.Document
+import org.w3c.dom.Element
+
+class LeanbackWifiUsageDetector : Detector(), XmlScanner {
+
+    override fun visitDocument(context: XmlContext, document: Document) {
+        val root = document.documentElement ?: return
+        if (root.tagName != SdkConstants.TAG_MANIFEST) return
+
+        var hasLeanback = false
+        val features = root.getElementsByTagName(SdkConstants.TAG_USES_FEATURE)
+        for (i in 0 until features.length) {
+            val feature = features.item(i) as? Element ?: continue
+            val name = getAndroidAttribute(feature, SdkConstants.ATTR_NAME)
+            if (name == "android.software.leanback" || name == "android.hardware.type.television") {
+                hasLeanback = true
+                break
+            }
+        }
+
+        if (!hasLeanback) return
+
+        var wifiFeatureElement: Element? = null
+        var wifiRequired = true
+
+        for (i in 0 until features.length) {
+            val feature = features.item(i) as? Element ?: continue
+            val name = getAndroidAttribute(feature, SdkConstants.ATTR_NAME)
+            if (name == "android.hardware.wifi") {
+                wifiFeatureElement = feature
+                val required = getAndroidAttribute(feature, SdkConstants.ATTR_REQUIRED)
+                if (required == "false") {
+                    wifiRequired = false
+                }
+                break
+            }
+        }
+
+        val wifiPermissions = mutableListOf<Element>()
+        val permissionTags = listOf(SdkConstants.TAG_USES_PERMISSION, "uses-permission-sdk-23")
+        for (tag in permissionTags) {
+            val permissions = root.getElementsByTagName(tag)
+            for (i in 0 until permissions.length) {
+                val permission = permissions.item(i) as? Element ?: continue
+                val name = getAndroidAttribute(permission, SdkConstants.ATTR_NAME)
+                if (name == "android.permission.ACCESS_WIFI_STATE" ||
+                    name == "android.permission.CHANGE_WIFI_STATE" ||
+                    name == "android.permission.CHANGE_WIFI_MULTICAST_STATE"
+                ) {
+                    wifiPermissions.add(permission)
+                }
+            }
+        }
+
+        if (wifiFeatureElement != null) {
+            if (wifiRequired) {
+                context.report(
+                    ISSUE,
+                    wifiFeatureElement,
+                    context.getNameLocation(wifiFeatureElement),
+                    "Expecting `android:required=\"false\"` for `android.hardware.wifi` when running on TV"
+                )
+            }
+        } else {
+            if (wifiPermissions.isNotEmpty()) {
+                for (permission in wifiPermissions) {
+                    context.report(
+                        ISSUE,
+                        permission,
+                        context.getNameLocation(permission),
+                        "Expecting `android:required=\"false\"` for `android.hardware.wifi` when running on TV"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun getAndroidAttribute(element: Element, localName: String): String? {
+        if (element.hasAttributeNS(SdkConstants.ANDROID_URI, localName)) {
+            return element.getAttributeNS(SdkConstants.ANDROID_URI, localName)
+        }
+        return if (element.hasAttribute("android:$localName")) {
+            element.getAttribute("android:$localName")
+        } else {
+            null
+        }
+    }
+
+    companion object {
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "LeanbackUsesWifi",
+            briefDescription = "Using android.hardware.wifi on TV",
+            explanation = """
+                WiFi is not required for Android TV and many devices connect to the internet via \
+                alternative methods e.g. Ethernet.
+
+                If your app is not focused specifically on WiFi functionality and only wishes to \
+                connect to the internet, please modify your Manifest to contain: \
+                `<uses-feature android:name="android.hardware.wifi" android:required="false" />`
+
+                Un-metered or non-roaming connections can be detected in software using \
+                `NetworkCapabilities#NET_CAPABILITY_NOT_METERED` and \
+                `NetworkCapabilities#NET_CAPABILITY_NOT_ROAMING.`
+            """.trimIndent(),
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                LeanbackWifiUsageDetector::class.java,
+                Scope.MANIFEST_SCOPE
+            )
+        )
+    }
+}

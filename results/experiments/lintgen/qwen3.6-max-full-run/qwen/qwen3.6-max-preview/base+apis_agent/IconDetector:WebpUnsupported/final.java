@@ -1,0 +1,96 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.BinaryResourceScanner;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceContext;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.EnumSet;
+
+public class IconDetector extends Detector implements BinaryResourceScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "WebpUnsupported",
+            "WebP format requires API 15, lossless/transparency requires API 18",
+            "The WebP format requires Android 4.0 (API 15). Certain features, such as lossless encoding and transparency, requires Android 4.2.1 (API 18).",
+            Category.CORRECTNESS,
+            6,
+            Severity.ERROR,
+            new Implementation(IconDetector.class, EnumSet.of(Scope.BINARY_RESOURCE_FILE))
+    );
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return true;
+    }
+
+    @Override
+    public void checkBinaryResource(ResourceContext context) {
+        File file = context.file;
+        if (file == null || !file.getName().toLowerCase().endsWith(".webp")) {
+            return;
+        }
+
+        int minSdk = 1;
+        if (context.getProject().getMinSdkVersion() != null) {
+            minSdk = context.getProject().getMinSdkVersion().getApiLevel();
+        }
+
+        if (minSdk >= 18) {
+            return;
+        }
+
+        try (FileInputStream fis = new FileInputStream(file)) {
+            byte[] header = new byte[30];
+            int read = fis.read(header);
+            if (read < 16) {
+                return;
+            }
+
+            if (!matches(header, 0, "RIFF") || !matches(header, 8, "WEBP")) {
+                return;
+            }
+
+            String chunkType = new String(header, 12, 4, StandardCharsets.US_ASCII);
+            boolean requires18 = false;
+
+            if ("VP8L".equals(chunkType)) {
+                requires18 = true;
+            } else if ("VP8X".equals(chunkType)) {
+                if (read > 20 && (header[20] & 0x10) != 0) {
+                    requires18 = true;
+                }
+            } else if (!"VP8 ".equals(chunkType)) {
+                return;
+            }
+
+            if (requires18 && minSdk < 18) {
+                context.report(ISSUE, Location.create(file),
+                        "Lossless WebP or WebP with transparency requires API 18 (current min is " + minSdk + ")");
+            } else if (minSdk < 15) {
+                context.report(ISSUE, Location.create(file),
+                        "WebP format requires API 15 (current min is " + minSdk + ")");
+            }
+        } catch (IOException ignored) {
+        }
+    }
+
+    private boolean matches(byte[] data, int offset, String expected) {
+        for (int i = 0; i < expected.length(); i++) {
+            if (data[offset + i] != expected.charAt(i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+}

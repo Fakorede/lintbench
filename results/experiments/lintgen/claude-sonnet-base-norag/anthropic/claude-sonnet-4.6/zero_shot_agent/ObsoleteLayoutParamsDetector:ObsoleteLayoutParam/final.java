@@ -1,0 +1,260 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.LayoutDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
+public class ObsoleteLayoutParamsDetector extends LayoutDetector {
+
+    public static final Issue ISSUE = Issue.create(
+            "ObsoleteLayoutParam",
+            "Obsolete layout params",
+            "The given layout_param is not defined for the given layout, meaning it has no " +
+            "effect. This usually happens when you change the parent layout or move view " +
+            "code around without updating the layout params. This will cause useless " +
+            "attribute processing at runtime, and is misleading for others reading the " +
+            "layout so the parameter should be removed.",
+            Category.PERFORMANCE,
+            6,
+            Severity.WARNING,
+            new Implementation(
+                    ObsoleteLayoutParamsDetector.class,
+                    Scope.RESOURCE_FILE_SCOPE));
+
+    /**
+     * Map from layout param local name to the set of parent layout simple names
+     * that define/support that param.
+     */
+    private static final Map<String, Set<String>> PARAM_TO_LAYOUTS = new HashMap<>();
+
+    /**
+     * All layout container tags we know about. If the parent is not in this set
+     * we cannot be sure it doesn't support the param (custom view), so we skip.
+     */
+    private static final Set<String> KNOWN_LAYOUTS = new HashSet<>();
+
+    static {
+        // AbsoluteLayout params
+        registerParam("layout_x", "AbsoluteLayout");
+        registerParam("layout_y", "AbsoluteLayout");
+
+        // LinearLayout / RadioGroup params
+        registerParam("layout_weight", "LinearLayout", "RadioGroup", "TableLayout");
+
+        // layout_gravity is supported by several containers
+        registerParam("layout_gravity",
+                "LinearLayout",
+                "RadioGroup",
+                "GridLayout",
+                "FrameLayout",
+                "ScrollView",
+                "HorizontalScrollView",
+                "DrawerLayout");
+
+        // RelativeLayout params
+        registerParam("layout_above",              "RelativeLayout");
+        registerParam("layout_below",              "RelativeLayout");
+        registerParam("layout_toLeftOf",           "RelativeLayout");
+        registerParam("layout_toRightOf",          "RelativeLayout");
+        registerParam("layout_toStartOf",          "RelativeLayout");
+        registerParam("layout_toEndOf",            "RelativeLayout");
+        registerParam("layout_alignTop",           "RelativeLayout");
+        registerParam("layout_alignBottom",        "RelativeLayout");
+        registerParam("layout_alignLeft",          "RelativeLayout");
+        registerParam("layout_alignRight",         "RelativeLayout");
+        registerParam("layout_alignStart",         "RelativeLayout");
+        registerParam("layout_alignEnd",           "RelativeLayout");
+        registerParam("layout_alignBaseline",      "RelativeLayout");
+        registerParam("layout_alignParentTop",     "RelativeLayout");
+        registerParam("layout_alignParentBottom",  "RelativeLayout");
+        registerParam("layout_alignParentLeft",    "RelativeLayout");
+        registerParam("layout_alignParentRight",   "RelativeLayout");
+        registerParam("layout_alignParentStart",   "RelativeLayout");
+        registerParam("layout_alignParentEnd",     "RelativeLayout");
+        registerParam("layout_centerInParent",     "RelativeLayout");
+        registerParam("layout_centerHorizontal",   "RelativeLayout");
+        registerParam("layout_centerVertical",     "RelativeLayout");
+
+        // GridLayout params
+        registerParam("layout_row",          "GridLayout");
+        registerParam("layout_rowSpan",      "GridLayout");
+        registerParam("layout_rowWeight",    "GridLayout");
+        registerParam("layout_columnSpan",   "GridLayout");
+        registerParam("layout_columnWeight", "GridLayout");
+
+        // TableRow / GridLayout share layout_column
+        registerParam("layout_column", "GridLayout", "TableRow");
+
+        // TableRow params
+        registerParam("layout_span", "TableRow");
+
+        // ConstraintLayout params
+        registerParam("layout_constraintLeft_toLeftOf",        "ConstraintLayout");
+        registerParam("layout_constraintLeft_toRightOf",       "ConstraintLayout");
+        registerParam("layout_constraintRight_toLeftOf",       "ConstraintLayout");
+        registerParam("layout_constraintRight_toRightOf",      "ConstraintLayout");
+        registerParam("layout_constraintTop_toTopOf",          "ConstraintLayout");
+        registerParam("layout_constraintTop_toBottomOf",       "ConstraintLayout");
+        registerParam("layout_constraintBottom_toTopOf",       "ConstraintLayout");
+        registerParam("layout_constraintBottom_toBottomOf",    "ConstraintLayout");
+        registerParam("layout_constraintBaseline_toBaselineOf","ConstraintLayout");
+        registerParam("layout_constraintStart_toEndOf",        "ConstraintLayout");
+        registerParam("layout_constraintStart_toStartOf",      "ConstraintLayout");
+        registerParam("layout_constraintEnd_toStartOf",        "ConstraintLayout");
+        registerParam("layout_constraintEnd_toEndOf",          "ConstraintLayout");
+        registerParam("layout_constraintHorizontal_bias",      "ConstraintLayout");
+        registerParam("layout_constraintVertical_bias",        "ConstraintLayout");
+        registerParam("layout_constraintWidth_default",        "ConstraintLayout");
+        registerParam("layout_constraintHeight_default",       "ConstraintLayout");
+        registerParam("layout_constraintHorizontal_chainStyle","ConstraintLayout");
+        registerParam("layout_constraintVertical_chainStyle",  "ConstraintLayout");
+        registerParam("layout_constraintDimensionRatio",       "ConstraintLayout");
+        registerParam("layout_editor_absoluteX",               "ConstraintLayout");
+        registerParam("layout_editor_absoluteY",               "ConstraintLayout");
+
+        // Known layout containers (simple names)
+        KNOWN_LAYOUTS.add("LinearLayout");
+        KNOWN_LAYOUTS.add("RelativeLayout");
+        KNOWN_LAYOUTS.add("FrameLayout");
+        KNOWN_LAYOUTS.add("TableLayout");
+        KNOWN_LAYOUTS.add("TableRow");
+        KNOWN_LAYOUTS.add("GridLayout");
+        KNOWN_LAYOUTS.add("AbsoluteLayout");
+        KNOWN_LAYOUTS.add("ScrollView");
+        KNOWN_LAYOUTS.add("HorizontalScrollView");
+        KNOWN_LAYOUTS.add("ListView");
+        KNOWN_LAYOUTS.add("GridView");
+        KNOWN_LAYOUTS.add("ExpandableListView");
+        KNOWN_LAYOUTS.add("RadioGroup");
+        KNOWN_LAYOUTS.add("SlidingDrawer");
+        KNOWN_LAYOUTS.add("ViewAnimator");
+        KNOWN_LAYOUTS.add("ViewFlipper");
+        KNOWN_LAYOUTS.add("ViewSwitcher");
+        KNOWN_LAYOUTS.add("TextSwitcher");
+        KNOWN_LAYOUTS.add("ImageSwitcher");
+        KNOWN_LAYOUTS.add("AdapterViewFlipper");
+        KNOWN_LAYOUTS.add("StackView");
+        KNOWN_LAYOUTS.add("CoordinatorLayout");
+        KNOWN_LAYOUTS.add("AppBarLayout");
+        KNOWN_LAYOUTS.add("CollapsingToolbarLayout");
+        KNOWN_LAYOUTS.add("ConstraintLayout");
+        KNOWN_LAYOUTS.add("DrawerLayout");
+        KNOWN_LAYOUTS.add("ViewGroup");
+        // Also add View subclasses that can be parents
+        KNOWN_LAYOUTS.add("View");
+        KNOWN_LAYOUTS.add("TextView");
+        KNOWN_LAYOUTS.add("Button");
+        KNOWN_LAYOUTS.add("ImageView");
+    }
+
+    private static void registerParam(String param, String... layouts) {
+        Set<String> layoutSet = PARAM_TO_LAYOUTS.computeIfAbsent(param, k -> new HashSet<>());
+        for (String layout : layouts) {
+            int dotIndex = layout.lastIndexOf('.');
+            String simpleName = dotIndex >= 0 ? layout.substring(dotIndex + 1) : layout;
+            layoutSet.add(simpleName);
+        }
+    }
+
+    public ObsoleteLayoutParamsDetector() {
+    }
+
+    @Override
+    @Nullable
+    public Collection<String> getApplicableAttributes() {
+        return PARAM_TO_LAYOUTS.keySet();
+    }
+
+    @Override
+    public void visitAttribute(@NonNull XmlContext context, @NonNull Attr attribute) {
+        String name = attribute.getLocalName();
+        if (name == null) {
+            name = attribute.getName();
+            if (name == null) {
+                return;
+            }
+            int colon = name.indexOf(':');
+            if (colon >= 0) {
+                name = name.substring(colon + 1);
+            }
+        }
+
+        Set<String> validParents = PARAM_TO_LAYOUTS.get(name);
+        if (validParents == null || validParents.isEmpty()) {
+            return;
+        }
+
+        Element element = attribute.getOwnerElement();
+        if (element == null) {
+            return;
+        }
+
+        // Walk up to find the real parent element (skip non-element nodes)
+        Node parentNode = element.getParentNode();
+        while (parentNode != null && parentNode.getNodeType() != Node.ELEMENT_NODE) {
+            parentNode = parentNode.getParentNode();
+        }
+
+        if (parentNode == null) {
+            // Root element — no parent layout, nothing to check
+            return;
+        }
+
+        Element parentElement = (Element) parentNode;
+        String parentTag = parentElement.getTagName();
+        if (parentTag == null) {
+            return;
+        }
+
+        // Skip pseudo-elements that wrap real layouts
+        if (isSkippableParent(parentTag)) {
+            return;
+        }
+
+        // Determine the simple name of the parent
+        String parentSimpleName = parentTag;
+        int dotIndex = parentTag.lastIndexOf('.');
+        if (dotIndex >= 0) {
+            parentSimpleName = parentTag.substring(dotIndex + 1);
+        }
+
+        // If the parent is a valid container for this param, no issue
+        if (validParents.contains(parentSimpleName) || validParents.contains(parentTag)) {
+            return;
+        }
+
+        // If the parent is not a known layout we cannot be sure it doesn't support the param
+        // (could be a custom view/layout). Only report for known standard layouts.
+        if (!KNOWN_LAYOUTS.contains(parentSimpleName) && !KNOWN_LAYOUTS.contains(parentTag)) {
+            return;
+        }
+
+        context.report(ISSUE, attribute, context.getLocation(attribute),
+                String.format("Invalid layout param `%1$s` (not defined by parent layout `%2$s`)",
+                        name, parentTag));
+    }
+
+    private static boolean isSkippableParent(@NonNull String tag) {
+        return tag.equals("merge")
+                || tag.equals("include")
+                || tag.equals("fragment")
+                || tag.equals("requestFocus")
+                || tag.equals("tag");
+    }
+}

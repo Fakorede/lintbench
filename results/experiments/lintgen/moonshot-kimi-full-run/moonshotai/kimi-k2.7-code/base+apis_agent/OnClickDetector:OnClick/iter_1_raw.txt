@@ -1,0 +1,131 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.SourceCodeScanner;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+import com.intellij.psi.PsiModifier;
+import com.intellij.psi.PsiType;
+import org.jetbrains.uast.UClass;
+import org.jetbrains.uast.UMethod;
+import org.jetbrains.uast.UParameter;
+import org.w3c.dom.Attr;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+public class OnClickDetector extends Detector implements XmlScanner, SourceCodeScanner {
+
+    private static final String ANDROID_URI = "http://schemas.android.com/apk/res/android";
+    private static final String ON_CLICK = "onClick";
+    private static final String VIEW_CLASS = "android.view.View";
+
+    public static final Issue ISSUE = Issue.create(
+            "OnClick",
+            "onClick method does not exist",
+            "The `onClick` attribute value should be the name of a method in this View's context "
+                    + "to invoke when the view is clicked. This name must correspond to a public "
+                    + "method that takes exactly one parameter of type `View`.",
+            Category.CORRECTNESS,
+            6,
+            Severity.ERROR,
+            new Implementation(OnClickDetector.class, Scope.JAVA_AND_RESOURCE_FILES)
+    );
+
+    private final Map<String, List<Location>> mReferences = new HashMap<>();
+    private final Set<String> mMethods = new HashSet<>();
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.LAYOUT;
+    }
+
+    @Override
+    public Collection<String> getApplicableAttributes() {
+        return Collections.singletonList(ON_CLICK);
+    }
+
+    @Override
+    public void visitAttribute(XmlContext context, Attr attribute) {
+        if (!ANDROID_URI.equals(attribute.getNamespaceURI())) {
+            return;
+        }
+
+        String value = attribute.getValue();
+        if (value == null || value.isEmpty()) {
+            return;
+        }
+
+        String methodName = value.trim();
+        if (methodName.isEmpty() || methodName.startsWith("@") || methodName.startsWith("{")) {
+            return;
+        }
+
+        Location location = context.getValueLocation(attribute);
+        mReferences.computeIfAbsent(methodName, k -> new ArrayList<>()).add(location);
+    }
+
+    @Override
+    public List<String> applicableSuperClasses() {
+        return Collections.singletonList("java.lang.Object");
+    }
+
+    @Override
+    public void visitClass(JavaContext context, UClass clazz) {
+        for (UMethod method : clazz.getMethods()) {
+            if (isOnClickMethod(method)) {
+                mMethods.add(method.getName());
+            }
+        }
+    }
+
+    private static boolean isOnClickMethod(UMethod method) {
+        if (!method.hasModifierProperty(PsiModifier.PUBLIC)) {
+            return false;
+        }
+        if (method.getReturnType() == null || !PsiType.VOID.equals(method.getReturnType())) {
+            return false;
+        }
+        List<UParameter> parameters = method.getUastParameters();
+        if (parameters.size() != 1) {
+            return false;
+        }
+        PsiType type = parameters.get(0).getType();
+        return VIEW_CLASS.equals(type.getCanonicalText());
+    }
+
+    @Override
+    public void beforeCheckRootProject(Context context) {
+        mReferences.clear();
+        mMethods.clear();
+    }
+
+    @Override
+    public void afterCheckRootProject(Context context) {
+        for (Map.Entry<String, List<Location>> entry : mReferences.entrySet()) {
+            String name = entry.getKey();
+            if (!mMethods.contains(name)) {
+                String message = "The method `" + name + "` is not a public method that takes a "
+                        + "`View` parameter in this context";
+                for (Location location : entry.getValue()) {
+                    context.report(ISSUE, location, message);
+                }
+            }
+        }
+    }
+}

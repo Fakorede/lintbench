@@ -1,0 +1,471 @@
+/*
+ * Copyright (C) 2011 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.tools.lint.checks;
+
+import static com.android.SdkConstants.ANDROID_URI;
+import static com.android.SdkConstants.ATTR_BACKGROUND;
+import static com.android.SdkConstants.ATTR_NAME;
+import static com.android.SdkConstants.ATTR_PARENT;
+import static com.android.SdkConstants.ATTR_THEME;
+import static com.android.SdkConstants.TAG_ACTIVITY;
+import static com.android.SdkConstants.TAG_APPLICATION;
+import static com.android.SdkConstants.TAG_STYLE;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.LintFix;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.SourceCodeScanner;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+
+import org.jetbrains.uast.UCallExpression;
+import org.jetbrains.uast.UClass;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Checks for overdraw issues (painting regions more than once).
+ */
+public class OverdrawDetector extends Detector implements XmlScanner, SourceCodeScanner {
+
+    private static final String R_LAYOUT_PREFIX = "R.layout.";
+    private static final String SET_CONTENT_VIEW = "setContentView";
+    private static final String WINDOW_BACKGROUND = "windowBackground";
+
+    public static final Issue ISSUE = Issue.create(
+            "Overdraw",
+            "Overdraw: Painting regions more than once",
+            "If you set a background drawable on a root view, then you should use a " +
+            "custom theme where the theme background is null. Otherwise, the theme background " +
+            "will be painted first, only to have your custom background completely cover it; " +
+            "this is called \"overdraw\".\n" +
+            "\n" +
+            "NOTE: This detector relies on figuring out which layouts are associated with " +
+            "which activities based on scanning the Java code, and it's currently doing that " +
+            "using an inexact pattern matching algorithm. Therefore, it can incorrectly " +
+            "conclude which activity the layout is associated with and then wrongly complain " +
+            "that a background-theme is hidden.\n" +
+            "\n" +
+            "If you want your custom background on multiple pages, then you should consider " +
+            "making a custom theme with your custom background and just using that theme " +
+            "instead of a root element background.\n" +
+            "\n" +
+            "Of course it's possible that your custom drawable is translucent and you want " +
+            "it to be mixed with the background. However, you will get better performance " +
+            "if you pre-mix the background with your drawable and use that resulting image or " +
+            "color as a custom theme background instead.",
+            Category.PERFORMANCE,
+            3,
+            Severity.WARNING,
+            new Implementation(
+                    OverdrawDetector.class,
+                    EnumSet.of(Scope.ALL_RESOURCE_FILES, Scope.ALL_JAVA_FILES)));
+
+    /**
+     * Layouts that set a background drawable on the root element.
+     * Maps from layout name (without extension) to the location of the background attribute.
+     */
+    private Map<String, Location> mLayoutsWithBackgrounds;
+
+    /**
+     * Map from activity class name to layout name used in setContentView.
+     */
+    private Map<String, String> mActivityToLayout;
+
+    /**
+     * Map from activity class name to theme name.
+     */
+    private Map<String, String> mActivityToTheme;
+
+    /**
+     * Application-level theme.
+     */
+    private String mApplicationTheme;
+
+    /**
+     * Map from theme name to parent theme name.
+     */
+    private Map<String, String> mThemeParents;
+
+    /**
+     * Set of themes that have a null/blank windowBackground.
+     */
+    private Set<String> mBlankThemes;
+
+    /**
+     * Map from theme name to whether it has a non-null windowBackground.
+     */
+    private Map<String, Boolean> mThemeHasBackground;
+
+    /** Constructs a new {@link OverdrawDetector} */
+    public OverdrawDetector() {
+    }
+
+    @Override
+    public void beforeCheckRootProject(@NonNull Context context) {
+        mLayoutsWithBackgrounds = new HashMap<>();
+        mActivityToLayout = new HashMap<>();
+        mActivityToTheme = new HashMap<>();
+        mThemeParents = new HashMap<>();
+        mBlankThemes = new HashSet<>();
+        mThemeHasBackground = new HashMap<>();
+    }
+
+    @Override
+    public void afterCheckRootProject(@NonNull Context context) {
+        if (mLayoutsWithBackgrounds == null || mLayoutsWithBackgrounds.isEmpty()) {
+            return;
+        }
+
+        // For each layout with a background, find the activity that uses it,
+        // then check if that activity has a theme with a non-null windowBackground.
+        for (Map.Entry<String, Location> entry : mLayoutsWithBackgrounds.entrySet()) {
+            String layout = entry.getKey();
+            Location location = entry.getValue();
+
+            // Find the activity that uses this layout
+            String activityClass = null;
+            for (Map.Entry<String, String> actEntry : mActivityToLayout.entrySet()) {
+                if (layout.equals(actEntry.getValue())) {
+                    activityClass = actEntry.getKey();
+                    break;
+                }
+            }
+
+            // Determine the theme for this activity
+            String theme = null;
+            if (activityClass != null) {
+                theme = mActivityToTheme.get(activityClass);
+            }
+            if (theme == null) {
+                theme = mApplicationTheme;
+            }
+
+            if (theme != null && hasNonNullBackground(theme)) {
+                context.report(ISSUE, location,
+                        "Possible overdraw: Root element paints background `#" + layout +
+                        "` with a theme that also paints a background (first theme background, " +
+                        "then layout background). If the theme background is intentionally " +
+                        "invisible, set `android:windowBackground=\"@null\"`");
+            } else if (theme == null) {
+                // No theme info found; still warn if we have a layout background
+                // but no theme information to confirm it's safe.
+                // We skip reporting in this case to avoid false positives.
+            }
+        }
+    }
+
+    // ---- Implements XmlScanner ----
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Arrays.asList(
+                TAG_ACTIVITY,
+                TAG_APPLICATION,
+                TAG_STYLE
+        );
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        String tagName = element.getTagName();
+
+        if (TAG_STYLE.equals(tagName)) {
+            visitStyleElement(context, element);
+        } else if (TAG_ACTIVITY.equals(tagName)) {
+            visitActivityElement(context, element);
+        } else if (TAG_APPLICATION.equals(tagName)) {
+            visitApplicationElement(context, element);
+        }
+    }
+
+    private void visitStyleElement(@NonNull XmlContext context, @NonNull Element element) {
+        String name = element.getAttributeNS(ANDROID_URI, ATTR_NAME);
+        if (name == null || name.isEmpty()) {
+            name = element.getAttribute(ATTR_NAME);
+        }
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+
+        String parent = element.getAttributeNS(ANDROID_URI, ATTR_PARENT);
+        if (parent == null || parent.isEmpty()) {
+            parent = element.getAttribute(ATTR_PARENT);
+        }
+
+        // Also check for implicit parent via dot notation
+        if ((parent == null || parent.isEmpty()) && name.contains(".")) {
+            int lastDot = name.lastIndexOf('.');
+            parent = name.substring(0, lastDot);
+        }
+
+        if (parent != null && !parent.isEmpty()) {
+            // Normalize parent name
+            parent = stripStylePrefix(parent);
+            mThemeParents.put(name, parent);
+        }
+
+        // Check children for windowBackground item
+        NodeList children = element.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() == Node.ELEMENT_NODE) {
+                Element item = (Element) child;
+                String itemName = item.getAttributeNS(ANDROID_URI, ATTR_NAME);
+                if (itemName == null || itemName.isEmpty()) {
+                    itemName = item.getAttribute(ATTR_NAME);
+                }
+                if (WINDOW_BACKGROUND.equals(itemName) ||
+                        ("android:" + WINDOW_BACKGROUND).equals(itemName)) {
+                    String value = item.getTextContent();
+                    if (value != null) {
+                        value = value.trim();
+                    }
+                    if (value == null || value.isEmpty() || "@null".equals(value) ||
+                            "null".equals(value)) {
+                        mBlankThemes.add(name);
+                        mThemeHasBackground.put(name, Boolean.FALSE);
+                    } else {
+                        mThemeHasBackground.put(name, Boolean.TRUE);
+                    }
+                }
+            }
+        }
+    }
+
+    private void visitActivityElement(@NonNull XmlContext context, @NonNull Element element) {
+        String name = element.getAttributeNS(ANDROID_URI, ATTR_NAME);
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+
+        // Resolve fully qualified name
+        String pkg = context.getProject().getPackage();
+        if (name.startsWith(".") && pkg != null) {
+            name = pkg + name;
+        } else if (!name.contains(".") && pkg != null) {
+            name = pkg + "." + name;
+        }
+
+        String theme = element.getAttributeNS(ANDROID_URI, ATTR_THEME);
+        if (theme != null && !theme.isEmpty()) {
+            theme = stripThemePrefix(theme);
+            mActivityToTheme.put(name, theme);
+        }
+    }
+
+    private void visitApplicationElement(@NonNull XmlContext context, @NonNull Element element) {
+        String theme = element.getAttributeNS(ANDROID_URI, ATTR_THEME);
+        if (theme != null && !theme.isEmpty()) {
+            theme = stripThemePrefix(theme);
+            mApplicationTheme = theme;
+        }
+    }
+
+    @Override
+    public void visitAttribute(@NonNull XmlContext context, @NonNull Attr attribute) {
+        // Check for root element background in layout files
+        if (!ATTR_BACKGROUND.equals(attribute.getLocalName())) {
+            return;
+        }
+        if (!ANDROID_URI.equals(attribute.getNamespaceURI())) {
+            return;
+        }
+
+        String value = attribute.getValue();
+        if (value == null || value.isEmpty() || "@null".equals(value)) {
+            return;
+        }
+
+        // Only care about root elements
+        Element element = attribute.getOwnerElement();
+        if (element == null) {
+            return;
+        }
+        Node parent = element.getParentNode();
+        if (parent != null && parent.getNodeType() == Node.ELEMENT_NODE) {
+            // Not the root element
+            return;
+        }
+
+        // This is a root element with a background
+        File file = context.file;
+        String fileName = file.getName();
+        // Strip extension
+        int dot = fileName.lastIndexOf('.');
+        if (dot != -1) {
+            fileName = fileName.substring(0, dot);
+        }
+
+        Location location = context.getLocation(attribute);
+        mLayoutsWithBackgrounds.put(fileName, location);
+    }
+
+    @Override
+    public Collection<String> getApplicableAttributes() {
+        return Collections.singletonList(ATTR_BACKGROUND);
+    }
+
+    // ---- Implements SourceCodeScanner ----
+
+    @Override
+    public List<String> getApplicableMethodNames() {
+        return Collections.singletonList(SET_CONTENT_VIEW);
+    }
+
+    @Override
+    public void visitMethodCall(@NonNull JavaContext context,
+            @NonNull UCallExpression call,
+            @NonNull com.intellij.psi.PsiMethod method) {
+        List<org.jetbrains.uast.UExpression> args = call.getValueArguments();
+        if (args.isEmpty()) {
+            return;
+        }
+
+        org.jetbrains.uast.UExpression firstArg = args.get(0);
+        String argText = firstArg.asSourceString();
+
+        // Look for R.layout.xxx pattern
+        String layoutName = null;
+        if (argText.startsWith(R_LAYOUT_PREFIX)) {
+            layoutName = argText.substring(R_LAYOUT_PREFIX.length());
+        } else if (argText.contains(".layout.")) {
+            int idx = argText.indexOf(".layout.");
+            layoutName = argText.substring(idx + ".layout.".length());
+        }
+
+        if (layoutName == null || layoutName.isEmpty()) {
+            return;
+        }
+
+        // Find the containing class
+        UClass containingClass = findContainingClass(call);
+        if (containingClass == null) {
+            return;
+        }
+
+        String qualifiedName = containingClass.getQualifiedName();
+        if (qualifiedName == null) {
+            return;
+        }
+
+        mActivityToLayout.put(qualifiedName, layoutName);
+    }
+
+    @Nullable
+    private UClass findContainingClass(@NonNull UCallExpression call) {
+        org.jetbrains.uast.UElement parent = call.getUastParent();
+        while (parent != null) {
+            if (parent instanceof UClass) {
+                return (UClass) parent;
+            }
+            parent = parent.getUastParent();
+        }
+        return null;
+    }
+
+    // ---- Helper methods ----
+
+    private boolean hasNonNullBackground(@NonNull String theme) {
+        Set<String> visited = new HashSet<>();
+        return hasNonNullBackgroundRecursive(theme, visited);
+    }
+
+    private boolean hasNonNullBackgroundRecursive(@NonNull String theme,
+            @NonNull Set<String> visited) {
+        if (visited.contains(theme)) {
+            return false;
+        }
+        visited.add(theme);
+
+        Boolean hasBackground = mThemeHasBackground.get(theme);
+        if (hasBackground != null) {
+            return hasBackground;
+        }
+
+        // Check parent
+        String parent = mThemeParents.get(theme);
+        if (parent != null) {
+            return hasNonNullBackgroundRecursive(parent, visited);
+        }
+
+        // If we don't know, assume it has a background (default Android themes do)
+        // But only if it looks like a system theme
+        if (theme.startsWith("android:") || theme.startsWith("@android:") ||
+                theme.startsWith("Theme")) {
+            return true;
+        }
+
+        return false;
+    }
+
+    @NonNull
+    private static String stripThemePrefix(@NonNull String theme) {
+        if (theme.startsWith("@style/")) {
+            return theme.substring("@style/".length());
+        } else if (theme.startsWith("@android:style/")) {
+            return theme.substring("@android:style/".length());
+        } else if (theme.startsWith("?attr/")) {
+            return theme.substring("?attr/".length());
+        } else if (theme.startsWith("@")) {
+            int slash = theme.indexOf('/');
+            if (slash != -1) {
+                return theme.substring(slash + 1);
+            }
+        }
+        return theme;
+    }
+
+    @NonNull
+    private static String stripStylePrefix(@NonNull String style) {
+        if (style.startsWith("@style/")) {
+            return style.substring("@style/".length());
+        } else if (style.startsWith("@android:style/")) {
+            return style.substring("@android:style/".length());
+        } else if (style.startsWith("@")) {
+            int slash = style.indexOf('/');
+            if (slash != -1) {
+                return style.substring(slash + 1);
+            }
+        }
+        return style;
+    }
+}

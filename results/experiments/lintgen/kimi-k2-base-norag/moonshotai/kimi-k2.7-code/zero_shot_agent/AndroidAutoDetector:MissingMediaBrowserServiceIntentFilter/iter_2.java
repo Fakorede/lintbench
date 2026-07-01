@@ -1,0 +1,188 @@
+package com.android.tools.lint.checks;
+
+import static com.android.SdkConstants.ANDROID_URI;
+import static com.android.SdkConstants.ATTR_NAME;
+import static com.android.SdkConstants.TAG_ACTION;
+import static com.android.SdkConstants.TAG_INTENT_FILTER;
+import static com.android.SdkConstants.TAG_SERVICE;
+
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.ClassContext;
+import com.android.tools.lint.detector.api.ClassScanner;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class AndroidAutoDetector extends Detector implements XmlScanner, ClassScanner {
+
+    private static final String MEDIA_BROWSER_SERVICE =
+            "android.service.media.MediaBrowserService";
+    private static final String MEDIA_BROWSER_SERVICE_INTERNAL_NAME =
+            MEDIA_BROWSER_SERVICE.replace('.', '/');
+    private static final String MEDIA_BROWSER_SERVICE_ACTION =
+            "android.media.browse.MediaBrowserService";
+    private static final String REFERENCE_URL =
+            "https://developer.android.com/training/auto/audio/index.html#config_manifest";
+
+    public static final Issue ISSUE = Issue.create(
+            "MissingMediaBrowserServiceIntentFilter",
+            "Missing MediaBrowserService intent-filter",
+            "An Automotive Media App requires an exported service that extends "
+                    + "android.service.media.MediaBrowserService with an intent-filter for the "
+                    + "action android.media.browse.MediaBrowserService to be able to browse "
+                    + "and play media. See " + REFERENCE_URL,
+            Category.CORRECTNESS,
+            6,
+            Severity.ERROR,
+            new Implementation(
+                    AndroidAutoDetector.class,
+                    EnumSet.of(Scope.MANIFEST, Scope.CLASS_FILE)));
+
+    private final List<ServiceInfo> mServices =
+            Collections.synchronizedList(new ArrayList<>());
+    private final Map<String, String> mSuperClasses =
+            Collections.synchronizedMap(new HashMap<>());
+
+    @Override
+    public void beforeCheckProject(@NotNull Context context) {
+        mServices.clear();
+        mSuperClasses.clear();
+    }
+
+    @Override
+    public void checkClass(@NotNull ClassContext context, @NotNull ClassNode classNode) {
+        String name = classNode.name;
+        String superName = classNode.superName;
+        if (name != null && superName != null) {
+            mSuperClasses.put(name, superName);
+        }
+    }
+
+    @Override
+    @Nullable
+    public List<String> getApplicableCallNames() {
+        return null;
+    }
+
+    @Override
+    public void checkCall(@NotNull ClassContext context, @NotNull ClassNode classNode,
+            @NotNull MethodNode method, @NotNull MethodInsnNode call) {
+    }
+
+    @Override
+    @Nullable
+    public int[] getApplicableAsmNodeTypes() {
+        return null;
+    }
+
+    @Override
+    @NotNull
+    public Collection<String> getApplicableElements() {
+        return Collections.singletonList(TAG_SERVICE);
+    }
+
+    @Override
+    public void visitElement(@NotNull XmlContext context, @NotNull Element element) {
+        String name = element.getAttributeNS(ANDROID_URI, ATTR_NAME);
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+
+        String packageName = context.getMainProject().getPackage();
+        String fqcn = resolveClassName(packageName, name);
+
+        boolean hasFilter = false;
+        NodeList filters = element.getElementsByTagName(TAG_INTENT_FILTER);
+        for (int i = 0; i < filters.getLength() && !hasFilter; i++) {
+            Element filter = (Element) filters.item(i);
+            NodeList actions = filter.getElementsByTagName(TAG_ACTION);
+            for (int j = 0; j < actions.getLength(); j++) {
+                Element action = (Element) actions.item(j);
+                String actionName = action.getAttributeNS(ANDROID_URI, ATTR_NAME);
+                if (MEDIA_BROWSER_SERVICE_ACTION.equals(actionName)) {
+                    hasFilter = true;
+                    break;
+                }
+            }
+        }
+
+        mServices.add(new ServiceInfo(fqcn, hasFilter, context.getLocation(element)));
+    }
+
+    @Override
+    public void afterCheckProject(@NotNull Context context) {
+        synchronized (mServices) {
+            for (ServiceInfo info : mServices) {
+                if (!info.hasFilter && extendsMediaBrowserService(info.className)) {
+                    context.report(
+                            ISSUE,
+                            info.location,
+                            "Add an intent-filter with action "
+                                    + MEDIA_BROWSER_SERVICE_ACTION
+                                    + " to this MediaBrowserService.");
+                }
+            }
+        }
+    }
+
+    private boolean extendsMediaBrowserService(String fqcn) {
+        if (fqcn == null) {
+            return false;
+        }
+        String current = fqcn.replace('.', '/');
+        while (current != null) {
+            if (MEDIA_BROWSER_SERVICE_INTERNAL_NAME.equals(current)) {
+                return true;
+            }
+            current = mSuperClasses.get(current);
+        }
+        return false;
+    }
+
+    private static String resolveClassName(String packageName, String name) {
+        if (name == null || name.isEmpty()) {
+            return name;
+        }
+        if (name.startsWith(".")) {
+            return (packageName != null ? packageName : "") + name;
+        }
+        if (name.indexOf('.') == -1) {
+            return (packageName != null ? packageName + "." : "") + name;
+        }
+        return name;
+    }
+
+    private static final class ServiceInfo {
+        final String className;
+        final boolean hasFilter;
+        final Location location;
+
+        ServiceInfo(String className, boolean hasFilter, Location location) {
+            this.className = className;
+            this.hasFilter = hasFilter;
+            this.location = location;
+        }
+    }
+}

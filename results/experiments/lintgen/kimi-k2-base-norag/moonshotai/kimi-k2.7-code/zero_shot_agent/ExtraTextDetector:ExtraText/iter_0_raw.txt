@@ -1,0 +1,4094 @@
+We need produce Kotlin source file for Android Lint Detector named ExtraTextDetector package com.android.tools.lint.checks. Need implement issue: extraneous text in resource files. Non-value resource files should only contain elements and attributes. XML text content likely accidental. Need output only source file no explanation no markdown fences.
+
+We need know Android Lint API. We can implement ResourceXmlDetector, applies to all resource files maybe except values? The issue is about non-value resource files. Need detect text nodes that are non-whitespace? The original ExtraTextDetector in Android Lint? Let's recall. There is an existing Android Lint check called ExtraText? I think there is a check in AOSP: ExtraTextDetector.java maybe. It checks for text content in resource files that are not value files. It reports text content that is not whitespace and not comments? Let's recall details.
+
+We need implement in Kotlin. Use XmlContext, visitText? ResourceXmlDetector has visitText? Actually XmlScanner has methods: visitDocument, visitElement, visitAttribute, visitTag, visitCharacterData? Let's recall. In lint, XmlScanner interface: visitDocument, visitElement, visitAttribute, afterVisitAttribute, visitTag, visitCharacterData? Actually there is `visitCharacterData`? Let's check. The `XmlScanner` interface in lint: methods include `visitDocument`, `visitElement`, `visitAttribute`, `visitTag`, `visitCharacterData`? I recall `ResourceXmlDetector` and `XmlScanner` have `visitText`? Hmm.
+
+Let's think. Lint uses `org.w3c.dom.Node`? The `XmlContext` has `element` etc. The scanner interface `XmlScanner` has callbacks: `visitDocument`, `visitElement`, `visitAttribute`, `visitTag`, `visitCharacterData`? Actually I think it's `visitText`? Let's search memory.
+
+Android Lint `XmlScanner` (com.android.tools.lint.client.api.XmlScanner) methods:
+- void visitDocument(XmlContext context, Document document);
+- void visitElement(XmlContext context, Element element);
+- void visitAttribute(XmlContext context, Attr attribute);
+- void visitTag(XmlContext context, Node node); // before element attributes? maybe start tag
+- void visitCharacterData(XmlContext context, Node node); // text content
+- void visitComment(XmlContext context, Comment comment); maybe.
+
+Actually I recall `XmlScanner` has `visitCharacterData` for text/CDATA. Let's verify by memory of existing detectors. For example `MissingPrefixDetector` uses visitElement. `WrongCallDetector`? `StringFormatDetector` uses `visitElement` and `getApplicableElements`. `MenuItemDensityDetector` etc.
+
+The existing ExtraTextDetector in AOSP likely extends ResourceXmlDetector and implements XmlScanner, applicable to all resource files except values? It probably uses `visitElement`? Hmm.
+
+Let's recall original issue description: "Extraneous text in resource files. Non-value resource files should only contain elements and attributes. Any XML text content found in the file is likely accidental (and potentially dangerous if the text resembles XML and the developer believes the text to be functional)." This is from Android Lint checks. The detector likely named `ExtraTextDetector` in package `com.android.tools.lint.checks`. It might be in `com.android.tools.lint.checks` package. It likely reports `text` nodes.
+
+We need implement. Let's design.
+
+We need create Issue:
+```
+val ISSUE_EXTRA_TEXT = Issue.create(
+    id = "ExtraText",
+    briefDescription = "Extraneous text in resource files",
+    explanation = """
+        Non-value resource files should only contain elements and attributes.
+        Any XML text content found in the file is likely accidental ...
+    """,
+    category = Category.CORRECTNESS,
+    priority = 5,
+    severity = Severity.WARNING,
+    implementation = Implementation(ExtraTextDetector::class.java, Scope.RESOURCE_FILE_SCOPE)
+)
+```
+
+Detector class:
+```
+class ExtraTextDetector : ResourceXmlDetector() {
+    override fun getApplicableElements(): Collection<String>? = ALL
+    override fun visitElement(context: XmlContext, element: Element) {
+        val children = element.childNodes
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            if (child.nodeType == Node.TEXT_NODE || child.nodeType == Node.CDATA_SECTION_NODE) {
+                val text = child.nodeValue
+                if (text.isNotBlank()) {
+                    context.report(ISSUE, child, context.getLocation(child), "Unexpected text content in resource file: \"$text\"")
+                }
+            }
+        }
+    }
+}
+```
+
+But need consider whitespace text nodes are normal formatting; only non-blank text. Also comments okay. Also processing instructions? Maybe not.
+
+But is using `visitElement` with ALL enough? It will visit every element and inspect direct text children. However text can appear at root level between elements, e.g. `<layout>text<something/></layout>` or root text before first element? In resource files root is something like `<LinearLayout>` etc. Text at root inside root element will be caught by visitElement on root. Text outside root not possible in XML.
+
+But what about value resource files (strings, colors, etc.) which legitimately contain text content? The issue says non-value resource files. So we should skip value resource files. How to detect? `context.document` or `context.file`? ResourceXmlDetector can use `getApplicableFiles`? Actually ResourceXmlDetector has `applicableTo`? Let's recall. `ResourceXmlDetector` has method `appliesTo(folderType: ResourceFolderType)`? Actually `ResourceXmlDetector` extends `Detector` and implements `XmlScanner`. It has `applicableAttributes`, `applicableElements`, etc. There is also `appliesTo(ResourceFolderType)`? I think `Detector` has `appliesTo(folderType: ResourceFolderType)` for resource detectors. Let's check.
+
+In Android Lint, `Detector` class has method `appliesTo(@NonNull ResourceFolderType folderType)` returning boolean. `ResourceXmlDetector` likely overrides? Actually `ResourceXmlDetector` is abstract and has `appliesTo` default true? Hmm. Many detectors override `appliesTo` to limit to certain resource folder types. For example `LayoutValidator` uses `appliesTo(ResourceFolderType.LAYOUT)`. The method signature: `open fun appliesTo(folderType: ResourceFolderType): Boolean = true` maybe.
+
+So we can override `appliesTo` to return folderType != ResourceFolderType.VALUES. But issue says non-value resource files. So we should skip values. Also maybe raw? Raw resource files can be any XML? But raw is not parsed as XML? ResourceXmlDetector only applies to XML resource files. `appliesTo` returns true for all resource folder types by default? We can return folderType != VALUES.
+
+But what about `xml/` folder (xml resources) which can contain arbitrary XML? They are non-value resource files? They should only contain elements and attributes too. So include all except VALUES.
+
+Also need consider `<item>` elements inside values files can have text content; but we skip values folder entirely. Good.
+
+But there are value files like `strings.xml` where root `<resources>` contains `<string>text</string>`; text inside `<string>` is value. We skip. What about `<resources>` root text whitespace? Not reported because blank. Good.
+
+What about `drawable` XML vector etc. Text content inside `<path>`? none. Good.
+
+What about `<style>` in values? skipped.
+
+Potential issue: text inside `<![CDATA[...]]>` in non-value resource files? CDATA is text. We should report. Node.CDATA_SECTION_NODE nodeValue returns text. Good.
+
+Need use `context.getLocation(child)`? Does XmlContext have `getLocation(node)`? Yes. `XmlContext.getLocation(Node)` returns Location. Also `getElementLocation`, `getNameLocation`. For text node, `getLocation` works.
+
+Need import correct classes. Package `com.android.tools.lint.checks`. Need import `com.android.android.gradle.internal.ide...`? No. Need import `com.android.resources.ResourceFolderType`? Actually package for ResourceFolderType is `com.android.resources.ResourceFolderType`? In lint API it's `com.android.resources.ResourceFolderType`. Yes.
+
+Need import `com.android.tools.lint.detector.api.*` maybe. Use wildcard. Also `org.w3c.dom.*`.
+
+Need ensure class compiles. `ResourceXmlDetector` is in `com.android.tools.lint.detector.api.ResourceXmlDetector`. `Issue`, `Implementation`, `Scope`, `Category`, `Severity`, `Location`, `XmlContext`, `Detector` etc.
+
+Need define `ISSUE_EXTRA_TEXT` as companion object? The issue registry expects static field? In Kotlin, can define `val ISSUE_EXTRA_TEXT` top-level or companion. But class file package. Usually detectors define companion object with @JvmField val ISSUE. But for Implementation, `ExtraTextDetector::class.java`. If top-level, fine. But many lint checks put in companion. Let's put in companion object with @JvmField.
+
+Need override `getApplicableElements(): Collection<String>? = XmlScannerConstants.ALL`. Actually `XmlScannerConstants.ALL` is a `Collection<String>`. Or return `ALL`. Need import `com.android.tools.lint.detector.api.XmlScannerConstants`.
+
+Alternatively implement `visitCharacterData` if available. Let's verify API. I think `XmlScanner` has `visitCharacterData(XmlContext, Node)`. The `Node` is text/CDATA. If we use that, we don't need to iterate children. But does it get called for all text nodes? Need know. Let's recall detectors: `StringFormatDetector` uses `visitElement`. `RtlDetector` uses `visitElement`. `ExtraTextDetector` original might use `visitElement` and `getApplicableElements` = ALL. Hmm.
+
+Let's search memory of AOSP source. I recall there is a file `ExtraTextDetector.java` in `tools/base/lint/libs/lint-checks/src/main/java/com/android/tools/lint/checks/`. It might look like:
+```
+public class ExtraTextDetector extends ResourceXmlDetector {
+    public static final Issue ISSUE = Issue.create(
+        "ExtraText",
+        "Extraneous text in resource files",
+        "Non-value resource files should only contain elements and attributes...",
+        Category.CORRECTNESS, 5, Severity.WARNING,
+        new Implementation(ExtraTextDetector.class, Scope.RESOURCE_FILE_SCOPE)
+    );
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return folderType != ResourceFolderType.VALUES;
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return ALL;
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        NodeList children = element.getChildNodes();
+        for (int i = 0, n = children.getLength(); i < n; i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() == Node.TEXT_NODE) {
+                String text = child.getNodeValue();
+                if (!text.trim().isEmpty()) {
+                    context.report(ISSUE, child, context.getLocation(child),
+                        String.format("Unexpected text content: \"%1$s\"", text));
+                }
+            }
+        }
+    }
+}
+```
+
+Maybe it also checks CDATA. Let's produce Kotlin equivalent.
+
+Need ensure `appliesTo` override signature. In Kotlin, `override fun appliesTo(folderType: ResourceFolderType): Boolean = folderType != ResourceFolderType.VALUES`.
+
+Need consider `getApplicableElements` returning `Collection<String>?`. In Kotlin, override `fun getApplicableElements(): Collection<String>`. Use `XmlScannerConstants.ALL`.
+
+Need `visitElement` override.
+
+Potential nuance: The original might report only text that looks like XML? The description says "potentially dangerous if text resembles XML". But it says any XML text content. So report all non-whitespace.
+
+Need message. Could be "Unexpected text content in resource file: \"$text\"". Use `context.getValue(child)`? `child.nodeValue` includes entity? Fine.
+
+Need location for text node. `context.getLocation(child)` returns location. But for text node maybe location includes line/col. Good.
+
+Need maybe skip text inside `<style>`? But values skipped. What about `<declare-styleable>` in attrs? That's values folder. Skipped.
+
+What about `res/color`? Actually `color` is values? ResourceFolderType.VALUES includes `values/`. `res/color/` is a separate resource type? In Android, `res/color/` contains color state list XML, not value files. `ResourceFolderType.COLOR` exists? Yes, `ResourceFolderType.COLOR` for color selectors. They are non-value. Should be included. Good.
+
+What about `res/drawable`, `res/layout`, `res/menu`, `res/anim`, `res/transition`, `res/xml`, `res/raw`? Raw files not parsed. So fine.
+
+Need ensure `Scope.RESOURCE_FILE_SCOPE` is correct. Implementation scope for resource XML detectors. Yes.
+
+Need maybe use `Scope.RESOURCE_FILE_SCOPE` or `Scope.ALL_RESOURCE_FILES`? Implementation can use `Scope.RESOURCE_FILE_SCOPE`. Actually `Scope.RESOURCE_FILE_SCOPE` is a bitset for a single resource file. Good.
+
+Need produce only source file content. No markdown fences. The user explicitly says "Output ONLY the detector source file. No explanation, no markdown fences." So final answer should be just the Kotlin code. No triple backticks. We must not include any explanatory text. We can include package and imports and class.
+
+Let's craft final code.
+
+Potential compile issues:
+- `ResourceFolderType.VALUES` is enum? In Kotlin, `ResourceFolderType.VALUES` might conflict with `Enum.values()`. Actually `ResourceFolderType` is an enum with a constant named `VALUES`. In Kotlin, referencing `ResourceFolderType.VALUES` might be ambiguous with enum synthetic `values()`? No, enum constants are accessed as `ResourceFolderType.VALUES`. It should compile. But there is also `ResourceFolderType.values()`. The constant named VALUES is fine.
+- `XmlScannerConstants.ALL` is a `Collection<String>`. Need import.
+- `Node.TEXT_NODE` and `Node.CDATA_SECTION_NODE` are `short` constants. Use `child.nodeType == Node.TEXT_NODE`.
+- `child.nodeValue` returns String? In Kotlin with org.w3c.dom.Node, `nodeValue` is nullable `String?`. Use `val text = child.nodeValue ?: continue`. Then `if (text.isNotBlank())`.
+- `context.report` signature: `report(issue: Issue, location: Location, message: String)` or `report(issue, scopeNode, location, message)`. There are overloads. Use `context.report(ISSUE_EXTRA_TEXT, child, context.getLocation(child), message)`. The second parameter is scope? Actually `XmlContext.report(Issue issue, Node scope, Location location, String message, LintFix fix?)`. Yes. Use that.
+- Need `message` maybe include text. Use Kotlin string template.
+
+Let's write:
+
+```
+package com.android.tools.lint.checks
+
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.ResourceXmlDetector
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScannerConstants
+import org.w3c.dom.Element
+import org.w3c.dom.Node
+
+class ExtraTextDetector : ResourceXmlDetector() {
+
+    override fun appliesTo(folderType: ResourceFolderType): Boolean {
+        return folderType != ResourceFolderType.VALUES
+    }
+
+    override fun getApplicableElements(): Collection<String> = XmlScannerConstants.ALL
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val children = element.childNodes
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            if (child.nodeType != Node.TEXT_NODE && child.nodeType != Node.CDATA_SECTION_NODE) {
+                continue
+            }
+            val text = child.nodeValue ?: continue
+            if (text.isBlank()) {
+                continue
+            }
+            context.report(
+                ISSUE_EXTRA_TEXT,
+                child,
+                context.getLocation(child),
+                "Unexpected text content in resource file: \"$text\""
+            )
+        }
+    }
+
+    companion object {
+        @JvmField
+        val ISSUE_EXTRA_TEXT = Issue.create(
+            id = "ExtraText",
+            briefDescription = "Extraneous text in resource files",
+            explanation = """
+                Non-value resource files should only contain elements and attributes.
+                Any XML text content found in the file is likely accidental (and potentially
+                dangerous if the text resembles XML and the developer believes the text to
+                be functional).
+            """.trimIndent(),
+            category = Category.CORRECTNESS,
+            priority = 5,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                ExtraTextDetector::class.java,
+                Scope.RESOURCE_FILE_SCOPE
+            )
+        )
+    }
+}
+```
+
+Need ensure `Scope.RESOURCE_FILE_SCOPE` is available. Yes.
+
+Should we use `getApplicableElements() = ALL` or `applicableTo`? Good.
+
+One nuance: `ResourceFolderType.VALUES` constant might be deprecated? No.
+
+Another nuance: `appliesTo` in `Detector` is not `open`? It is open. `ResourceXmlDetector` extends `Detector`. We can override.
+
+Potential issue: `getApplicableElements` returning `XmlScannerConstants.ALL` means visit every element. But if file is values folder, `appliesTo` false, detector won't run? Actually `appliesTo` is checked by Lint to decide if detector applies to a given resource folder. If false, scanner methods not called. Good.
+
+Potential issue: text inside root `<resources>` in values skipped. Good.
+
+Potential issue: text inside `<string>` in values skipped.
+
+Potential issue: text inside `<item>` in menu files? Menu files are non-value. But menu items can contain `<item>` with no text. Text would be accidental. Good.
+
+Potential issue: text inside `<style>` in `values` skipped. Good.
+
+Potential issue: text inside `<attr>` in `declare-styleable` in `values/attrs.xml` skipped. Good.
+
+Potential issue: text inside `<gradient>` etc. none.
+
+Potential issue: CDATA in drawable? none.
+
+Should we also check text nodes that are direct children of document (outside root)? XML parser won't allow. Not needed.
+
+Should we report text inside comments? Comments are `Node.COMMENT_NODE`, skipped.
+
+Should we report text inside processing instructions? `Node.PROCESSING_INSTRUCTION_NODE`, skipped.
+
+Should we report text inside entity references? `Node.ENTITY_REFERENCE_NODE`, skipped.
+
+Should we report whitespace text? No.
+
+Should we trim text before blank check? `isBlank()` handles whitespace. Good.
+
+Should we use `nodeValue` or `textContent`? For text node, both same. Use nodeValue.
+
+Should we include CDATA? Yes.
+
+Should we include `Node.ENTITY_REFERENCE_NODE`? If entity expands to text, parser likely creates text node. Not needed.
+
+Should we include `Node.COMMENT_NODE`? No.
+
+Should we include text inside `<style>` in `res/values-night`? Values folder skipped.
+
+Should we include text inside `<selector>` in `res/color`? Color is non-value. Text accidental. Good.
+
+Should we include text inside `<font-family>` in `res/font`? Font folder type? `ResourceFolderType.FONT`. Non-value. Good.
+
+Should we include text inside `<network-security-config>` in `res/xml`? Non-value. Good.
+
+Should we include text inside `<paths>` in `res/xml`? Good.
+
+Should we include text inside `<animated-vector>`? drawable. Good.
+
+Potential issue: `appliesTo` might not be called for XmlScanner? It is called for all detectors. Good.
+
+Potential issue: `ResourceXmlDetector` is abstract? It is abstract class. Extending it requires implementing XmlScanner methods? It already implements XmlScanner? Actually `ResourceXmlDetector` is abstract and implements `XmlScanner`. We can override methods.
+
+Potential issue: `getApplicableElements` must return `Collection<String>?` not `Collection<String>`. In Kotlin, override can return non-null because parent returns nullable. That's allowed (return type can be non-null overriding nullable). Good.
+
+Potential issue: `XmlScannerConstants.ALL` is in `com.android.tools.lint.detector.api.XmlScannerConstants`. Good.
+
+Potential issue: `context.getLocation(child)` for text node. Does it work? I think `XmlContext.getLocation(Node)` works for elements and attributes and text? It uses `Node.getUserData(LOCATION_KEY)` maybe. For text nodes, maybe location is not stored. But original detector likely uses `context.getLocation(child)`. If not, maybe use `context.getElementLocation(element)`? But text node location would be approximate. Let's check original. It probably uses `context.getLocation(child)`. We'll keep.
+
+Potential issue: `context.report` overload with Node scope and Location. In Kotlin, there are multiple overloads. Need ensure correct types. `context.report(Issue, Node, Location, String)`. Yes.
+
+Potential issue: `Issue.create` explanation string with newlines. Use trimIndent. Good.
+
+Potential issue: `briefDescription` should be short. Good.
+
+Potential issue: `category` Category.CORRECTNESS. `Severity.WARNING`. `priority` 5. Good.
+
+Potential issue: `Implementation` scope `Scope.RESOURCE_FILE_SCOPE`. Good.
+
+Potential issue: The issue ID must be exactly "ExtraText". Good.
+
+Potential issue: Class name ExtraTextDetector. Good.
+
+Potential issue: Package com.android.tools.lint.checks. Good.
+
+Potential issue: Need import `com.android.tools.lint.detector.api.Detector`? Not needed.
+
+Potential issue: Need import `org.w3c.dom.Element` and `Node`. Good.
+
+Potential issue: `ResourceFolderType` import. Good.
+
+Potential issue: `XmlScannerConstants` import. Good.
+
+Potential issue: `Severity` import. Good.
+
+Potential issue: `Scope` import. Good.
+
+Potential issue: `Category` import. Good.
+
+Potential issue: `Issue` import. Good.
+
+Potential issue: `Implementation` import. Good.
+
+Potential issue: `ResourceXmlDetector` import. Good.
+
+Potential issue: `XmlContext` import. Good.
+
+Potential issue: `Location` import? Not used directly because `context.getLocation` returns Location but we don't reference type. Could omit. But fine.
+
+Potential issue: `Node.CDATA_SECTION_NODE` constant exists. Yes.
+
+Potential issue: `child.nodeValue` for CDATA returns content. Good.
+
+Potential issue: `text.isBlank()` returns true for whitespace and empty. Good.
+
+Potential issue: Should we skip text inside `<style>` in `res/values`? Already skipped.
+
+Potential issue: Should we skip text inside `<resources>` root in `res/values`? Skipped.
+
+Potential issue: Should we skip text inside `<item>` in `res/values/dimens.xml`? Skipped.
+
+Potential issue: Should we skip text inside `<string-array>`? Skipped.
+
+Potential issue: Should we skip text inside `<plurals>`? Skipped.
+
+Potential issue: Should we skip text inside `<annotation>`? Skipped.
+
+Potential issue: Should we skip text inside `<font>`? `res/font` non-value, but `<font>` can have `app:fontStyle` etc. Text accidental. Good.
+
+Potential issue: Should we skip text inside `<meta-data>` in manifest? Manifest is not resource file? Actually `appliesTo` only for resource folders. Manifest is separate scope. Not relevant.
+
+Potential issue: Should we skip text inside `<application>`? Not resource.
+
+Potential issue: Should we skip text inside `<intent-filter>`? Not resource.
+
+Potential issue: Should we skip text inside `<paths>`? Yes report if accidental.
+
+Potential issue: Should we skip text inside `<network-security-config>`? Yes report.
+
+Potential issue: Should we skip text inside `<device-admin>`? res/xml. Yes report.
+
+Potential issue: Should we skip text inside `<searchable>`? res/xml. Yes report.
+
+Potential issue: Should we skip text inside `<keyboard>`? res/xml. Yes report.
+
+Potential issue: Should we skip text inside `<accessibility-service>`? res/xml. Yes report.
+
+Potential issue: Should we skip text inside `<input-method>`? res/xml. Yes report.
+
+Potential issue: Should we skip text inside `<account-authenticator>`? res/xml. Yes report.
+
+Potential issue: Should we skip text inside `<sync-adapter>`? res/xml. Yes report.
+
+Potential issue: Should we skip text inside `<preference-screen>`? res/xml. Actually preferences can be in res/xml. Text accidental. Good.
+
+Potential issue: Should we skip text inside `<header>`? res/xml. Good.
+
+Potential issue: Should we skip text inside `<transition>`? res/transition. Good.
+
+Potential issue: Should we skip text inside `<transitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<objectAnimator>`? res/animator. Good.
+
+Potential issue: Should we skip text inside `<set>`? res/anim. Good.
+
+Potential issue: Should we skip text inside `<shape>`? res/drawable. Good.
+
+Potential issue: Should we skip text inside `<selector>`? res/drawable. Good.
+
+Potential issue: Should we skip text inside `<layer-list>`? Good.
+
+Potential issue: Should we skip text inside `<inset>`? Good.
+
+Potential issue: Should we skip text inside `<bitmap>`? Good.
+
+Potential issue: Should we skip text inside `<nine-patch>`? Good.
+
+Potential issue: Should we skip text inside `<clip>`? Good.
+
+Potential issue: Should we skip text inside `<scale>`? Good.
+
+Potential issue: Should we skip text inside `<transition>`? Good.
+
+Potential issue: Should we skip text inside `<animated-rotate>`? Good.
+
+Potential issue: Should we skip text inside `<rotate>`? Good.
+
+Potential issue: Should we skip text inside `<translate>`? Good.
+
+Potential issue: Should we skip text inside `<alpha>`? Good.
+
+Potential issue: Should we skip text inside `<color>`? res/color. Good.
+
+Potential issue: Should we skip text inside `<gradient>`? Good.
+
+Potential issue: Should we skip text inside `<solid>`? Good.
+
+Potential issue: Should we skip text inside `<stroke>`? Good.
+
+Potential issue: Should we skip text inside `<corners>`? Good.
+
+Potential issue: Should we skip text inside `<padding>`? Good.
+
+Potential issue: Should we skip text inside `<size>`? Good.
+
+Potential issue: Should we skip text inside `<item>` in `res/color`? Good.
+
+Potential issue: Should we skip text inside `<menu>`? Good.
+
+Potential issue: Should we skip text inside `<group>`? Good.
+
+Potential issue: Should we skip text inside `<item>` in menu? Good.
+
+Potential issue: Should we skip text inside `<layout>`? Good.
+
+Potential issue: Should we skip text inside `<data>`? Good.
+
+Potential issue: Should we skip text inside `<merge>`? Good.
+
+Potential issue: Should we skip text inside `<View>`? Good.
+
+Potential issue: Should we skip text inside `<fragment>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<requestFocus/>`? Good.
+
+Potential issue: Should we skip text inside `<tag>`? Good.
+
+Potential issue: Should we skip text inside `<motion:...>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintLayout>`? Good.
+
+Potential issue: Should we skip text inside `<TextView>`? Good.
+
+Potential issue: Should we skip text inside `<LinearLayout>`? Good.
+
+Potential issue: Should we skip text inside `<FrameLayout>`? Good.
+
+Potential issue: Should we skip text inside `<RelativeLayout>`? Good.
+
+Potential issue: Should we skip text inside `<GridLayout>`? Good.
+
+Potential issue: Should we skip text inside `<RecyclerView>`? Good.
+
+Potential issue: Should we skip text inside `<ScrollView>`? Good.
+
+Potential issue: Should we skip text inside `<NestedScrollView>`? Good.
+
+Potential issue: Should we skip text inside `<ViewPager>`? Good.
+
+Potential issue: Should we skip text inside `<TabLayout>`? Good.
+
+Potential issue: Should we skip text inside `<FloatingActionButton>`? Good.
+
+Potential issue: Should we skip text inside `<Toolbar>`? Good.
+
+Potential issue: Should we skip text inside `<AppBarLayout>`? Good.
+
+Potential issue: Should we skip text inside `<CoordinatorLayout>`? Good.
+
+Potential issue: Should we skip text inside `<DrawerLayout>`? Good.
+
+Potential issue: Should we skip text inside `<SwipeRefreshLayout>`? Good.
+
+Potential issue: Should we skip text inside `<CardView>`? Good.
+
+Potential issue: Should we skip text inside `<ImageView>`? Good.
+
+Potential issue: Should we skip text inside `<Button>`? Good.
+
+Potential issue: Should we skip text inside `<EditText>`? Good.
+
+Potential issue: Should we skip text inside `<CheckBox>`? Good.
+
+Potential issue: Should we skip text inside `<RadioButton>`? Good.
+
+Potential issue: Should we skip text inside `<RadioGroup>`? Good.
+
+Potential issue: Should we skip text inside `<Switch>`? Good.
+
+Potential issue: Should we skip text inside `<SeekBar>`? Good.
+
+Potential issue: Should we skip text inside `<ProgressBar>`? Good.
+
+Potential issue: Should we skip text inside `<Spinner>`? Good.
+
+Potential issue: Should we skip text inside `<ListView>`? Good.
+
+Potential issue: Should we skip text inside `<GridView>`? Good.
+
+Potential issue: Should we skip text inside `<ExpandableListView>`? Good.
+
+Potential issue: Should we skip text inside `<WebView>`? Good.
+
+Potential issue: Should we skip text inside `<VideoView>`? Good.
+
+Potential issue: Should we skip text inside `<ImageButton>`? Good.
+
+Potential issue: Should we skip text inside `<ToggleButton>`? Good.
+
+Potential issue: Should we skip text inside `<AutoCompleteTextView>`? Good.
+
+Potential issue: Should we skip text inside `<MultiAutoCompleteTextView>`? Good.
+
+Potential issue: Should we skip text inside `<TextClock>`? Good.
+
+Potential issue: Should we skip text inside `<Chronometer>`? Good.
+
+Potential issue: Should we skip text inside `<Space>`? Good.
+
+Potential issue: Should we skip text inside `<ViewStub>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<requestFocus/>`? Good.
+
+Potential issue: Should we skip text inside `<blink>`? No.
+
+Potential issue: Should we skip text inside `<fragment>`? Good.
+
+Potential issue: Should we skip text inside `<layout>`? Good.
+
+Potential issue: Should we skip text inside `<data>`? Good.
+
+Potential issue: Should we skip text inside `<import>`? Good.
+
+Potential issue: Should we skip text inside `<variable>`? Good.
+
+Potential issue: Should we skip text inside `<bind>`? Good.
+
+Potential issue: Should we skip text inside `<targets>`? Good.
+
+Potential issue: Should we skip text inside `<tag>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintLayout>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintSet>`? Good.
+
+Potential issue: Should we skip text inside `<State>`? Good.
+
+Potential issue: Should we skip text inside `<Transition>`? Good.
+
+Potential issue: Should we skip text inside `<OnClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside `<ImageFilterView>`? Good.
+
+Potential issue: Should we skip text inside `<MockView>`? Good.
+
+Potential issue: Should we skip text inside `<MotionEffect>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLabel>`? Good.
+
+Potential issue: Should we skip text inside `<Carousel>`? Good.
+
+Potential issue: Should we skip text inside `<MotionScene>`? Good.
+
+Potential issue: Should we skip text inside `<TransitionSet>`? Good.
+
+Potential issue: Should we skip text inside `<MotionLayout>`? Good.
+
+Potential issue: Should we skip text inside `<onSwipe>`? Good.
+
+Potential issue: Should we skip text inside `<onClick>`? Good.
+
+Potential issue: Should we skip text inside `<KeyFrameSet>`? Good.
+
+Potential issue: Should we skip text inside `<KeyPosition>`? Good.
+
+Potential issue: Should we skip text inside `<KeyAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<KeyCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTimeCycle>`? Good.
+
+Potential issue: Should we skip text inside `<KeyTrigger>`? Good.
+
+Potential issue: Should we skip text inside `<CustomAttribute>`? Good.
+
+Potential issue: Should we skip text inside `<ViewTransition>`? Good.
+
+Potential issue: Should we skip text inside `<include>`? Good.
+
+Potential issue: Should we skip text inside `<ConstraintOverride>`? Good.
+
+Potential issue: Should we skip text inside `<Guideline>`? Good.
+
+Potential issue: Should we skip text inside `<Barrier>`? Good.
+
+Potential issue: Should we skip text inside `<Group>`? Good.
+
+Potential issue: Should we skip text inside `<Placeholder>`? Good.
+
+Potential issue: Should we skip text inside `<Flow>`? Good.
+
+Potential issue: Should we skip text inside `<Layer>`? Good.
+
+Potential issue: Should we skip text inside

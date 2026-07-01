@@ -1,0 +1,193 @@
+package com.android.tools.lint.checks
+
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.*
+import org.w3c.dom.Attr
+import org.w3c.dom.Element
+import java.util.regex.Pattern
+
+class ResourceCycleDetector : ResourceXmlDetector() {
+
+    private val graph = mutableMapOf<String, MutableSet<String>>()
+    private val locations = mutableMapOf<String, Location>()
+    private val refLocations = mutableMapOf<String, Location>()
+
+    companion object {
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "ResourceCycle",
+            briefDescription = "Cycle in resource definitions",
+            explanation = "There should be no cycles in resource definitions as this can lead to runtime exceptions.",
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                ResourceCycleDetector::class.java,
+                Scope.RESOURCE_FILE_SCOPE
+            )
+        )
+
+        private val REF_PATTERN = Pattern.compile("@\\+?(\\w+:)?([a-zA-Z][a-zA-Z0-9]*)/([a-zA-Z0-9_.]+)")
+    }
+
+    override fun beforeCheckProject(context: Context) {
+        graph.clear()
+        locations.clear()
+        refLocations.clear()
+    }
+
+    override fun getApplicableElements(): Collection<String>? = null
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val folderType = context.resourceFolderType ?: return
+        val sourceRes = getSourceResource(context, folderType, element) ?: return
+
+        if (sourceRes !in locations) {
+            locations[sourceRes] = context.getLocation(element)
+        }
+
+        val refs = graph.getOrPut(sourceRes) { mutableSetOf() }
+
+        val attrs = element.attributes
+        for (i in 0 until attrs.length) {
+            val attr = attrs.item(i) as Attr
+            val value = attr.value
+            if ('@' in value) {
+                extractReferences(value, sourceRes, context, attr, refs)
+            }
+        }
+
+        val text = element.textContent
+        if (text != null && '@' in text) {
+            extractReferences(text, sourceRes, context, element, refs)
+        }
+
+        if (folderType == ResourceFolderType.VALUES && element.tagName == "style") {
+            val parentAttr = element.getAttribute("parent").trim()
+            if (parentAttr.isNotEmpty()) {
+                val parentRef = when {
+                    parentAttr.startsWith("@style/") -> parentAttr.substringAfter("@style/")
+                    parentAttr.startsWith("@+style/") -> parentAttr.substringAfter("@+style/")
+                    parentAttr.startsWith("@") || parentAttr.startsWith("?") -> null
+                    else -> parentAttr
+                }
+                if (parentRef != null) {
+                    val target = "style/$parentRef"
+                    refs.add(target)
+                    refLocations["$sourceRes->$target"] = context.getLocation(element.getAttributeNode("parent"))
+                }
+            } else {
+                val nameAttr = element.getAttribute("name")
+                if (nameAttr.contains('.')) {
+                    val implicitParent = nameAttr.substringBeforeLast('.')
+                    val target = "style/$implicitParent"
+                    refs.add(target)
+                    refLocations["$sourceRes->$target"] = context.getLocation(element.getAttributeNode("name"))
+                }
+            }
+        }
+    }
+
+    private fun extractReferences(
+        value: String,
+        sourceRes: String,
+        context: XmlContext,
+        node: org.w3c.dom.Node,
+        refs: MutableSet<String>
+    ) {
+        val matcher = REF_PATTERN.matcher(value)
+        while (matcher.find()) {
+            if (matcher.group(1) != null) continue
+            val type = matcher.group(2)
+            val name = matcher.group(3)
+            if (type == "id") continue
+
+            val target = "$type/$name"
+            refs.add(target)
+            refLocations["$sourceRes->$target"] = context.getLocation(node)
+        }
+    }
+
+    private fun getSourceResource(
+        context: XmlContext,
+        folderType: ResourceFolderType,
+        element: Element
+    ): String? {
+        if (folderType == ResourceFolderType.VALUES) {
+            val tagName = element.tagName
+            if (tagName == "resources") return null
+            val name = element.getAttribute("name")
+            if (name.isEmpty()) return null
+
+            val type = when (tagName) {
+                "item" -> element.getAttribute("type").takeIf { it.isNotEmpty() } ?: return null
+                "declare-styleable", "attr", "public", "java-symbol", "eat-comment" -> return null
+                else -> tagName
+            }
+            return "$type/$name"
+        }
+
+        val folderName = folderType.getName()
+        val fileName = context.file.name.substringBeforeLast('.')
+        return "$folderName/$fileName"
+    }
+
+    override fun afterCheckProject(context: Context) {
+        detectCycles(context)
+    }
+
+    private fun detectCycles(context: Context) {
+        val state = mutableMapOf<String, Int>()
+        val path = mutableListOf<String>()
+        val reportedCycles = mutableSetOf<Set<String>>()
+
+        fun dfs(node: String) {
+            val s = state[node] ?: 0
+            if (s == 2) return
+            if (s == 1) {
+                val cycleStart = path.indexOf(node)
+                if (cycleStart != -1) {
+                    val cycleNodes = path.subList(cycleStart, path.size).toSet()
+                    if (reportedCycles.add(cycleNodes)) {
+                        val cycleList = path.subList(cycleStart, path.size)
+                        reportCycle(context, cycleList, node)
+                    }
+                }
+                return
+            }
+
+            state[node] = 1
+            path.add(node)
+
+            for (neighbor in graph[node].orEmpty()) {
+                dfs(neighbor)
+            }
+
+            path.removeAt(path.lastIndex)
+            state[node] = 2
+        }
+
+        for (node in graph.keys.toList()) {
+            if (state[node] != 2) {
+                dfs(node)
+            }
+        }
+    }
+
+    private fun reportCycle(context: Context, cycle: List<String>, closingNode: String) {
+        if (cycle.size == 1) {
+            val res = cycle[0]
+            val slashIndex = res.indexOf('/')
+            val type = if (slashIndex != -1) res.substring(0, slashIndex).replaceFirstChar { it.uppercase() } else "Resource"
+            val name = if (slashIndex != -1) res.substring(slashIndex + 1) else res
+            val message = "$type $name should not reference itself"
+            val location = locations[closingNode] ?: Location.create(context.file)
+            context.report(ISSUE, location, message)
+        } else {
+            val cycleStr = cycle.joinToString(" -> ") + " -> ${cycle.first()}"
+            val refKey = "$closingNode->${cycle.first()}"
+            val location = refLocations[refKey] ?: locations[closingNode] ?: Location.create(context.file)
+            context.report(ISSUE, location, "Resource cycle detected: $cycleStr")
+        }
+    }
+}

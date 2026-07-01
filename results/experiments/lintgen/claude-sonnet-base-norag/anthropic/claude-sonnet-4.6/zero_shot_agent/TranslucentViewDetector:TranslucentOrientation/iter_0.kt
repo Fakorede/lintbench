@@ -1,0 +1,273 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.ANDROID_URI
+import com.android.SdkConstants.ATTR_NAME
+import com.android.SdkConstants.ATTR_THEME
+import com.android.SdkConstants.TAG_ACTIVITY
+import com.android.SdkConstants.TAG_APPLICATION
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.LintFix
+import com.android.tools.lint.detector.api.Location
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import org.w3c.dom.Element
+import java.util.EnumSet
+
+/**
+ * Detector that checks for activities that specify a fixed screen orientation
+ * while also using a translucent theme, which is not supported on API 26+.
+ */
+class TranslucentViewDetector : Detector(), XmlScanner {
+
+    companion object {
+        @JvmField
+        val ISSUE: Issue = Issue.create(
+            id = "TranslucentOrientation",
+            briefDescription = "Mixing screenOrientation and translucency",
+            explanation = """
+                Specifying a fixed screen orientation with a translucent theme isn't supported \
+                on apps with `targetSdkVersion` O or greater since there can be an another activity \
+                visible behind your activity with a conflicting request.
+
+                For example, your activity requests landscape and the visible activity behind \
+                your translucent activity request portrait. In this case the system can only \
+                honor one of the requests and currently prefers to honor the request from \
+                non-translucent activities since there is nothing visible behind them.
+
+                Devices running platform version O or greater will throw an exception in your \
+                app if this state is detected.
+            """,
+            category = Category.CORRECTNESS,
+            priority = 8,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                TranslucentViewDetector::class.java,
+                EnumSet.of(Scope.ALL_RESOURCE_FILES)
+            )
+        )
+
+        private const val ATTR_SCREEN_ORIENTATION = "screenOrientation"
+
+        // Orientation values that are considered "fixed" (not unspecified/sensor/user/etc.)
+        private val FIXED_ORIENTATIONS = setOf(
+            "landscape",
+            "portrait",
+            "reverseLandscape",
+            "reversePortrait",
+            "sensorLandscape",
+            "sensorPortrait",
+            "userLandscape",
+            "userPortrait",
+            "locked"
+        )
+
+        // Style attributes that indicate translucency
+        private val TRANSLUCENT_STYLE_ATTRIBUTES = setOf(
+            "windowIsTranslucent",
+            "windowSwipeToDismiss"
+        )
+
+        // Known translucent theme name patterns
+        private val TRANSLUCENT_THEME_PATTERNS = listOf(
+            "Translucent",
+            "translucent",
+            "Dialog",
+            "Floating",
+            "floating"
+        )
+    }
+
+    // Map from style name to whether it's translucent (cached results)
+    private val translucentStyleCache = mutableMapOf<String, Boolean>()
+
+    // Map from style name to its parent and attributes (built during resource file scanning)
+    private val styleParentMap = mutableMapOf<String, String?>()
+    private val styleAttributeMap = mutableMapOf<String, Map<String, String>>()
+
+    // Activities to check: list of (element, theme, orientation, location)
+    private data class ActivityInfo(
+        val element: Element,
+        val theme: String,
+        val orientation: String,
+        val location: Location
+    )
+
+    private val activitiesToCheck = mutableListOf<ActivityInfo>()
+
+    // Application-level theme
+    private var applicationTheme: String? = null
+
+    override fun getApplicableElements(): Collection<String> {
+        return listOf(TAG_ACTIVITY, TAG_APPLICATION, "style")
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        when (element.tagName) {
+            "style" -> {
+                collectStyleInfo(element)
+            }
+            TAG_APPLICATION -> {
+                val theme = element.getAttributeNS(ANDROID_URI, ATTR_THEME)
+                if (theme.isNotEmpty()) {
+                    applicationTheme = theme
+                }
+            }
+            TAG_ACTIVITY -> {
+                visitActivity(context, element)
+            }
+        }
+    }
+
+    private fun collectStyleInfo(element: Element) {
+        val name = element.getAttribute(ATTR_NAME)
+        if (name.isEmpty()) return
+
+        val parent = element.getAttribute("parent").takeIf { it.isNotEmpty() }
+        styleParentMap[name] = parent
+
+        val attrs = mutableMapOf<String, String>()
+        val children = element.childNodes
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            if (child is Element && child.tagName == "item") {
+                val itemName = child.getAttribute(ATTR_NAME)
+                val itemValue = child.textContent?.trim() ?: ""
+                if (itemName.isNotEmpty()) {
+                    attrs[itemName] = itemValue
+                }
+            }
+        }
+        styleAttributeMap[name] = attrs
+    }
+
+    private fun visitActivity(context: XmlContext, element: Element) {
+        // Only relevant for targetSdkVersion >= 26
+        val project = context.project
+        val targetSdk = project.targetSdk
+        if (targetSdk < 26) return
+
+        // Check if the activity has a fixed screen orientation
+        val orientation = element.getAttributeNS(ANDROID_URI, ATTR_SCREEN_ORIENTATION)
+        if (orientation.isEmpty() || !FIXED_ORIENTATIONS.contains(orientation)) return
+
+        // Get the theme for this activity
+        val activityTheme = element.getAttributeNS(ANDROID_URI, ATTR_THEME)
+        val effectiveTheme = when {
+            activityTheme.isNotEmpty() -> activityTheme
+            applicationTheme != null -> applicationTheme!!
+            else -> return
+        }
+
+        val location = context.getElementLocation(element)
+        activitiesToCheck.add(ActivityInfo(element, effectiveTheme, orientation, location))
+    }
+
+    override fun afterCheckFile(context: Context) {
+        // Process activities after all styles in this file have been collected
+        if (context is XmlContext) {
+            processActivities(context)
+        }
+    }
+
+    override fun afterCheckRootProject(context: Context) {
+        // Final pass after all files have been processed
+        processActivities(context)
+    }
+
+    private fun processActivities(context: Context) {
+        val iterator = activitiesToCheck.iterator()
+        while (iterator.hasNext()) {
+            val info = iterator.next()
+            if (isTranslucentTheme(info.theme)) {
+                context.report(
+                    ISSUE,
+                    info.location,
+                    "Should not specify a fixed `screenOrientation` with a translucent theme: " +
+                        "the theme specifies a translucent background and the orientation request " +
+                        "can conflict with an orientation request from behind the translucent activity"
+                )
+                iterator.remove()
+            }
+        }
+    }
+
+    private fun isTranslucentTheme(theme: String): Boolean {
+        val normalizedTheme = normalizeThemeName(theme)
+
+        // Check cache first
+        translucentStyleCache[normalizedTheme]?.let { return it }
+
+        val result = isTranslucentThemeInternal(normalizedTheme, mutableSetOf())
+        translucentStyleCache[normalizedTheme] = result
+        return result
+    }
+
+    private fun isTranslucentThemeInternal(themeName: String, visited: MutableSet<String>): Boolean {
+        if (themeName in visited) return false
+        visited.add(themeName)
+
+        // Check if the theme name itself suggests translucency
+        for (pattern in TRANSLUCENT_THEME_PATTERNS) {
+            if (themeName.contains(pattern)) {
+                return true
+            }
+        }
+
+        // Check style attributes
+        val attrs = styleAttributeMap[themeName]
+        if (attrs != null) {
+            for (translucentAttr in TRANSLUCENT_STYLE_ATTRIBUTES) {
+                val value = attrs[translucentAttr] ?: attrs["android:$translucentAttr"]
+                if (value == "true") {
+                    return true
+                }
+            }
+
+            // Check parent via attribute
+            val parentAttr = attrs["parent"]
+            if (parentAttr != null) {
+                val normalizedParent = normalizeThemeName(parentAttr)
+                if (isTranslucentThemeInternal(normalizedParent, visited)) {
+                    return true
+                }
+            }
+        }
+
+        // Check explicit parent in style definition
+        val parent = styleParentMap[themeName]
+        if (parent != null) {
+            val normalizedParent = normalizeThemeName(parent)
+            if (isTranslucentThemeInternal(normalizedParent, visited)) {
+                return true
+            }
+        }
+
+        // Check implicit parent via dot notation (e.g., "AppTheme.Translucent" -> "AppTheme")
+        val dotIndex = themeName.lastIndexOf('.')
+        if (dotIndex > 0) {
+            val implicitParent = themeName.substring(0, dotIndex)
+            if (isTranslucentThemeInternal(implicitParent, visited)) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private fun normalizeThemeName(theme: String): String {
+        // Remove @style/, @android:style/, ?attr/, etc.
+        return theme
+            .removePrefix("@style/")
+            .removePrefix("@android:style/")
+            .removePrefix("@*android:style/")
+            .removePrefix("?attr/")
+            .removePrefix("?android:attr/")
+            .trim()
+    }
+}

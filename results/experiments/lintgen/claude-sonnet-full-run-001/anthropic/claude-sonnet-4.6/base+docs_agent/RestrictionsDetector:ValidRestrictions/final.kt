@@ -1,0 +1,398 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.ANDROID_URI
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import org.w3c.dom.Element
+import org.w3c.dom.Node
+
+class RestrictionsDetector : Detector(), XmlScanner {
+
+    companion object {
+        private const val TAG_RESTRICTIONS = "restrictions"
+        private const val TAG_RESTRICTION = "restriction"
+        private const val ATTR_RESTRICTION_TYPE = "restrictionType"
+        private const val ATTR_TITLE = "title"
+        private const val ATTR_DEFAULT_VALUE = "defaultValue"
+        private const val ATTR_ENTRIES = "entries"
+        private const val ATTR_ENTRY_VALUES = "entryValues"
+        private const val ATTR_KEY = "key"
+
+        private const val TYPE_BOOL = "bool"
+        private const val TYPE_STRING = "string"
+        private const val TYPE_INTEGER = "integer"
+        private const val TYPE_CHOICE = "choice"
+        private const val TYPE_MULTI_SELECT = "multi-select"
+        private const val TYPE_HIDDEN = "hidden"
+        private const val TYPE_BUNDLE = "bundle"
+        private const val TYPE_BUNDLE_ARRAY = "bundle_array"
+
+        const val MAX_NESTING_DEPTH = 20
+        const val MAX_NUMBER_OF_NESTED_RESTRICTIONS = 1000
+
+        private val VALID_TYPES = setOf(
+            TYPE_BOOL,
+            TYPE_STRING,
+            TYPE_INTEGER,
+            TYPE_CHOICE,
+            TYPE_MULTI_SELECT,
+            TYPE_HIDDEN,
+            TYPE_BUNDLE,
+            TYPE_BUNDLE_ARRAY
+        )
+
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "ValidRestrictions",
+            briefDescription = "Invalid Restrictions Descriptor",
+            explanation = """
+                Ensures that an application's restrictions XML file is properly formed.
+
+                The restrictions XML file must follow the format described in the \
+                `RestrictionsManager` documentation. Each `<restriction>` element must have \
+                a valid `android:key`, `android:restrictionType`, and `android:title` \
+                (except for `bundle` and `bundle_array` types). The `choice` and \
+                `multi-select` types must also specify `android:entries` and \
+                `android:entryValues`.
+                """,
+            category = Category.CORRECTNESS,
+            priority = 5,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                RestrictionsDetector::class.java,
+                Scope.RESOURCE_FILE_SCOPE
+            ),
+            moreInfo = "https://developer.android.com/reference/android/content/RestrictionsManager.html"
+        )
+    }
+
+    override fun appliesTo(folderType: ResourceFolderType): Boolean {
+        return folderType == ResourceFolderType.XML
+    }
+
+    override fun getApplicableElements(): Collection<String> {
+        return listOf(TAG_RESTRICTIONS, TAG_RESTRICTION)
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        when (element.tagName) {
+            TAG_RESTRICTIONS -> checkRestrictionsRoot(context, element)
+            TAG_RESTRICTION -> checkRestriction(context, element)
+        }
+    }
+
+    private fun checkRestrictionsRoot(context: XmlContext, element: Element) {
+        // Check that all direct children are <restriction> elements
+        var child = element.firstChild
+        while (child != null) {
+            if (child.nodeType == Node.ELEMENT_NODE) {
+                val childElement = child as Element
+                if (childElement.tagName != TAG_RESTRICTION) {
+                    context.report(
+                        ISSUE,
+                        childElement,
+                        context.getElementLocation(childElement),
+                        "Unexpected element `<${childElement.tagName}>` inside `<restrictions>`; expected `<restriction>`"
+                    )
+                }
+            }
+            child = child.nextSibling
+        }
+
+        // Check total number of restrictions
+        val totalCount = countTotalRestrictions(element)
+        if (totalCount > MAX_NUMBER_OF_NESTED_RESTRICTIONS) {
+            context.report(
+                ISSUE,
+                element,
+                context.getElementLocation(element),
+                "Too many nested restrictions: $totalCount (max $MAX_NUMBER_OF_NESTED_RESTRICTIONS)"
+            )
+        }
+    }
+
+    private fun countTotalRestrictions(element: Element): Int {
+        var count = 0
+        var child = element.firstChild
+        while (child != null) {
+            if (child.nodeType == Node.ELEMENT_NODE) {
+                val childElement = child as Element
+                if (childElement.tagName == TAG_RESTRICTION) {
+                    count++
+                    count += countTotalRestrictions(childElement)
+                }
+            }
+            child = child.nextSibling
+        }
+        return count
+    }
+
+    private fun getNestingDepth(element: Element): Int {
+        var depth = 0
+        var current: Node = element
+        while (current.parentNode != null) {
+            val parent = current.parentNode
+            if (parent.nodeType == Node.ELEMENT_NODE) {
+                val parentTag = (parent as Element).tagName
+                if (parentTag == TAG_RESTRICTION || parentTag == TAG_RESTRICTIONS) {
+                    depth++
+                }
+            }
+            current = current.parentNode
+        }
+        return depth
+    }
+
+    private fun checkRestriction(context: XmlContext, element: Element) {
+        // Check parent is either <restrictions> or <restriction> (for bundle types)
+        val parent = element.parentNode
+        if (parent != null && parent.nodeType == Node.ELEMENT_NODE) {
+            val parentTag = (parent as Element).tagName
+            if (parentTag != TAG_RESTRICTIONS && parentTag != TAG_RESTRICTION) {
+                context.report(
+                    ISSUE,
+                    element,
+                    context.getElementLocation(element),
+                    "`<restriction>` elements must be children of `<restrictions>` or `<restriction>` (bundle type)"
+                )
+            }
+        }
+
+        // Check nesting depth
+        val depth = getNestingDepth(element)
+        if (depth > MAX_NESTING_DEPTH) {
+            context.report(
+                ISSUE,
+                element,
+                context.getElementLocation(element),
+                "Restriction nesting depth exceeds $MAX_NESTING_DEPTH"
+            )
+            return
+        }
+
+        // Check for required android:key attribute
+        val key = element.getAttributeNS(ANDROID_URI, ATTR_KEY)
+        if (key.isNullOrEmpty()) {
+            context.report(
+                ISSUE,
+                element,
+                context.getElementLocation(element),
+                "Missing required attribute `android:key`"
+            )
+        } else {
+            // Check that key is not a resource reference
+            if (key.startsWith("@")) {
+                context.report(
+                    ISSUE,
+                    element,
+                    context.getElementLocation(element),
+                    "The `android:key` attribute should not be a resource reference"
+                )
+            }
+            // Check for duplicate keys among siblings
+            checkDuplicateKey(context, element, key)
+        }
+
+        // Check for required android:restrictionType attribute
+        val restrictionType = element.getAttributeNS(ANDROID_URI, ATTR_RESTRICTION_TYPE)
+        if (restrictionType.isNullOrEmpty()) {
+            context.report(
+                ISSUE,
+                element,
+                context.getElementLocation(element),
+                "Missing required attribute `android:restrictionType`"
+            )
+            return
+        }
+
+        // Validate restrictionType value
+        if (!VALID_TYPES.contains(restrictionType)) {
+            context.report(
+                ISSUE,
+                element,
+                context.getElementLocation(element),
+                "Invalid `android:restrictionType` value `$restrictionType`. " +
+                    "Must be one of: ${VALID_TYPES.joinToString(", ")}"
+            )
+            return
+        }
+
+        // Check for required android:title attribute
+        // bundle and bundle_array don't require title
+        if (restrictionType != TYPE_BUNDLE && restrictionType != TYPE_BUNDLE_ARRAY) {
+            val title = element.getAttributeNS(ANDROID_URI, ATTR_TITLE)
+            if (title.isNullOrEmpty()) {
+                context.report(
+                    ISSUE,
+                    element,
+                    context.getElementLocation(element),
+                    "Missing required attribute `android:title` for restriction type `$restrictionType`"
+                )
+            }
+        }
+
+        // hidden type requires android:defaultValue
+        if (restrictionType == TYPE_HIDDEN) {
+            val defaultValue = element.getAttributeNS(ANDROID_URI, ATTR_DEFAULT_VALUE)
+            if (defaultValue.isNullOrEmpty()) {
+                context.report(
+                    ISSUE,
+                    element,
+                    context.getElementLocation(element),
+                    "Missing required attribute `android:defaultValue` for restriction type `$restrictionType`"
+                )
+            }
+        }
+
+        // For choice and multi-select, entries and entryValues are required
+        if (restrictionType == TYPE_CHOICE || restrictionType == TYPE_MULTI_SELECT) {
+            val entries = element.getAttributeNS(ANDROID_URI, ATTR_ENTRIES)
+            if (entries.isNullOrEmpty()) {
+                context.report(
+                    ISSUE,
+                    element,
+                    context.getElementLocation(element),
+                    "Missing required attribute `android:entries` for restriction type `$restrictionType`"
+                )
+            }
+
+            val entryValues = element.getAttributeNS(ANDROID_URI, ATTR_ENTRY_VALUES)
+            if (entryValues.isNullOrEmpty()) {
+                context.report(
+                    ISSUE,
+                    element,
+                    context.getElementLocation(element),
+                    "Missing required attribute `android:entryValues` for restriction type `$restrictionType`"
+                )
+            }
+        }
+
+        // For bundle and bundle_array, check children
+        if (restrictionType == TYPE_BUNDLE || restrictionType == TYPE_BUNDLE_ARRAY) {
+            // bundle/bundle_array should not have defaultValue
+            val defaultValue = element.getAttributeNS(ANDROID_URI, ATTR_DEFAULT_VALUE)
+            if (!defaultValue.isNullOrEmpty()) {
+                context.report(
+                    ISSUE,
+                    element,
+                    context.getElementLocation(element),
+                    "`android:defaultValue` is not applicable for `$restrictionType` restrictions"
+                )
+            }
+
+            // Check that children are only <restriction> elements
+            var child = element.firstChild
+            while (child != null) {
+                if (child.nodeType == Node.ELEMENT_NODE) {
+                    val childElement = child as Element
+                    if (childElement.tagName != TAG_RESTRICTION) {
+                        context.report(
+                            ISSUE,
+                            childElement,
+                            context.getElementLocation(childElement),
+                            "Unexpected element `<${childElement.tagName}>` inside bundle restriction; expected `<restriction>`"
+                        )
+                    }
+                }
+                child = child.nextSibling
+            }
+        } else {
+            // Non-bundle types should not have child restrictions
+            val childRestrictions = getChildRestrictions(element)
+            if (childRestrictions.isNotEmpty()) {
+                context.report(
+                    ISSUE,
+                    element,
+                    context.getElementLocation(element),
+                    "Only `bundle` and `bundle_array` restrictions can have nested `<restriction>` children"
+                )
+            }
+
+            // Validate defaultValue type consistency
+            val defaultValue = element.getAttributeNS(ANDROID_URI, ATTR_DEFAULT_VALUE)
+            if (!defaultValue.isNullOrEmpty()) {
+                when (restrictionType) {
+                    TYPE_BOOL -> {
+                        if (defaultValue != "true" && defaultValue != "false" &&
+                            !defaultValue.startsWith("@")) {
+                            context.report(
+                                ISSUE,
+                                element,
+                                context.getElementLocation(element),
+                                "Invalid `android:defaultValue` for bool restriction: must be `true` or `false`"
+                            )
+                        }
+                    }
+                    TYPE_INTEGER -> {
+                        if (!defaultValue.startsWith("@")) {
+                            try {
+                                defaultValue.toInt()
+                            } catch (e: NumberFormatException) {
+                                context.report(
+                                    ISSUE,
+                                    element,
+                                    context.getElementLocation(element),
+                                    "Invalid `android:defaultValue` for integer restriction: `$defaultValue` is not a valid integer"
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun getChildRestrictions(element: Element): List<Element> {
+        val children = mutableListOf<Element>()
+        var child = element.firstChild
+        while (child != null) {
+            if (child.nodeType == Node.ELEMENT_NODE && (child as Element).tagName == TAG_RESTRICTION) {
+                children.add(child)
+            }
+            child = child.nextSibling
+        }
+        return children
+    }
+
+    private fun checkDuplicateKey(context: XmlContext, element: Element, key: String) {
+        val parent = element.parentNode ?: return
+        var sibling = parent.firstChild
+        while (sibling != null) {
+            if (sibling.nodeType == Node.ELEMENT_NODE && sibling !== element) {
+                val siblingElement = sibling as Element
+                if (siblingElement.tagName == TAG_RESTRICTION) {
+                    val siblingKey = siblingElement.getAttributeNS(ANDROID_URI, ATTR_KEY)
+                    if (siblingKey == key) {
+                        // Only report on the later element to avoid double reporting
+                        if (comesAfter(element, siblingElement)) {
+                            context.report(
+                                ISSUE,
+                                element,
+                                context.getElementLocation(element),
+                                "Duplicate key `$key` in restrictions"
+                            )
+                            return
+                        }
+                    }
+                }
+            }
+            sibling = sibling.nextSibling
+        }
+    }
+
+    private fun comesAfter(element: Element, other: Element): Boolean {
+        var sibling = other.nextSibling
+        while (sibling != null) {
+            if (sibling === element) return true
+            sibling = sibling.nextSibling
+        }
+        return false
+    }
+}

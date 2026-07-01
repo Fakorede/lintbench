@@ -1,0 +1,1 @@
+ResourceFolderType folderType = ResourceFolderType.getFolderType(file.getParentFile().getName());

@@ -1,0 +1,206 @@
+package com.android.tools.lint.checks;
+
+import com.android.SdkConstants;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.SourceCodeScanner;
+import com.intellij.psi.PsiClass;
+import com.intellij.psi.PsiModifier;
+
+import org.jetbrains.uast.UClass;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
+
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class RegistrationDetector extends Detector implements SourceCodeScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "Registered",
+            "Class is not registered in the manifest",
+            "Activities, services and content providers should be registered in the " +
+            "`AndroidManifest.xml` file using `<activity>`, `<service>` and " +
+            "`<provider>` tags.\n\n" +
+            "If your activity is simply a parent class intended to be " +
+            "subclassed by other \"real\" activities, make it an abstract class.",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(
+                    RegistrationDetector.class,
+                    Scope.JAVA_FILE_SCOPE
+            )
+    ).addMoreInfo("https://developer.android.com/guide/topics/manifest/manifest-intro.html");
+
+    private static final String CLASS_ACTIVITY = "android.app.Activity";
+    private static final String CLASS_SERVICE = "android.app.Service";
+    private static final String CLASS_CONTENT_PROVIDER = "android.content.ContentProvider";
+    private static final String CLASS_BROADCAST_RECEIVER = "android.content.BroadcastReceiver";
+
+    private static final Map<String, String> CLASS_TO_TAG = new HashMap<>();
+
+    static {
+        CLASS_TO_TAG.put(CLASS_ACTIVITY, SdkConstants.TAG_ACTIVITY);
+        CLASS_TO_TAG.put(CLASS_SERVICE, SdkConstants.TAG_SERVICE);
+        CLASS_TO_TAG.put(CLASS_CONTENT_PROVIDER, SdkConstants.TAG_PROVIDER);
+        CLASS_TO_TAG.put(CLASS_BROADCAST_RECEIVER, SdkConstants.TAG_RECEIVER);
+    }
+
+    private final Map<String, ClassEntry> mClassToEntry = new HashMap<>();
+
+    private static class ClassEntry {
+        final UClass uClass;
+        final JavaContext context;
+        final String tag;
+
+        ClassEntry(UClass uClass, JavaContext context, String tag) {
+            this.uClass = uClass;
+            this.context = context;
+            this.tag = tag;
+        }
+    }
+
+    @Override
+    public List<String> applicableSuperClasses() {
+        return Arrays.asList(
+                CLASS_ACTIVITY,
+                CLASS_SERVICE,
+                CLASS_CONTENT_PROVIDER,
+                CLASS_BROADCAST_RECEIVER
+        );
+    }
+
+    @Override
+    public void visitClass(JavaContext context, UClass declaration) {
+        PsiClass psiClass = declaration.getJavaPsi();
+        if (psiClass.hasModifierProperty(PsiModifier.ABSTRACT)) {
+            return;
+        }
+
+        String qualifiedName = psiClass.getQualifiedName();
+        if (qualifiedName == null) {
+            return;
+        }
+
+        String tag = getExpectedTag(context, declaration);
+        if (tag == null) {
+            return;
+        }
+
+        mClassToEntry.put(qualifiedName, new ClassEntry(declaration, context, tag));
+    }
+
+    private String getExpectedTag(JavaContext context, UClass declaration) {
+        // Check in a specific order to handle inheritance correctly
+        String[] superClasses = {
+                CLASS_ACTIVITY,
+                CLASS_SERVICE,
+                CLASS_CONTENT_PROVIDER,
+                CLASS_BROADCAST_RECEIVER
+        };
+        for (String superClass : superClasses) {
+            if (context.getEvaluator().extendsClass(declaration.getJavaPsi(), superClass, false)) {
+                return CLASS_TO_TAG.get(superClass);
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public void afterCheckRootProject(Context context) {
+        if (mClassToEntry.isEmpty()) {
+            return;
+        }
+
+        Map<String, String> registeredClasses = getRegisteredClasses(context);
+
+        for (Map.Entry<String, ClassEntry> entry : mClassToEntry.entrySet()) {
+            String qualifiedName = entry.getKey();
+            ClassEntry classEntry = entry.getValue();
+
+            if (!isRegistered(qualifiedName, registeredClasses, classEntry.tag)) {
+                String tagName = classEntry.tag;
+                String message = String.format(
+                        "The `<%1$s>` `%2$s` is not registered in the manifest",
+                        tagName,
+                        qualifiedName);
+                Location location = classEntry.context.getNameLocation(classEntry.uClass);
+                classEntry.context.report(ISSUE, classEntry.uClass, location, message);
+            }
+        }
+    }
+
+    private boolean isRegistered(String qualifiedName, Map<String, String> registeredClasses,
+            String expectedTag) {
+        String registeredTag = registeredClasses.get(qualifiedName);
+        if (registeredTag == null) {
+            return false;
+        }
+        return registeredTag.equals(expectedTag);
+    }
+
+    private Map<String, String> getRegisteredClasses(Context context) {
+        Map<String, String> registered = new HashMap<>();
+
+        com.android.tools.lint.detector.api.Project mainProject = context.getMainProject();
+
+        Document manifest = mainProject.getMergedManifest();
+        if (manifest == null) {
+            return registered;
+        }
+
+        String packageName = mainProject.getPackage();
+
+        String[] tags = {
+                SdkConstants.TAG_ACTIVITY,
+                SdkConstants.TAG_SERVICE,
+                SdkConstants.TAG_PROVIDER,
+                SdkConstants.TAG_RECEIVER
+        };
+
+        for (String tag : tags) {
+            NodeList elements = manifest.getElementsByTagName(tag);
+            for (int i = 0; i < elements.getLength(); i++) {
+                Element element = (Element) elements.item(i);
+                String name = element.getAttributeNS(
+                        SdkConstants.ANDROID_URI, SdkConstants.ATTR_NAME);
+                if (name == null || name.isEmpty()) {
+                    continue;
+                }
+                String fqn = resolveName(name, packageName);
+                if (fqn != null) {
+                    registered.put(fqn, tag);
+                }
+            }
+        }
+
+        return registered;
+    }
+
+    private String resolveName(String name, String packageName) {
+        if (name.startsWith(".")) {
+            if (packageName != null) {
+                return packageName + name;
+            }
+            return null;
+        } else if (name.contains(".")) {
+            return name;
+        } else {
+            if (packageName != null) {
+                return packageName + "." + name;
+            }
+            return null;
+        }
+    }
+}

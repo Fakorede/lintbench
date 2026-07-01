@@ -1,0 +1,264 @@
+package com.android.tools.lint.checks;
+
+import com.android.SdkConstants;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.ConstantEvaluator;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.JavaEvaluator;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.SourceCodeScanner;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+import com.intellij.psi.PsiClass;
+import com.intellij.psi.PsiMethod;
+import com.intellij.psi.PsiType;
+import com.intellij.psi.util.PsiUtil;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.uast.UCallExpression;
+import org.jetbrains.uast.UClass;
+import org.jetbrains.uast.UClassLiteralExpression;
+import org.jetbrains.uast.UExpression;
+import org.w3c.dom.Element;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class JobSchedulerDetector extends Detector implements SourceCodeScanner, XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "JobSchedulerService",
+            "JobSchedulerService problems",
+            "This check looks for common mistakes when using the JobScheduler API: " +
+                    "the service class must extend `android.app.job.JobService`, " +
+                    "the service must be registered in the manifest, and the " +
+                    "registration must require the permission " +
+                    "`android.permission.BIND_JOB_SERVICE`.",
+            Category.CORRECTNESS,
+            6,
+            Severity.ERROR,
+            new Implementation(
+                    JobSchedulerDetector.class,
+                    EnumSet.of(Scope.JAVA_FILE, Scope.MANIFEST)
+            )
+    );
+
+    private static final String CLASS_JOB_SERVICE = "android.app.job.JobService";
+    private static final String CLASS_JOB_INFO_BUILDER = "android.app.job.JobInfo.Builder";
+    private static final String CLASS_COMPONENT_NAME = "android.content.ComponentName";
+    private static final String BIND_JOB_SERVICE = "android.permission.BIND_JOB_SERVICE";
+
+    private final Map<String, Location> mJobServices = new HashMap<>();
+    private final Map<String, ManifestServiceInfo> mManifestServices = new HashMap<>();
+    private final List<BuilderInfo> mBuilders = new ArrayList<>();
+
+    @Override
+    public void beforeCheckEachProject(@NotNull Context context) {
+        mJobServices.clear();
+        mManifestServices.clear();
+        mBuilders.clear();
+    }
+
+    @Override
+    public void afterCheckEachProject(@NotNull Context context) {
+        JavaEvaluator evaluator = context.getEvaluator();
+
+        for (Map.Entry<String, Location> entry : mJobServices.entrySet()) {
+            String className = entry.getKey();
+            Location classLocation = entry.getValue();
+            ManifestServiceInfo info = mManifestServices.get(className);
+            if (info == null) {
+                context.report(
+                        ISSUE,
+                        classLocation,
+                        "JobService class must be registered in the manifest with "
+                                + "android:permission=\"" + BIND_JOB_SERVICE + "\""
+                );
+            } else if (!info.hasPermission) {
+                context.report(
+                        ISSUE,
+                        info.location,
+                        "Registered JobService must require the permission " + BIND_JOB_SERVICE
+                );
+            }
+        }
+
+        for (Map.Entry<String, ManifestServiceInfo> entry : mManifestServices.entrySet()) {
+            String className = entry.getKey();
+            ManifestServiceInfo info = entry.getValue();
+            if (info.hasPermission && !isJobService(evaluator, className)) {
+                context.report(
+                        ISSUE,
+                        info.location,
+                        "Service " + className + " is declared with " + BIND_JOB_SERVICE
+                                + " but does not extend " + CLASS_JOB_SERVICE
+                );
+            }
+        }
+
+        for (BuilderInfo builder : mBuilders) {
+            String className = builder.className;
+            boolean isJobService = isJobService(evaluator, className);
+            ManifestServiceInfo info = mManifestServices.get(className);
+            if (!isJobService) {
+                context.report(
+                        ISSUE,
+                        builder.location,
+                        "The job must be scheduled using a service that extends " + CLASS_JOB_SERVICE
+                );
+            } else if (info == null) {
+                context.report(
+                        ISSUE,
+                        builder.location,
+                        "The scheduled service " + className + " must be registered in the manifest with "
+                                + "android:permission=\"" + BIND_JOB_SERVICE + "\""
+                );
+            } else if (!info.hasPermission) {
+                context.report(
+                        ISSUE,
+                        builder.location,
+                        "The scheduled service " + className + " is registered but does not require the permission "
+                                + BIND_JOB_SERVICE
+                );
+            }
+        }
+    }
+
+    @Override
+    public List<String> applicableSuperClasses() {
+        return Collections.singletonList(CLASS_JOB_SERVICE);
+    }
+
+    @Override
+    public void visitClass(@NotNull JavaContext context, @NotNull UClass declaration) {
+        String qualifiedName = declaration.getQualifiedName();
+        if (qualifiedName != null) {
+            mJobServices.put(qualifiedName.replace('$', '.'), context.getLocation(declaration));
+        }
+    }
+
+    @Override
+    public List<String> getApplicableConstructorTypes() {
+        return Collections.singletonList(CLASS_JOB_INFO_BUILDER);
+    }
+
+    @Override
+    public void visitConstructor(@NotNull JavaContext context, @NotNull UCallExpression node,
+            @NotNull PsiMethod constructor) {
+        List<UExpression> args = node.getValueArguments();
+        if (args.size() < 2) {
+            return;
+        }
+        String className = getComponentClassName(context, args.get(1));
+        if (className != null) {
+            mBuilders.add(new BuilderInfo(className.replace('$', '.'), context.getLocation(node)));
+        }
+    }
+
+    @Override
+    public boolean appliesTo(@NotNull ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.MANIFEST;
+    }
+
+    @Override
+    public List<String> getApplicableElements() {
+        return Collections.singletonList("service");
+    }
+
+    @Override
+    public void visitElement(@NotNull XmlContext context, @NotNull Element element) {
+        String name = element.getAttributeNS(SdkConstants.ANDROID_URI, "name");
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+
+        String permission = element.getAttributeNS(SdkConstants.ANDROID_URI, "permission");
+        boolean hasPermission = BIND_JOB_SERVICE.equals(permission);
+
+        String packageName = context.getProject().getPackage();
+        String fqcn = getFqcn(name, packageName);
+
+        mManifestServices.put(fqcn, new ManifestServiceInfo(context.getLocation(element), hasPermission));
+    }
+
+    private static String getFqcn(String name, String packageName) {
+        if (name.startsWith(".")) {
+            return packageName != null ? packageName + name : name;
+        }
+        if (name.contains(".")) {
+            return name;
+        }
+        return packageName != null ? packageName + "." + name : name;
+    }
+
+    private String getComponentClassName(@NotNull JavaContext context, @NotNull UExpression expression) {
+        if (!(expression instanceof UCallExpression)) {
+            return null;
+        }
+        UCallExpression call = (UCallExpression) expression;
+        PsiMethod method = call.resolve();
+        if (method == null) {
+            return null;
+        }
+        PsiClass containingClass = method.getContainingClass();
+        if (containingClass == null || !CLASS_COMPONENT_NAME.equals(containingClass.getQualifiedName())) {
+            return null;
+        }
+        List<UExpression> args = call.getValueArguments();
+        if (args.size() < 2) {
+            return null;
+        }
+        UExpression second = args.get(1);
+        if (second instanceof UClassLiteralExpression) {
+            PsiType type = ((UClassLiteralExpression) second).getType();
+            PsiClass cls = PsiUtil.resolveClassInType(type);
+            if (cls != null) {
+                return cls.getQualifiedName();
+            }
+        } else {
+            Object value = ConstantEvaluator.evaluate(context, second);
+            if (value instanceof String) {
+                return getFqcn((String) value, context.getProject().getPackage());
+            }
+        }
+        return null;
+    }
+
+    private boolean isJobService(@NotNull JavaEvaluator evaluator, @NotNull String className) {
+        if (mJobServices.containsKey(className)) {
+            return true;
+        }
+        PsiClass cls = evaluator.findClass(className);
+        return cls != null && evaluator.extendsClass(cls, CLASS_JOB_SERVICE, false);
+    }
+
+    private static class ManifestServiceInfo {
+        final Location location;
+        final boolean hasPermission;
+
+        ManifestServiceInfo(Location location, boolean hasPermission) {
+            this.location = location;
+            this.hasPermission = hasPermission;
+        }
+    }
+
+    private static class BuilderInfo {
+        final String className;
+        final Location location;
+
+        BuilderInfo(String className, Location location) {
+            this.className = className;
+            this.location = location;
+        }
+    }
+}

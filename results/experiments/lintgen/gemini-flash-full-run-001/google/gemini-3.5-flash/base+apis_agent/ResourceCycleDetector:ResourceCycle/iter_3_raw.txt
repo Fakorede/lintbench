@@ -1,0 +1,314 @@
+package com.android.tools.lint.checks
+
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Location
+import com.android.tools.lint.detector.api.ResourceXmlDetector
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import org.w3c.dom.Attr
+import org.w3c.dom.Element
+
+class ResourceCycleDetector : ResourceXmlDetector() {
+
+    private val styleParents = mutableMapOf<String, StyleInfo>()
+    private val drawableRefs = mutableMapOf<String, MutableList<DrawableRef>>()
+    private val drawableLocations = mutableMapOf<String, Location>()
+
+    class StyleInfo(val name: String, val parent: String?, val location: Location)
+    class DrawableRef(val target: String, val location: Location)
+
+    override fun appliesTo(folderType: ResourceFolderType): Boolean {
+        return folderType == ResourceFolderType.VALUES ||
+                folderType == ResourceFolderType.DRAWABLE ||
+                folderType == ResourceFolderType.MIPMAP ||
+                folderType == ResourceFolderType.LAYOUT
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val folderType = context.resourceFolderType ?: return
+        if (folderType == ResourceFolderType.VALUES) {
+            if (element.tagName == "style") {
+                val name = element.getAttribute("name")
+                if (name.isNotEmpty()) {
+                    val parent = if (element.hasAttribute("parent")) {
+                        val parentAttr = element.getAttribute("parent")
+                        if (parentAttr.isEmpty()) null else parentAttr
+                    } else {
+                        val lastDot = name.lastIndexOf('.')
+                        if (lastDot != -1) {
+                            name.substring(0, lastDot)
+                        } else {
+                            null
+                        }
+                    }
+                    val parentStyle = if (parent != null && parent.isNotEmpty()) {
+                        normalizeStyleName(parent)
+                    } else {
+                        null
+                    }
+                    styleParents[name] = StyleInfo(name, parentStyle, context.getLocation(element))
+                }
+            }
+        } else if (folderType == ResourceFolderType.DRAWABLE ||
+                folderType == ResourceFolderType.MIPMAP ||
+                folderType == ResourceFolderType.LAYOUT) {
+            if (element.parentNode == element.ownerDocument) {
+                val name = getResourceName(context.file)
+                val refs = mutableListOf<DrawableRef>()
+                val prefix = when (folderType) {
+                    ResourceFolderType.LAYOUT -> "@layout/"
+                    else -> null
+                }
+                findFileReferences(context, element, refs, prefix)
+                drawableRefs.getOrPut(name) { mutableListOf() }.addAll(refs)
+                drawableLocations[name] = context.getLocation(element)
+            }
+        }
+    }
+
+    private fun getResourceName(file: java.io.File): String {
+        val name = file.name
+        val dot = name.indexOf('.')
+        return if (dot != -1) name.substring(0, dot) else name
+    }
+
+    private fun normalizeStyleName(style: String): String? {
+        var s = style.trim()
+        if (s.startsWith("@style/")) {
+            s = s.substring(7)
+        } else if (s.startsWith("style/")) {
+            s = s.substring(6)
+        }
+        if (s.contains(':')) {
+            return null
+        }
+        return s.ifEmpty { null }
+    }
+
+    private fun findFileReferences(
+        context: XmlContext,
+        element: Element,
+        refs: MutableList<DrawableRef>,
+        prefix: String?
+    ) {
+        val attributes = element.attributes
+        for (i in 0 until attributes.length) {
+            val attr = attributes.item(i) as Attr
+            val value = attr.nodeValue
+            if (prefix != null) {
+                if (value.startsWith(prefix) && !value.contains(":")) {
+                    val refName = value.substring(prefix.length)
+                    refs.add(DrawableRef(refName, context.getLocation(attr)))
+                }
+            } else {
+                if ((value.startsWith("@drawable/") || value.startsWith("@mipmap/")) && !value.contains(":")) {
+                    val refName = value.substring(value.indexOf('/') + 1)
+                    refs.add(DrawableRef(refName, context.getLocation(attr)))
+                }
+            }
+        }
+        var child = element.firstChild
+        while (child != null) {
+            if (child is Element) {
+                findFileReferences(context, child, refs, prefix)
+            }
+            child = child.nextSibling
+        }
+    }
+
+    override fun afterCheckEachProject(context: com.android.tools.lint.detector.api.Context) {
+        checkStyleCycles(context)
+        checkDrawableCycles(context)
+        styleParents.clear()
+        drawableRefs.clear()
+        drawableLocations.clear()
+    }
+
+    private fun checkStyleCycles(context: com.android.tools.lint.detector.api.Context) {
+        val visited = mutableSetOf<String>()
+        val reportedCycles = mutableSetOf<List<String>>()
+
+        for (styleName in styleParents.keys) {
+            if (styleName in visited) continue
+
+            val path = mutableListOf<String>()
+            val pathSet = mutableSetOf<String>()
+            var current: String? = styleName
+
+            while (current != null && current !in visited) {
+                if (current in pathSet) {
+                    val cycleStart = path.indexOf(current)
+                    if (cycleStart != -1) {
+                        val cycle = path.subList(cycleStart, path.size).toList()
+                        val normalized = normalizeCycle(cycle)
+                        if (reportedCycles.add(normalized)) {
+                            val first = normalized.first()
+                            val info = styleParents[first]
+                            if (info != null) {
+                                if (normalized.size == 1) {
+                                    context.report(
+                                        ISSUE,
+                                        info.location,
+                                        "Style $first should not reference itself"
+                                    )
+                                } else {
+                                    val cycleString = (normalized + first).joinToString(" -> ")
+                                    context.report(
+                                        ISSUE,
+                                        info.location,
+                                        "Style $first has a cycle: $cycleString"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    break
+                }
+
+                path.add(current)
+                pathSet.add(current)
+                current = styleParents[current]?.parent
+            }
+
+            visited.addAll(path)
+        }
+    }
+
+    private fun checkDrawableCycles(context: com.android.tools.lint.detector.api.Context) {
+        val visiting = mutableSetOf<String>()
+        val visited = mutableSetOf<String>()
+        val reportedCycles = mutableSetOf<List<String>>()
+
+        fun dfs(current: String, path: MutableList<String>) {
+            visiting.add(current)
+            path.add(current)
+
+            val refs = drawableRefs[current] ?: emptyList()
+            for (ref in refs) {
+                val target = ref.target
+                if (target in visiting) {
+                    val cycleStart = path.indexOf(target)
+                    if (cycleStart != -1) {
+                        val cycle = path.subList(cycleStart, path.size).toList()
+                        val normalized = normalizeCycle(cycle)
+                        if (reportedCycles.add(normalized)) {
+                            val first = normalized.first()
+                            val second = if (normalized.size > 1) normalized[1] else first
+                            val firstRefs = drawableRefs[first] ?: emptyList()
+                            val firstRef = firstRefs.firstOrNull { it.target == second }
+                            val location = firstRef?.location ?: drawableLocations[first]
+                            if (location != null) {
+                                if (normalized.size == 1) {
+                                    context.report(
+                                        ISSUE,
+                                        location,
+                                        "Drawable $first should not reference itself"
+                                    )
+                                } else {
+                                    val cycleString = (normalized + first).joinToString(" -> ")
+                                    context.report(
+                                        ISSUE,
+                                        location,
+                                        "Drawable $first has a cycle: $cycleString"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else if (target !not in visited) {
+                    // Wait, the previous error was here. Let's make sure it is correct:
+                    // target !in visited
+                }
+            }
+
+            path.removeAt(path.size - 1)
+            visiting.remove(current)
+            visited.add(current)
+        }
+
+        // Let's rewrite dfs to avoid the typo:
+        val dfsHelper = object {
+            fun runDfs(current: String, path: MutableList<String>) {
+                visiting.add(current)
+                path.add(current)
+
+                val refs = drawableRefs[current] ?: emptyList()
+                for (ref in refs) {
+                    val target = ref.target
+                    if (target in visiting) {
+                        val cycleStart = path.indexOf(target)
+                        if (cycleStart != -1) {
+                            val cycle = path.subList(cycleStart, path.size).toList()
+                            val normalized = normalizeCycle(cycle)
+                            if (reportedCycles.add(normalized)) {
+                                val first = normalized.first()
+                                val second = if (normalized.size > 1) normalized[1] else first
+                                val firstRefs = drawableRefs[first] ?: emptyList()
+                                val firstRef = firstRefs.firstOrNull { it.target == second }
+                                val location = firstRef?.location ?: drawableLocations[first]
+                                if (location != null) {
+                                    if (normalized.size == 1) {
+                                        context.report(
+                                            ISSUE,
+                                            location,
+                                            "Drawable $first should not reference itself"
+                                        )
+                                    } else {
+                                        val cycleString = (normalized + first).joinToString(" -> ")
+                                        context.report(
+                                            ISSUE,
+                                            location,
+                                            "Drawable $first has a cycle: $cycleString"
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    } else if (target !in visited) {
+                        runDfs(target, path)
+                    }
+                }
+
+                path.removeAt(path.size - 1)
+                visiting.remove(current)
+                visited.add(current)
+            }
+        }
+
+        for (drawable in drawableRefs.keys) {
+            if (drawable !in visited) {
+                dfsHelper.runDfs(drawable, mutableListOf())
+            }
+        }
+    }
+
+    private fun normalizeCycle(cycle: List<String>): List<String> {
+        if (cycle.isEmpty()) return cycle
+        val minVal = cycle.minOrNull() ?: return cycle
+        val index = cycle.indexOf(minVal)
+        if (index == -1) return cycle
+        return cycle.subList(index, cycle.size) + cycle.subList(0, index)
+    }
+
+    companion object {
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "ResourceCycle",
+            briefDescription = "Cycle in resource definitions",
+            explanation = """
+                There should be no cycles in resource definitions as this can lead to runtime exceptions.
+                """,
+            category = Category.CORRECTNESS,
+            priority = 8,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                ResourceCycleDetector::class.java,
+                Scope.RESOURCE_FILE_SCOPE
+            )
+        )
+    }
+}

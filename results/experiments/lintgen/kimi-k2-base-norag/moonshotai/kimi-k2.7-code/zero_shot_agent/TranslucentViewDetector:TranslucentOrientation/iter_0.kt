@@ -1,0 +1,196 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.ANDROID_URI
+import com.android.SdkConstants.ATTR_SCREEN_ORIENTATION
+import com.android.SdkConstants.ATTR_THEME
+import com.android.SdkConstants.TAG_ACTIVITY
+import com.android.SdkConstants.TAG_APPLICATION
+import com.android.ide.common.rendering.api.ResourceValue
+import com.android.ide.common.rendering.api.StyleResourceValue
+import com.android.ide.common.resources.ResourceRepository
+import com.android.resources.ResourceNamespace
+import com.android.resources.ResourceType
+import com.android.resources.ResourceUrl
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.ResourceXmlDetector
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import org.w3c.dom.Element
+import java.util.Locale
+
+class TranslucentViewDetector : ResourceXmlDetector() {
+
+    override fun getApplicableElements(): Collection<String> = listOf(TAG_ACTIVITY)
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        if (context.project.targetSdk < 26) {
+            return
+        }
+
+        val orientationAttr = element.getAttributeNodeNS(ANDROID_URI, ATTR_SCREEN_ORIENTATION)
+            ?: return
+        val orientation = orientationAttr.value ?: return
+        if (!isFixedOrientation(orientation)) {
+            return
+        }
+
+        val themeValue = element.getAttributeNS(ANDROID_URI, ATTR_THEME)
+            .ifEmpty { getApplicationTheme(element) }
+        if (themeValue.isEmpty()) {
+            return
+        }
+
+        if (isTranslucentTheme(context, themeValue)) {
+            context.report(
+                ISSUE,
+                orientationAttr,
+                context.getLocation(orientationAttr),
+                "Mixing screenOrientation and translucency is not supported when targetSdkVersion is O or greater"
+            )
+        }
+    }
+
+    private fun getApplicationTheme(activity: Element): String {
+        val document = activity.ownerDocument ?: return ""
+        val applications = document.getElementsByTagName(TAG_APPLICATION)
+        if (applications.length == 0) {
+            return ""
+        }
+        val application = applications.item(0) as? Element ?: return ""
+        return application.getAttributeNS(ANDROID_URI, ATTR_THEME)
+    }
+
+    private fun isFixedOrientation(orientation: String): Boolean {
+        return when (orientation.lowercase(Locale.US)) {
+            "portrait",
+            "landscape",
+            "reverseportrait",
+            "reverselandscape",
+            "sensorportrait",
+            "sensorlandscape",
+            "userportrait",
+            "userlandscape",
+            "locked" -> true
+            else -> false
+        }
+    }
+
+    private fun isTranslucentTheme(context: XmlContext, themeValue: String): Boolean {
+        val url = ResourceUrl.parse(themeValue) ?: return false
+        if (url.type != ResourceType.STYLE) {
+            return false
+        }
+
+        if (url.isFramework && url.name.contains("Translucent", ignoreCase = true)) {
+            return true
+        }
+
+        val repository = context.project.resourceRepository
+        if (repository == null) {
+            return url.name.contains("Translucent", ignoreCase = true)
+        }
+
+        val namespace = if (url.isFramework) ResourceNamespace.ANDROID else ResourceNamespace.RES_AUTO
+        val items = repository.getResources(namespace, ResourceType.STYLE, url.name)
+        if (items.isEmpty()) {
+            return url.name.contains("Translucent", ignoreCase = true)
+        }
+
+        return items.any { item ->
+            val style = item.value as? StyleResourceValue ?: return@any false
+            isTranslucentStyle(style, repository, item.namespace, mutableSetOf())
+        }
+    }
+
+    private fun isTranslucentStyle(
+        style: StyleResourceValue,
+        repository: ResourceRepository,
+        namespace: ResourceNamespace,
+        visited: MutableSet<String>
+    ): Boolean {
+        val key = "${namespace}:${style.name}"
+        if (!visited.add(key)) {
+            return false
+        }
+
+        val translucentItem = style.getItem("android:windowIsTranslucent")
+            ?: style.getItem("windowIsTranslucent")
+        if (translucentItem != null) {
+            val value = translucentItem.value?.trim()
+            if (value == "true") {
+                return true
+            }
+            if (value?.startsWith("@bool/") == true) {
+                return isBooleanTrue(repository, value)
+            }
+        }
+
+        val parent = style.parentStyle ?: return false
+        return resolveParentStyle(parent, repository, namespace, visited)
+    }
+
+    private fun resolveParentStyle(
+        parent: String,
+        repository: ResourceRepository,
+        childNamespace: ResourceNamespace,
+        visited: MutableSet<String>
+    ): Boolean {
+        val url = ResourceUrl.parse(parent)
+        val parentNamespace: ResourceNamespace
+        val parentName: String
+        if (url != null) {
+            if (url.type != ResourceType.STYLE) {
+                return false
+            }
+            parentNamespace = if (url.isFramework) ResourceNamespace.ANDROID else ResourceNamespace.RES_AUTO
+            parentName = url.name
+        } else if (parent.startsWith("android:")) {
+            parentNamespace = ResourceNamespace.ANDROID
+            parentName = parent.substringAfter("android:")
+        } else {
+            parentNamespace = childNamespace
+            parentName = parent
+        }
+
+        return repository.getResources(parentNamespace, ResourceType.STYLE, parentName)
+            .any { item ->
+                val style = item.value as? StyleResourceValue ?: return@any false
+                isTranslucentStyle(style, repository, item.namespace, visited)
+            }
+    }
+
+    private fun isBooleanTrue(repository: ResourceRepository, value: String): Boolean {
+        val url = ResourceUrl.parse(value) ?: return false
+        if (url.type != ResourceType.BOOL) {
+            return false
+        }
+        val namespace = if (url.isFramework) ResourceNamespace.ANDROID else ResourceNamespace.RES_AUTO
+        return repository.getResources(namespace, ResourceType.BOOL, url.name)
+            .any { it.value?.value?.trim() == "true" }
+    }
+
+    companion object {
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "TranslucentOrientation",
+            briefDescription = "Mixing screenOrientation and translucency",
+            explanation = """
+                Specifying a fixed screen orientation with a translucent theme is not supported
+                on apps with `targetSdkVersion` O (API 26) or greater. When an activity behind
+                your translucent activity requests a different orientation, the system can only
+                honor one request and prefers the non-translucent activity. On Android O and
+                higher, this state causes an exception.
+            """.trimIndent(),
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                TranslucentViewDetector::class.java,
+                Scope.MANIFEST_SCOPE
+            )
+        )
+    }
+}

@@ -1,0 +1,21 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.JavaContext
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.SourceCodeScanner
+import com.intellij.psi.PsiClassType
+import com.intellij.psi.PsiMethod
+import com.intellij.psi.util.PsiTreeUtil
+import org.jetbrains.uast.UBinaryExpression
+import org.jetbrains.uast.UBinaryExpressionWithType
+import org.jetbrains.uast.UCallExpression
+import org.jetbrains.uast.UParenthesizedExpression
+import org.jetbrains.uast.UReturnExpression
+import org.jetbrains.uast.UVariable
+import org.jetbrains.uast.UastBinaryExpressionWithTypeKind
+import org.jetbrains.uast.UastBinaryOperator

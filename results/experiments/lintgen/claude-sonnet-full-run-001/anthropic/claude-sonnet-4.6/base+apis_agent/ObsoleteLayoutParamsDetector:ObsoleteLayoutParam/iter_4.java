@@ -1,0 +1,447 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
+import static com.android.SdkConstants.ANDROID_URI;
+import static com.android.SdkConstants.ATTR_LAYOUT_ABOVE;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_BASELINE;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_BOTTOM;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_END;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_LEFT;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_PARENT_BOTTOM;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_PARENT_END;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_PARENT_LEFT;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_PARENT_RIGHT;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_PARENT_START;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_PARENT_TOP;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_RIGHT;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_START;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_TOP;
+import static com.android.SdkConstants.ATTR_LAYOUT_ALIGN_WITH_PARENT_MISSING;
+import static com.android.SdkConstants.ATTR_LAYOUT_BELOW;
+import static com.android.SdkConstants.ATTR_LAYOUT_CENTER_HORIZONTAL;
+import static com.android.SdkConstants.ATTR_LAYOUT_CENTER_IN_PARENT;
+import static com.android.SdkConstants.ATTR_LAYOUT_CENTER_VERTICAL;
+import static com.android.SdkConstants.ATTR_LAYOUT_COLUMN;
+import static com.android.SdkConstants.ATTR_LAYOUT_COLUMN_SPAN;
+import static com.android.SdkConstants.ATTR_LAYOUT_GRAVITY;
+import static com.android.SdkConstants.ATTR_LAYOUT_HEIGHT;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_BOTTOM;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_END;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_LEFT;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_RIGHT;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_START;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_TOP;
+import static com.android.SdkConstants.ATTR_LAYOUT_ROW;
+import static com.android.SdkConstants.ATTR_LAYOUT_ROW_SPAN;
+import static com.android.SdkConstants.ATTR_LAYOUT_SPAN;
+import static com.android.SdkConstants.ATTR_LAYOUT_TO_END_OF;
+import static com.android.SdkConstants.ATTR_LAYOUT_TO_LEFT_OF;
+import static com.android.SdkConstants.ATTR_LAYOUT_TO_RIGHT_OF;
+import static com.android.SdkConstants.ATTR_LAYOUT_TO_START_OF;
+import static com.android.SdkConstants.ATTR_LAYOUT_WEIGHT;
+import static com.android.SdkConstants.ATTR_LAYOUT_WIDTH;
+import static com.android.SdkConstants.ATTR_LAYOUT_X;
+import static com.android.SdkConstants.ATTR_LAYOUT_Y;
+import static com.android.SdkConstants.GRID_LAYOUT;
+import static com.android.SdkConstants.LINEAR_LAYOUT;
+import static com.android.SdkConstants.RELATIVE_LAYOUT;
+import static com.android.SdkConstants.TABLE_ROW;
+import static com.android.SdkConstants.VIEW_MERGE;
+
+public class ObsoleteLayoutParamsDetector extends Detector implements Detector.XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "ObsoleteLayoutParam",
+            "Obsolete layout params",
+            "The given layout_param is not defined for the given layout, meaning it has no " +
+            "effect. This usually happens when you change the parent layout or move view " +
+            "code around without updating the layout params. This will cause useless " +
+            "attribute processing at runtime, and is misleading for others reading the " +
+            "layout so the parameter should be removed.",
+            Category.PERFORMANCE,
+            6,
+            Severity.WARNING,
+            new Implementation(
+                    ObsoleteLayoutParamsDetector.class,
+                    Scope.RESOURCE_FILE_SCOPE));
+
+    private static final Set<String> COMMON_PARAMS = new HashSet<>(Arrays.asList(
+            ATTR_LAYOUT_WIDTH,
+            ATTR_LAYOUT_HEIGHT
+    ));
+
+    private static final Set<String> MARGIN_PARAMS = new HashSet<>(Arrays.asList(
+            ATTR_LAYOUT_MARGIN,
+            ATTR_LAYOUT_MARGIN_LEFT,
+            ATTR_LAYOUT_MARGIN_RIGHT,
+            ATTR_LAYOUT_MARGIN_TOP,
+            ATTR_LAYOUT_MARGIN_BOTTOM,
+            ATTR_LAYOUT_MARGIN_START,
+            ATTR_LAYOUT_MARGIN_END
+    ));
+
+    // All layout params that are specific to particular layouts (not universal)
+    private static final Set<String> ALL_SPECIFIC_PARAMS = new HashSet<>();
+    private static final Map<String, Set<String>> LAYOUT_TO_VALID_PARAMS = new HashMap<>();
+    // Map from simple name to full set entry for lookup
+    private static final Map<String, String> SIMPLE_TO_FULL = new HashMap<>();
+
+    static {
+        Set<String> linearLayoutSpecific = new HashSet<>(Arrays.asList(
+                ATTR_LAYOUT_WEIGHT,
+                ATTR_LAYOUT_GRAVITY
+        ));
+
+        Set<String> relativeLayoutSpecific = new HashSet<>(Arrays.asList(
+                ATTR_LAYOUT_ABOVE,
+                ATTR_LAYOUT_BELOW,
+                ATTR_LAYOUT_TO_LEFT_OF,
+                ATTR_LAYOUT_TO_RIGHT_OF,
+                ATTR_LAYOUT_TO_START_OF,
+                ATTR_LAYOUT_TO_END_OF,
+                ATTR_LAYOUT_ALIGN_TOP,
+                ATTR_LAYOUT_ALIGN_BOTTOM,
+                ATTR_LAYOUT_ALIGN_LEFT,
+                ATTR_LAYOUT_ALIGN_RIGHT,
+                ATTR_LAYOUT_ALIGN_START,
+                ATTR_LAYOUT_ALIGN_END,
+                ATTR_LAYOUT_ALIGN_BASELINE,
+                ATTR_LAYOUT_ALIGN_PARENT_TOP,
+                ATTR_LAYOUT_ALIGN_PARENT_BOTTOM,
+                ATTR_LAYOUT_ALIGN_PARENT_LEFT,
+                ATTR_LAYOUT_ALIGN_PARENT_RIGHT,
+                ATTR_LAYOUT_ALIGN_PARENT_START,
+                ATTR_LAYOUT_ALIGN_PARENT_END,
+                ATTR_LAYOUT_CENTER_IN_PARENT,
+                ATTR_LAYOUT_CENTER_HORIZONTAL,
+                ATTR_LAYOUT_CENTER_VERTICAL,
+                ATTR_LAYOUT_ALIGN_WITH_PARENT_MISSING
+        ));
+
+        Set<String> tableRowSpecific = new HashSet<>(Arrays.asList(
+                ATTR_LAYOUT_COLUMN,
+                ATTR_LAYOUT_SPAN,
+                ATTR_LAYOUT_GRAVITY
+        ));
+
+        Set<String> gridLayoutSpecific = new HashSet<>(Arrays.asList(
+                ATTR_LAYOUT_ROW,
+                ATTR_LAYOUT_ROW_SPAN,
+                ATTR_LAYOUT_COLUMN,
+                ATTR_LAYOUT_COLUMN_SPAN,
+                ATTR_LAYOUT_GRAVITY
+        ));
+
+        Set<String> absoluteLayoutSpecific = new HashSet<>(Arrays.asList(
+                ATTR_LAYOUT_X,
+                ATTR_LAYOUT_Y
+        ));
+
+        Set<String> frameLayoutSpecific = new HashSet<>(Arrays.asList(
+                ATTR_LAYOUT_GRAVITY
+        ));
+
+        ALL_SPECIFIC_PARAMS.addAll(linearLayoutSpecific);
+        ALL_SPECIFIC_PARAMS.addAll(relativeLayoutSpecific);
+        ALL_SPECIFIC_PARAMS.addAll(tableRowSpecific);
+        ALL_SPECIFIC_PARAMS.addAll(gridLayoutSpecific);
+        ALL_SPECIFIC_PARAMS.addAll(absoluteLayoutSpecific);
+        ALL_SPECIFIC_PARAMS.addAll(frameLayoutSpecific);
+        ALL_SPECIFIC_PARAMS.addAll(MARGIN_PARAMS);
+
+        // LinearLayout
+        Set<String> linearValid = new HashSet<>();
+        linearValid.addAll(COMMON_PARAMS);
+        linearValid.addAll(MARGIN_PARAMS);
+        linearValid.addAll(linearLayoutSpecific);
+        registerLayout(linearValid,
+                LINEAR_LAYOUT,
+                "android.widget.LinearLayout",
+                "RadioGroup",
+                "android.widget.RadioGroup");
+
+        // RelativeLayout
+        Set<String> relativeValid = new HashSet<>();
+        relativeValid.addAll(COMMON_PARAMS);
+        relativeValid.addAll(MARGIN_PARAMS);
+        relativeValid.addAll(relativeLayoutSpecific);
+        registerLayout(relativeValid,
+                RELATIVE_LAYOUT,
+                "android.widget.RelativeLayout");
+
+        // TableRow
+        Set<String> tableRowValid = new HashSet<>();
+        tableRowValid.addAll(COMMON_PARAMS);
+        tableRowValid.addAll(MARGIN_PARAMS);
+        tableRowValid.addAll(tableRowSpecific);
+        registerLayout(tableRowValid,
+                TABLE_ROW,
+                "android.widget.TableRow");
+
+        // TableLayout
+        Set<String> tableLayoutValid = new HashSet<>();
+        tableLayoutValid.addAll(COMMON_PARAMS);
+        tableLayoutValid.addAll(MARGIN_PARAMS);
+        tableLayoutValid.addAll(linearLayoutSpecific);
+        registerLayout(tableLayoutValid,
+                "TableLayout",
+                "android.widget.TableLayout");
+
+        // GridLayout
+        Set<String> gridValid = new HashSet<>();
+        gridValid.addAll(COMMON_PARAMS);
+        gridValid.addAll(MARGIN_PARAMS);
+        gridValid.addAll(gridLayoutSpecific);
+        registerLayout(gridValid,
+                GRID_LAYOUT,
+                "android.widget.GridLayout",
+                "androidx.gridlayout.widget.GridLayout",
+                "android.support.v7.widget.GridLayout");
+
+        // AbsoluteLayout
+        Set<String> absoluteValid = new HashSet<>();
+        absoluteValid.addAll(COMMON_PARAMS);
+        absoluteValid.addAll(absoluteLayoutSpecific);
+        registerLayout(absoluteValid,
+                "AbsoluteLayout",
+                "android.widget.AbsoluteLayout");
+
+        // FrameLayout and subclasses
+        Set<String> frameValid = new HashSet<>();
+        frameValid.addAll(COMMON_PARAMS);
+        frameValid.addAll(MARGIN_PARAMS);
+        frameValid.addAll(frameLayoutSpecific);
+        registerLayout(frameValid,
+                "FrameLayout",
+                "android.widget.FrameLayout",
+                "ScrollView",
+                "android.widget.ScrollView",
+                "HorizontalScrollView",
+                "android.widget.HorizontalScrollView",
+                "ViewAnimator",
+                "android.widget.ViewAnimator",
+                "ViewFlipper",
+                "android.widget.ViewFlipper",
+                "ViewSwitcher",
+                "android.widget.ViewSwitcher",
+                "ImageSwitcher",
+                "android.widget.ImageSwitcher",
+                "TextSwitcher",
+                "android.widget.TextSwitcher");
+
+        // ConstraintLayout
+        Set<String> constraintValid = new HashSet<>();
+        constraintValid.addAll(COMMON_PARAMS);
+        constraintValid.addAll(MARGIN_PARAMS);
+        constraintValid.add(ATTR_LAYOUT_GRAVITY);
+        constraintValid.add("layout_constraintLeft_toLeftOf");
+        constraintValid.add("layout_constraintLeft_toRightOf");
+        constraintValid.add("layout_constraintRight_toLeftOf");
+        constraintValid.add("layout_constraintRight_toRightOf");
+        constraintValid.add("layout_constraintTop_toTopOf");
+        constraintValid.add("layout_constraintTop_toBottomOf");
+        constraintValid.add("layout_constraintBottom_toTopOf");
+        constraintValid.add("layout_constraintBottom_toBottomOf");
+        constraintValid.add("layout_constraintStart_toStartOf");
+        constraintValid.add("layout_constraintStart_toEndOf");
+        constraintValid.add("layout_constraintEnd_toStartOf");
+        constraintValid.add("layout_constraintEnd_toEndOf");
+        constraintValid.add("layout_constraintBaseline_toBaselineOf");
+        constraintValid.add("layout_constraintDimensionRatio");
+        constraintValid.add("layout_constraintHorizontal_bias");
+        constraintValid.add("layout_constraintVertical_bias");
+        constraintValid.add("layout_constraintHorizontal_chainStyle");
+        constraintValid.add("layout_constraintVertical_chainStyle");
+        constraintValid.add("layout_constraintHorizontal_weight");
+        constraintValid.add("layout_constraintVertical_weight");
+        constraintValid.add("layout_constraintWidth_default");
+        constraintValid.add("layout_constraintHeight_default");
+        constraintValid.add("layout_constraintWidth_min");
+        constraintValid.add("layout_constraintWidth_max");
+        constraintValid.add("layout_constraintHeight_min");
+        constraintValid.add("layout_constraintHeight_max");
+        constraintValid.add("layout_constraintWidth_percent");
+        constraintValid.add("layout_constraintHeight_percent");
+        constraintValid.add("layout_editor_absoluteX");
+        constraintValid.add("layout_editor_absoluteY");
+        constraintValid.add("layout_constraintGuide_begin");
+        constraintValid.add("layout_constraintGuide_end");
+        constraintValid.add("layout_constraintGuide_percent");
+        constraintValid.add("layout_constraintCircle");
+        constraintValid.add("layout_constraintCircleRadius");
+        constraintValid.add("layout_constraintCircleAngle");
+        constraintValid.add("layout_goneMarginLeft");
+        constraintValid.add("layout_goneMarginTop");
+        constraintValid.add("layout_goneMarginRight");
+        constraintValid.add("layout_goneMarginBottom");
+        constraintValid.add("layout_goneMarginStart");
+        constraintValid.add("layout_goneMarginEnd");
+        registerLayout(constraintValid,
+                "android.support.constraint.ConstraintLayout",
+                "androidx.constraintlayout.widget.ConstraintLayout",
+                "ConstraintLayout");
+
+        // CoordinatorLayout
+        Set<String> coordinatorValid = new HashSet<>();
+        coordinatorValid.addAll(COMMON_PARAMS);
+        coordinatorValid.addAll(MARGIN_PARAMS);
+        coordinatorValid.add(ATTR_LAYOUT_GRAVITY);
+        coordinatorValid.add("layout_anchor");
+        coordinatorValid.add("layout_anchorGravity");
+        coordinatorValid.add("layout_behavior");
+        coordinatorValid.add("layout_dodgeInsetEdges");
+        coordinatorValid.add("layout_insetEdge");
+        coordinatorValid.add("layout_keyline");
+        registerLayout(coordinatorValid,
+                "android.support.design.widget.CoordinatorLayout",
+                "androidx.coordinatorlayout.widget.CoordinatorLayout",
+                "CoordinatorLayout");
+    }
+
+    private static void registerLayout(Set<String> validParams, String... layoutNames) {
+        for (String name : layoutNames) {
+            LAYOUT_TO_VALID_PARAMS.put(name, validParams);
+            // Also register simple name if it's a fully qualified name
+            int dot = name.lastIndexOf('.');
+            if (dot >= 0) {
+                String simpleName = name.substring(dot + 1);
+                if (!LAYOUT_TO_VALID_PARAMS.containsKey(simpleName)) {
+                    LAYOUT_TO_VALID_PARAMS.put(simpleName, validParams);
+                }
+            }
+        }
+    }
+
+    public ObsoleteLayoutParamsDetector() {
+    }
+
+    @Override
+    public boolean appliesTo(@NonNull ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.LAYOUT;
+    }
+
+    @Override
+    @Nullable
+    public Collection<String> getApplicableElements() {
+        return null;
+    }
+
+    @Override
+    @Nullable
+    public Collection<String> getApplicableAttributes() {
+        return null;
+    }
+
+    @Override
+    public void visitDocument(@NonNull XmlContext context, @NonNull Document document) {
+        Element root = document.getDocumentElement();
+        if (root != null) {
+            checkElement(context, root);
+        }
+    }
+
+    private void checkElement(@NonNull XmlContext context, @NonNull Element element) {
+        Node parentNode = element.getParentNode();
+        if (parentNode != null && parentNode.getNodeType() == Node.ELEMENT_NODE) {
+            Element parent = (Element) parentNode;
+            String parentTag = parent.getTagName();
+
+            if (!VIEW_MERGE.equals(parentTag)) {
+                checkLayoutParams(context, element, parentTag);
+            }
+        }
+
+        Node child = element.getFirstChild();
+        while (child != null) {
+            if (child.getNodeType() == Node.ELEMENT_NODE) {
+                checkElement(context, (Element) child);
+            }
+            child = child.getNextSibling();
+        }
+    }
+
+    private void checkLayoutParams(@NonNull XmlContext context, @NonNull Element element,
+            @NonNull String parentTag) {
+        Set<String> validParams = getValidParams(parentTag);
+
+        if (validParams == null) {
+            // Unknown parent layout - still check for obviously wrong params
+            // by checking if the attribute is specific to a known layout type
+            checkUnknownParent(context, element, parentTag);
+            return;
+        }
+
+        NamedNodeMap attributes = element.getAttributes();
+        for (int i = 0; i < attributes.getLength(); i++) {
+            Attr attr = (Attr) attributes.item(i);
+            String namespaceURI = attr.getNamespaceURI();
+
+            if (!ANDROID_URI.equals(namespaceURI)) {
+                continue;
+            }
+
+            String name = attr.getLocalName();
+
+            if (!name.startsWith("layout_")) {
+                continue;
+            }
+
+            if (validParams.contains(name)) {
+                continue;
+            }
+
+            // Only report if this is a known layout-specific param
+            if (ALL_SPECIFIC_PARAMS.contains(name)) {
+                context.report(ISSUE, attr, context.getLocation(attr),
+                        String.format(
+                                "Invalid layout param '%1$s' (not defined by parent layout '%2$s')",
+                                name, parentTag));
+            }
+        }
+    }
+
+    private void checkUnknownParent(@NonNull XmlContext context, @NonNull Element element,
+            @NonNull String parentTag) {
+        // For unknown parents, we don't report anything since we can't be sure
+        // what params are valid
+    }
+
+    @Nullable
+    private Set<String> getValidParams(@NonNull String parentTag) {
+        Set<String> params = LAYOUT_TO_VALID_PARAMS.get(parentTag);
+        if (params != null) {
+            return params;
+        }
+        // Try simple name if fully qualified
+        int dot = parentTag.lastIndexOf('.');
+        if (dot >= 0) {
+            String simpleName = parentTag.substring(dot + 1);
+            return LAYOUT_TO_VALID_PARAMS.get(simpleName);
+        }
+        return null;
+    }
+}

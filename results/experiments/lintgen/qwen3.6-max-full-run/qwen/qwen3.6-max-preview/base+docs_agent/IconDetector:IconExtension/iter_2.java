@@ -1,0 +1,102 @@
+package com.android.tools.lint.checks;
+
+import com.android.tools.lint.detector.api.BinaryResourceScanner;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceContext;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+
+import org.jetbrains.annotations.NotNull;
+
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.util.EnumSet;
+import java.util.Locale;
+
+public class IconDetector extends Detector implements BinaryResourceScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "IconExtension",
+            "Icon format does not match the file extension",
+            "Ensures that icons have the correct file extension (e.g. a `.png` file is really in the PNG format and not for example a GIF file named `.png`).",
+            Category.CORRECTNESS,
+            5,
+            Severity.WARNING,
+            new Implementation(IconDetector.class, EnumSet.of(Scope.RESOURCE_FILE_SCOPE))
+    );
+
+    @Override
+    public void checkBinaryResource(@NotNull ResourceContext context) {
+        File file = context.file;
+        if (file == null) {
+            return;
+        }
+
+        String name = file.getName();
+        int dot = name.lastIndexOf('.');
+        if (dot == -1 || dot == name.length() - 1) {
+            return;
+        }
+
+        String ext = name.substring(dot + 1).toLowerCase(Locale.US);
+        if (!ext.equals("png") && !ext.equals("jpg") && !ext.equals("jpeg") &&
+            !ext.equals("gif") && !ext.equals("webp") && !ext.equals("bmp")) {
+            return;
+        }
+
+        byte[] header = new byte[12];
+        int read;
+        try (FileInputStream fis = new FileInputStream(file)) {
+            read = fis.read(header);
+        } catch (IOException e) {
+            return;
+        }
+
+        if (read < 4) {
+            return;
+        }
+
+        String actualFormat = null;
+
+        // PNG: 89 50 4E 47
+        if (header[0] == (byte) 0x89 && header[1] == 0x50 && header[2] == 0x4E && header[3] == 0x47) {
+            actualFormat = "png";
+        }
+        // JPEG: FF D8 FF
+        else if (header[0] == (byte) 0xFF && header[1] == (byte) 0xD8 && header[2] == (byte) 0xFF) {
+            actualFormat = "jpg";
+        }
+        // GIF: 47 49 46 38
+        else if (header[0] == 0x47 && header[1] == 0x49 && header[2] == 0x46 && header[3] == 0x38) {
+            actualFormat = "gif";
+        }
+        // WebP: RIFF....WEBP
+        else if (read >= 12 && header[0] == 0x52 && header[1] == 0x49 && header[2] == 0x46 && header[3] == 0x46 &&
+                 header[8] == 0x57 && header[9] == 0x45 && header[10] == 0x42 && header[11] == 0x50) {
+            actualFormat = "webp";
+        }
+        // BMP: 42 4D
+        else if (header[0] == 0x42 && header[1] == 0x4D) {
+            actualFormat = "bmp";
+        }
+
+        if (actualFormat != null) {
+            boolean match = actualFormat.equals(ext) ||
+                    (actualFormat.equals("jpg") && (ext.equals("jpeg") || ext.equals("jpg")));
+
+            if (!match) {
+                String message = String.format(
+                        "The file name suggests this is a %s file, but the file contents indicate it is actually a %s file",
+                        ext.toUpperCase(Locale.US),
+                        actualFormat.toUpperCase(Locale.US)
+                );
+                context.report(ISSUE, Location.create(file), message);
+            }
+        }
+    }
+}

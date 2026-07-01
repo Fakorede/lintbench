@@ -1,0 +1,66 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Detector.GradleScanner
+import com.android.tools.lint.detector.api.GradleContext
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Location
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import java.util.EnumSet
+
+class AppBundleLocaleChangesDetector : Detector(), GradleScanner {
+
+    private var isApplication = false
+    private var hasPlayCore = false
+    private var languageSplitDisabled = false
+
+    override fun getApplicableFiles(): EnumSet<Scope> = Scope.GRADLE_SCOPE
+
+    override fun beforeCheckFile(context: Context) {
+        isApplication = false
+        hasPlayCore = false
+        languageSplitDisabled = false
+    }
+
+    override fun checkMethodCall(
+        context: GradleContext,
+        statement: String,
+        parent: String?,
+        parentParent: String?,
+        namedArguments: Map<String, String>,
+        unnamedArguments: List<String>,
+        cookie: Any
+    ) {
+        when {
+            statement == "apply" && namedArguments["plugin"]?.trimQuotes() == "com.android.application" -> {
+                isApplication = true
+            }
+            statement == "id" && parent == "plugins" && unnamedArguments.any { it.trimQuotes() == "com.android.application" } -> {
+                isApplication = true
+            }
+            parent == "dependencies" && unnamedArguments.any { PLAY_CORE_REGEX.containsMatchIn(it) } -> {
+                hasPlayCore = true
+            }
+            statement == "enableSplit"
+                && parent == "language"
+                && parentParent == "bundle"
+                && unnamedArguments.any { it == "false" } -> {
+                languageSplitDisabled = true
+            }
+        }
+    }
+
+    override fun checkDslPropertyAssignment(
+        context: GradleContext,
+        property: String,
+        value: String,
+        parent: String,
+        parentParent: String?,
+        propertyCookie: Any,
+        valueCookie: Any,
+        statementCookie: Any
+    ) {

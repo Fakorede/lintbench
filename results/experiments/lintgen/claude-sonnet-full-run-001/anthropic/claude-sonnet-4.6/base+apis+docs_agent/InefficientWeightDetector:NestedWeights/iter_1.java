@@ -1,0 +1,115 @@
+package com.android.tools.lint.checks;
+
+import com.android.tools.lint.detector.api.*;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.util.Arrays;
+import java.util.Collection;
+
+public class InefficientWeightDetector extends Detector implements XmlScanner {
+
+    public static final Issue NESTED_WEIGHTS = Issue.create(
+            "NestedWeights",
+            "Nested layout weights",
+            "Layout weights require a widget to be measured twice. When a `LinearLayout` with " +
+            "non-zero weights is nested inside another `LinearLayout` with non-zero weights, " +
+            "then the number of measurements increase exponentially.",
+            Category.PERFORMANCE,
+            3,
+            Severity.WARNING,
+            new Implementation(
+                    InefficientWeightDetector.class,
+                    Scope.RESOURCE_FILE_SCOPE
+            )
+    );
+
+    private static final String LINEAR_LAYOUT = "LinearLayout";
+    private static final String ATTR_LAYOUT_WEIGHT = "layout_weight";
+    private static final String ANDROID_NS = "http://schemas.android.com/apk/res/android";
+
+    public InefficientWeightDetector() {
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Arrays.asList(LINEAR_LAYOUT);
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        // Check if this LinearLayout has any direct children with non-zero layout_weight
+        if (!hasWeightedChildren(element)) {
+            return;
+        }
+
+        // Check if this LinearLayout itself has a non-zero layout_weight
+        // (meaning it's a weighted child of some parent)
+        if (!hasNonZeroWeight(element)) {
+            return;
+        }
+
+        // Walk up to find if there's an ancestor LinearLayout that also has weighted children
+        Node parent = element.getParentNode();
+        while (parent != null && parent.getNodeType() == Node.ELEMENT_NODE) {
+            Element parentElement = (Element) parent;
+            String tagName = parentElement.getLocalName();
+            if (tagName == null) {
+                tagName = parentElement.getTagName();
+            }
+            if (LINEAR_LAYOUT.equals(tagName)) {
+                if (hasWeightedChildren(parentElement)) {
+                    // Found nested weights - report on the layout_weight attribute of this element
+                    org.w3c.dom.Attr weightAttr = element.getAttributeNodeNS(ANDROID_NS, ATTR_LAYOUT_WEIGHT);
+                    if (weightAttr != null) {
+                        context.report(
+                                NESTED_WEIGHTS,
+                                weightAttr,
+                                context.getLocation(weightAttr),
+                                "Nested weights are bad for performance"
+                        );
+                    } else {
+                        context.report(
+                                NESTED_WEIGHTS,
+                                element,
+                                context.getLocation(element),
+                                "Nested weights are bad for performance"
+                        );
+                    }
+                    return;
+                }
+                // If parent LinearLayout doesn't have weighted children, stop searching
+                break;
+            }
+            parent = parent.getParentNode();
+        }
+    }
+
+    private boolean hasWeightedChildren(Element element) {
+        NodeList children = element.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() == Node.ELEMENT_NODE) {
+                Element childElement = (Element) child;
+                if (hasNonZeroWeight(childElement)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean hasNonZeroWeight(Element element) {
+        String weight = element.getAttributeNS(ANDROID_NS, ATTR_LAYOUT_WEIGHT);
+        if (weight == null || weight.isEmpty()) {
+            return false;
+        }
+        try {
+            float value = Float.parseFloat(weight);
+            return value != 0f;
+        } catch (NumberFormatException e) {
+            return true;
+        }
+    }
+}

@@ -87,6 +87,16 @@ lintgen/                    RAG-augmented generation (uv workspace member)
     eval/                     Thin wrapper over lintbench eval harness
   tests/
 
+data/                       Benchmark dataset, annotations, and prompt templates
+  dataset.jsonl               148 final benchmark instances
+  dataset_verified.jsonl      113 human-validated instances (see annotation-criteria.md)
+  annotation-criteria.md      Criteria for the verified subset (spec-barrier / sibling-burden)
+  prompts/                    Prompt templates (.txt) for every inference and agent setting
+
+results/experiments/        Model-generated artifacts for the 113 verified instances
+  lintbench-baselines/        Single-shot inference outputs + eval results (4 models)
+  lintgen/                    RAG (full-run) and no-RAG (base-norag) agent runs (4 models)
+
 android-custom-lint-rules/  Android Lint API source (Tier 2 index source)
 pyproject.toml              uv workspace root (lintbench + lintgen members)
 smoke_test.sh               End-to-end smoke test (no API keys or Docker required)

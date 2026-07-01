@@ -1,0 +1,146 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import org.w3c.dom.Element
+
+class WearableConfigurationActionDetector : Detector(), XmlScanner {
+
+    override fun getApplicableElements(): List<String> =
+        listOf(SdkConstants.TAG_SERVICE)
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        if (element.tagName != SdkConstants.TAG_SERVICE) {
+            return
+        }
+
+        val metaData = element.findMetaData(METADATA_NAME) ?: return
+        val value = metaData.getAttributeNS(SdkConstants.ANDROID_URI, SdkConstants.ATTR_VALUE)
+        if (value != WATCH_FACE_EDITOR_ACTION && value != WATCH_FACE_EDITOR_SHORT) {
+            return
+        }
+
+        val manifest = context.document.documentElement ?: return
+        val application = manifest.getElementsByTagName(SdkConstants.TAG_APPLICATION).item(0) as? Element
+            ?: return
+
+        val editorActions = setOf(WATCH_FACE_EDITOR_ACTION, WATCH_FACE_EDITOR_SHORT)
+        val matchingFilters = mutableListOf<Element>()
+        collectEditorIntentFilters(application, SdkConstants.TAG_ACTIVITY, editorActions, matchingFilters)
+        collectEditorIntentFilters(application, SdkConstants.TAG_ACTIVITY_ALIAS, editorActions, matchingFilters)
+
+        if (matchingFilters.isEmpty()) {
+            context.report(
+                ISSUE,
+                metaData,
+                context.getLocation(metaData),
+                "Wearable configuration action `$value` must be handled by an activity in the same package."
+            )
+            return
+        }
+
+        if (context.project.minSdk < 30) {
+            for (intentFilter in matchingFilters) {
+                if (!intentFilter.hasCategory(WEARABLE_CONFIGURATION_CATEGORY)) {
+                    context.report(
+                        ISSUE,
+                        intentFilter,
+                        context.getLocation(intentFilter),
+                        "Intent filter handling `$value` must include `<category android:name=\"$WEARABLE_CONFIGURATION_CATEGORY\" />` because `minSdkVersion` is less than 30."
+                    )
+                }
+            }
+        }
+    }
+
+    private fun collectEditorIntentFilters(
+        application: Element,
+        tagName: String,
+        editorActions: Set<String>,
+        result: MutableList<Element>
+    ) {
+        val elements = application.getElementsByTagName(tagName)
+        for (i in 0 until elements.length) {
+            val component = elements.item(i) as? Element ?: continue
+            val intentFilters = component.getElementsByTagName(SdkConstants.TAG_INTENT_FILTER)
+            for (j in 0 until intentFilters.length) {
+                val intentFilter = intentFilters.item(j) as? Element ?: continue
+                if (intentFilter.hasAnyAction(editorActions)) {
+                    result.add(intentFilter)
+                }
+            }
+        }
+    }
+
+    private fun Element.findMetaData(name: String): Element? {
+        val metaDataElements = getElementsByTagName(SdkConstants.TAG_META_DATA)
+        for (i in 0 until metaDataElements.length) {
+            val metaData = metaDataElements.item(i) as? Element ?: continue
+            val metaName = metaData.getAttributeNS(SdkConstants.ANDROID_URI, SdkConstants.ATTR_NAME)
+            if (metaName == name) {
+                return metaData
+            }
+        }
+        return null
+    }
+
+    private fun Element.hasAnyAction(actionNames: Set<String>): Boolean {
+        val actions = getElementsByTagName(SdkConstants.TAG_ACTION)
+        for (i in 0 until actions.length) {
+            val action = actions.item(i) as? Element ?: continue
+            val name = action.getAttributeNS(SdkConstants.ANDROID_URI, SdkConstants.ATTR_NAME)
+            if (actionNames.contains(name)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun Element.hasCategory(categoryName: String): Boolean {
+        val categories = getElementsByTagName(SdkConstants.TAG_CATEGORY)
+        for (i in 0 until categories.length) {
+            val category = categories.item(i) as? Element ?: continue
+            val name = category.getAttributeNS(SdkConstants.ANDROID_URI, SdkConstants.ATTR_NAME)
+            if (name == categoryName) {
+                return true
+            }
+        }
+        return false
+    }
+
+    companion object {
+        private const val WATCH_FACE_EDITOR_ACTION =
+            "com.google.android.wearable.watchface.WATCH_FACE_EDITOR"
+        private const val WATCH_FACE_EDITOR_SHORT = "WATCH_FACE_EDITOR"
+        private const val WEARABLE_CONFIGURATION_CATEGORY =
+            "com.google.android.wearable.watchface.category.WEARABLE_CONFIGURATION"
+        private const val METADATA_NAME = "wearableConfigurationAction"
+
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "WearableConfigurationAction",
+            briefDescription = "Wear configuration action metadata must match an activity",
+            explanation = """
+                When a watch face service declares <code>wearableConfigurationAction</code> metadata with the value
+                <code>com.google.android.wearable.watchface.WATCH_FACE_EDITOR</code>, there must be an activity in the
+                same package whose intent filter handles that action. If <code>minSdkVersion</code> is less than 30,
+                the intent filter must also include the
+                <code>com.google.android.wearable.watchface.category.WEARABLE_CONFIGURATION</code> category.
+            """,
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                WearableConfigurationActionDetector::class.java,
+                Scope.MANIFEST_SCOPE
+            )
+        )
+    }
+}

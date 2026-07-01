@@ -1,0 +1,214 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import java.util.Collection;
+
+public class ObsoleteLayoutParamsDetector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "ObsoleteLayoutParam",
+            "Obsolete layout params",
+            "The given layout_param is not defined for the given layout, meaning it has no "
+                    + "effect. This usually happens when you change the parent layout or move view "
+                    + "code around without updating the layout params. This will cause useless "
+                    + "attribute processing at runtime, and is misleading for others reading the "
+                    + "layout so the parameter should be removed.",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(ObsoleteLayoutParamsDetector.class, Scope.RESOURCE_FILE_SCOPE)
+    );
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return ALL;
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        if (context.getFolderType() != ResourceFolderType.LAYOUT) {
+            return;
+        }
+        Node parentNode = element.getParentNode();
+        if (!(parentNode instanceof Element)) {
+            return;
+        }
+        Element parent = (Element) parentNode;
+        String parentTag = parent.getTagName();
+        if (parentTag.equals("merge")) {
+            return;
+        }
+
+        NamedNodeMap attributes = element.getAttributes();
+        for (int i = 0; i < attributes.getLength(); i++) {
+            Node item = attributes.item(i);
+            if (item instanceof Attr) {
+                checkAttribute(context, (Attr) item, parentTag);
+            }
+        }
+    }
+
+    private void checkAttribute(XmlContext context, Attr attribute, String parentName) {
+        String name = attribute.getLocalName();
+        if (name == null || !name.startsWith("layout_")) {
+            return;
+        }
+
+        String parentSimpleName = getSimpleName(parentName);
+        if (!isKnownLayout(parentSimpleName)) {
+            return;
+        }
+
+        if (isRelativeLayoutAttribute(name)) {
+            if (!isRelativeLayout(parentSimpleName)) {
+                report(context, attribute, "RelativeLayout", parentSimpleName);
+            }
+        } else if (isConstraintLayoutAttribute(name)) {
+            if (!isConstraintLayout(parentSimpleName)) {
+                report(context, attribute, "ConstraintLayout", parentSimpleName);
+            }
+        } else if (name.equals("layout_weight")) {
+            if (!isLinearLayout(parentSimpleName)) {
+                report(context, attribute, "LinearLayout", parentSimpleName);
+            }
+        } else if (isGridLayoutAttribute(name)) {
+            if (name.equals("layout_column")) {
+                if (!isGridLayout(parentSimpleName) && !isTableRow(parentSimpleName)) {
+                    report(context, attribute, "GridLayout or TableRow", parentSimpleName);
+                }
+            } else {
+                if (!isGridLayout(parentSimpleName)) {
+                    report(context, attribute, "GridLayout", parentSimpleName);
+                }
+            }
+        } else if (name.equals("layout_span")) {
+            if (!isTableRow(parentSimpleName)) {
+                report(context, attribute, "TableRow", parentSimpleName);
+            }
+        } else if (name.equals("layout_gravity")) {
+            if (isRelativeLayout(parentSimpleName) || isConstraintLayout(parentSimpleName)) {
+                context.report(
+                        ISSUE,
+                        attribute,
+                        context.getLocation(attribute),
+                        String.format("`layout_gravity` is not supported by parent `%s`", parentSimpleName)
+                );
+            }
+        }
+    }
+
+    private String getSimpleName(String tagName) {
+        int dot = tagName.lastIndexOf('.');
+        if (dot != -1) {
+            return tagName.substring(dot + 1);
+        }
+        return tagName;
+    }
+
+    private boolean isKnownLayout(String name) {
+        return name.equals("LinearLayout")
+                || name.equals("RelativeLayout")
+                || name.equals("FrameLayout")
+                || name.equals("GridLayout")
+                || name.equals("TableLayout")
+                || name.equals("TableRow")
+                || name.equals("AbsoluteLayout")
+                || name.equals("ConstraintLayout")
+                || name.equals("MotionLayout")
+                || name.equals("CoordinatorLayout")
+                || name.equals("DrawerLayout")
+                || name.equals("ScrollView")
+                || name.equals("NestedScrollView")
+                || name.equals("ViewPager")
+                || name.equals("ViewPager2")
+                || name.equals("RecyclerView")
+                || name.equals("ListView")
+                || name.equals("GridView")
+                || name.equals("SwipeRefreshLayout")
+                || name.equals("RadioGroup");
+    }
+
+    private boolean isRelativeLayoutAttribute(String name) {
+        return name.equals("layout_alignParentLeft")
+                || name.equals("layout_alignParentRight")
+                || name.equals("layout_alignParentTop")
+                || name.equals("layout_alignParentBottom")
+                || name.equals("layout_alignParentStart")
+                || name.equals("layout_alignParentEnd")
+                || name.equals("layout_centerInParent")
+                || name.equals("layout_centerHorizontal")
+                || name.equals("layout_centerVertical")
+                || name.equals("layout_toLeftOf")
+                || name.equals("layout_toRightOf")
+                || name.equals("layout_toStartOf")
+                || name.equals("layout_toEndOf")
+                || name.equals("layout_above")
+                || name.equals("layout_below")
+                || name.equals("layout_alignLeft")
+                || name.equals("layout_alignRight")
+                || name.equals("layout_alignTop")
+                || name.equals("layout_alignBottom")
+                || name.equals("layout_alignStart")
+                || name.equals("layout_alignEnd")
+                || name.equals("layout_alignBaseline")
+                || name.equals("layout_alignWithParentIfMissing");
+    }
+
+    private boolean isConstraintLayoutAttribute(String name) {
+        return name.startsWith("layout_constraint") || name.startsWith("layout_goneMargin");
+    }
+
+    private boolean isGridLayoutAttribute(String name) {
+        return name.equals("layout_row")
+                || name.equals("layout_column")
+                || name.equals("layout_rowSpan")
+                || name.equals("layout_columnSpan")
+                || name.equals("layout_rowWeight")
+                || name.equals("layout_columnWeight");
+    }
+
+    private boolean isRelativeLayout(String name) {
+        return name.equals("RelativeLayout");
+    }
+
+    private boolean isConstraintLayout(String name) {
+        return name.equals("ConstraintLayout") || name.equals("MotionLayout");
+    }
+
+    private boolean isLinearLayout(String name) {
+        return name.equals("LinearLayout")
+                || name.equals("TableLayout")
+                || name.equals("TableRow")
+                || name.equals("RadioGroup");
+    }
+
+    private boolean isGridLayout(String name) {
+        return name.equals("GridLayout");
+    }
+
+    private boolean isTableRow(String name) {
+        return name.equals("TableRow");
+    }
+
+    private void report(XmlContext context, Attr attribute, String expectedParent, String actualParent) {
+        String message = String.format(
+                "Layout attribute `%s` is ignored in `%s` (requires `%s`)",
+                attribute.getLocalName(),
+                actualParent,
+                expectedParent
+        );
+        context.report(ISSUE, attribute, context.getLocation(attribute), message);
+    }
+}

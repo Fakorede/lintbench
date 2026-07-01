@@ -1,0 +1,1779 @@
+We need output only Java source file, no markdown fences. Need implement DuplicateIncludedIds detector. Need think about Android Lint API. We need produce complete DuplicateIdDetector.java in package com.android.tools.lint.checks. Need correct idiomatic compile cleanly. Need understand issue: duplicate ids across layouts combined with include tags. Need detect duplicate ids within included layout chains. This is a known Android Lint check? There is a built-in check DuplicateIdDetector? Actually Android Lint has DuplicateIdDetector? Let's recall. There is a check for duplicate ids within a layout (same layout file). There is also DuplicateIncludedIds? I think there is a built-in check in Android Lint called DuplicateIdDetector that reports DuplicateIds (same id used more than once in same layout) and DuplicateIncludedIds (duplicate ids across included layouts). The user asks only DuplicateIncludedIds. We need implement detector that scans layout XML files and detects duplicate ids across layouts combined with include tags.
+
+We need know Lint API classes. Use XmlContext, ResourceXmlDetector, visitElement, getApplicableElements? Or perhaps use LintDriver? Let's design.
+
+We need detect duplicate ids across layouts combined with include tags. Approach: For each layout file, gather all android:id values defined in that file and also in included layouts recursively. If an include tag references a layout, and the including layout also defines ids that duplicate ids in included layout, report. Also if two included layouts within same parent share ids. Also transitive includes.
+
+This requires cross-file analysis, so detector should implement Detector.XmlScanner with afterCheckEachProject or afterCheckProject? Or use LintMap? Let's recall API.
+
+In Android Lint, detectors can implement one or more scanner interfaces. For XML, ResourceXmlDetector. Methods: getApplicableElements, visitElement. For global analysis, implement Detector.ClassScanner? There is also afterCheckProject, afterCheckEachProject, afterCheckLibraryProject? In older API there is `afterCheckProject(Context)` in ResourceXmlDetector? Actually Detector has `afterCheckProject(Context)` and `afterCheckEachProject(Context)`? Let's recall.
+
+The `Detector` class has methods:
+- `beforeCheckProject(Context)`
+- `beforeCheckLibraryProject(Context)`
+- `afterCheckProject(Context)`
+- `afterCheckEachProject(Context)`
+- `beforeCheckFile(Context)`
+- `afterCheckFile(Context)`
+
+These are not part of scanner interfaces? They are in Detector directly and can be overridden. For ResourceXmlDetector, it extends Detector and implements XmlScanner. So we can override beforeCheckProject/afterCheckProject.
+
+Need compute layout includes graph. We need map layout file to set of ids (including transitive includes). Then for each layout file, check its own ids and included ids for duplicates. Report at include tag or at own element.
+
+Need handle layout references: include tag `layout="@layout/..."` or `android:layout`? Actually `<include>` uses `layout="@layout/..."` (without android namespace) typically. Also `android:id` on include can override included root id? If include has android:id, it overrides id of root view in included layout. Need account? The issue says duplicate ids across layouts combined with include tags. If include has android:id, then the included layout's root id becomes that id. So duplicate detection should consider override.
+
+Need package com.android.tools.lint.checks. Class DuplicateIdDetector extends ResourceXmlDetector. Issue DuplicateIncludedIds. Need create Issue with proper metadata: briefDescription, explanation, category, priority, severity, implementation.
+
+Need compile cleanly. Need use correct API signatures. Let's recall exact Android Lint API classes and methods.
+
+Package com.android.tools.lint.checks is where built-in detectors live. We can use `com.android.tools.lint.detector.api.ResourceXmlDetector`, `com.android.tools.lint.detector.api.XmlContext`, `com.android.tools.lint.detector.api.Issue`, `com.android.tools.lint.detector.api.Severity`, `com.android.tools.lint.detector.api.Category`, `com.android.tools.lint.detector.api.Implementation`, `com.android.tools.lint.detector.api.Scope`, `com.android.tools.lint.detector.api.Lint`? Also `com.android.tools.lint.detector.api.XmlScannerConstants`? Need `XmlScannerConstants`? Actually ResourceXmlDetector has method `getApplicableElements()` returns Collection<String> or all? In newer API, XmlScanner has `getApplicableElements()` returns `Collection<String>` or `List<String>`. And `visitElement` signature: `public void visitElement(XmlContext context, Element element)`. For attributes: `getApplicableAttributes()` and `visitAttribute`.
+
+Need parse XML DOM elements. Use `org.w3j.dom.Element`. Need `element.getTagName()`, `element.getAttribute` etc. Need get `android:id` value and parse `@+id/...` or `@id/...`. Use `Lint.getBasename`? There is `LintDriver`? Let's recall utilities.
+
+In Android Lint, there is `com.android.tools.lint.detector.api.Lint` class with static methods: `Lint.isClipboardField`? Hmm. There is `LintUtils`? Actually package `com.android.tools.lint.detector.api.Lint` has helper methods like `getBaseName`, `stripIdPrefix`, `isConfigSuppress`. Let's recall.
+
+I think there is `Lint.stripIdPrefix(String id)` that returns name after `@+id/` or `@id/`. Also `Lint.getFileName`, `Lint.getBaseName`. There is `ResourceXmlDetector` extends `Detector`. There is `XmlContext` has `getParser`? `getDocument`? `getDriver`? `getMainProject`? `getProject`? `getFile`? `getLocation`? `report`.
+
+Need gather all layout files. Scope for implementation: Scope.RESOURCE_FILE_SCOPE? For XML detectors, Scope.RESOURCE_FILE_SCOPE. Actually Scope.RESOURCE_FILE_SCOPE means all resource files. Implementation takes class and scope. For cross-file, need Scope.ALL_RESOURCE_FILES? There is `Scope.ALL_RESOURCE_FILES`. Let's check. In Lint API, Scope enum values: ALL, ALL_RESOURCE_FILES, JAVA_FILE, CLASS_FILE, BINARY_RESOURCE_FILE, RESOURCE_FILE, RESOURCE_FOLDER, MANIFEST, GRADLE_FILE, PROTOTYPE? Hmm. Implementation constructor: `Implementation(Class<? extends Detector> detectorClass, EnumSet<Scope> scope)`. For XML resource detector that needs all resource files, use `Scope.RESOURCE_FILE_SCOPE`? Actually `Scope.RESOURCE_FILE_SCOPE` is an `EnumSet<Scope>` constant? I recall there are constants: `Scope.JAVA_FILE_SCOPE`, `Scope.RESOURCE_FILE_SCOPE`, `Scope.ALL_RESOURCE_FILES_SCOPE`. Let's verify.
+
+In `com.android.tools.lint.detector.api.Scope`, there are static final `EnumSet<Scope>` constants: `JAVA_FILE_SCOPE`, `RESOURCE_FILE_SCOPE`, `ALL_RESOURCE_FILES_SCOPE`, `CLASS_FILE_SCOPE`, etc. Yes. For a detector that visits each resource file, use `Scope.RESOURCE_FILE_SCOPE`. For cross-file analysis across all resource files, use `Scope.ALL_RESOURCE_FILES_SCOPE`. Since we need analyze includes across layouts, use ALL_RESOURCE_FILES_SCOPE.
+
+Need override `beforeCheckProject` and `afterCheckProject` or `beforeCheckEachProject`/`afterCheckEachProject`. Since includes can be within same project/library? The issue likely only within project. Use `beforeCheckProject(Context)` to reset maps, `visitElement` to collect ids per file and includes, `afterCheckProject` to compute duplicates.
+
+But note `Context` in before/after is `Context` (com.android.tools.lint.detector.api.Context), not XmlContext. `visitElement` gets XmlContext.
+
+Need identify layout files. `context.getResourceFolderType()` returns `ResourceFolderType.LAYOUT` perhaps. Use `FolderTypeRelationship.isLayout?` Actually `context.getResourceFolderType()` returns ResourceFolderType. Check `ResourceFolderType.LAYOUT`.
+
+Need get file path and name. For include reference, parse `@layout/xxx` to layout name. Need resolve included layout file path. In a project, resource files are in res/layout/xxx.xml. We can map by layout name. Need handle multiple configs (e.g., layout-land). We can map name to list of files or to a representative. For duplicate ids, if included layout has variants with different ids? Usually same name across configs; need consider union of ids across all config files for that layout name. Because include can resolve to any config at runtime. So duplicate if any config has duplicate? To be safe, union ids across all files with same layout name.
+
+Need collect ids from each layout file. For each layout file, gather set of id names defined by `android:id` attributes (and maybe `id`? only android). Also gather include tags referencing layout names. Also handle include tag override id: if include has android:id, then the included layout's root id is overridden; but other ids inside included layout remain. For duplicate detection, the include tag itself contributes its override id if present. Also the included layout contributes all ids except root id? Actually if include has android:id, it overrides root view id only. The root view's id in included layout is not used. But other children ids remain. So when computing ids contributed by an include, we should take transitive ids of included layout but replace root id with override id if present. However for simplicity, many implementations just union all ids from included layouts and include override. That may cause false positives if root id overridden to unique but original root id duplicates elsewhere? But original root id is not in final combined layout if overridden. But if not overridden, root id is present. Need handle.
+
+Also need detect duplicate ids within same layout file? The issue DuplicateIncludedIds specifically cross-layout includes. There is separate DuplicateIds for within same file. We can ignore within-file duplicates or not report them under DuplicateIncludedIds. But if a layout includes another and also has same id as an included id, report. Also if two includes in same parent reference layouts sharing ids, report. Also transitive: A includes B includes C; if A has id same as C, report at include chain.
+
+Need produce locations. For each duplicate pair, report at the element in the top-level layout that defines the duplicate id or at include tag. Need avoid duplicate reports. We can for each layout file, compute combined set of ids from self and all includes recursively. If duplicate found, report at the top-level layout's own element or include tag where duplicate id is introduced. But duplicates could be between two includes; report at one of them. We can report at the include tag that introduces a duplicate id already present.
+
+Algorithm:
+1. During visitElement for each layout file:
+   - Determine file path key (e.g., context.file.getPath()).
+   - Store ownIds: set of id names from android:id attributes on non-include elements? Actually include tags can have android:id too (override). Include tag's own id should be considered separately.
+   - Store includes: list of IncludeRef objects containing element, referenced layout name, override id (android:id value stripped), and location.
+   - Also store all id elements: map id name -> Element/location for non-include elements. For includes, map override id -> include element.
+
+2. After all files visited, build map layoutName -> list of file paths and map filePath -> FileInfo.
+
+3. Compute transitive ids for each layout file recursively:
+   - ids = ownIds + for each include: transitive ids of referenced layout file, with root id replaced by override if any. Need know root id of included layout. We can compute rootIds map: for each layout file, the id of root element (if any). Then for include, if override id present, remove rootId from included transitive ids and add override id. But if override id equals rootId? no change.
+   - Need handle cycles in includes to avoid infinite recursion. Keep visiting stack.
+
+4. For each layout file (top-level), check combined transitive ids for duplicates. We can compute combined set and for each id that appears more than once, report. Need choose elements to report. Approach: compute list of sources for each id in combined layout: own elements and include transitive sources. For each id with >1 source, report at each source? Could produce many reports. Better report at the source that is not the first occurrence. But we need location. We can for each layout file, do a DFS traversal of its own elements and includes, maintaining a set of ids already seen in the combined layout. When encountering an own element with id, if id already seen, report duplicate at that element. When encountering an include, compute included layout's ids; for each id in included layout (after override) that is already seen, report duplicate at include tag? But include tag is one location for potentially many ids. Could report include tag once if any duplicate. But issue wants specific id? The message can list ids.
+
+Simpler: For each layout file, compute combined transitive id set. Then for each own element id, if it appears more than once in combined set, report at that element with message including duplicate id. For each include, compute included transitive ids; for each id in included transitive ids, if it also appears elsewhere in combined set (own or other includes), report at include tag. But this may report same include multiple times for multiple ids. Could aggregate.
+
+Maybe known implementation in Android Lint: DuplicateIdDetector handles both DuplicateIds and DuplicateIncludedIds. Let's recall source. I can try to reconstruct from memory. The actual `DuplicateIdDetector` in `com.android.tools.lint.checks` maybe checks duplicate ids within a layout and across includes. It uses `ResourceXmlDetector`, `getApplicableElements` returns `Arrays.asList(INCLUDE, VIEW_TAG?)`. It collects ids per file in a map `mIdMap`? Let's search memory.
+
+I recall source code of DuplicateIdDetector from Android Lint maybe:
+
+```
+public class DuplicateIdDetector extends ResourceXmlDetector {
+    private static final String INCLUDE = "include";
+    private static final String VIEW_TAG = "view";
+    private static final String TAG_MERGE = "merge";
+    ...
+    @Override
+    public void beforeCheckProject(@NonNull Context context) { ... }
+    @Override
+    public void afterCheckProject(@NonNull Context context) { ... }
+    @Override
+    public Collection<String> getApplicableElements() { return Arrays.asList(INCLUDE, VIEW_TAG); }
+    @Override
+    public void visitElement(XmlContext context, Element element) { ... }
+}
+```
+
+But we need only DuplicateIncludedIds. We can implement simpler.
+
+Need ensure compile cleanly. Need import correct classes. Use `org.w3c.dom.Element`, `org.w3c.dom.Node`, `org.w3c.dom.NodeList`. Use `com.android.annotations.NonNull`? Actually Android Lint uses `com.android.annotations.NonNull` or `org.jetbrains.annotations.NotNull`? In `com.android.tools.lint.checks` package, built-in detectors use `com.android.annotations.NonNull` and `Nullable`. But Lint API uses `androidx.annotation.NonNull`? Hmm. To be safe, use `com.android.annotations.NonNull` and `com.android.annotations.Nullable` if available. But the detector source might compile with whatever imports. Since we don't know exact environment, use `org.jetbrains.annotations.NotNull`? Actually Android Lint API methods are annotated with `@NonNull` from `org.jetbrains.annotations.NotNull`? Let's check. The Lint API classes use `com.android.annotations.NonNull`? I think `com.android.tools.lint.detector.api` uses `org.jetbrains.annotations.NotNull` and `androidx.annotation.NonNull`? Hmm.
+
+To avoid compile issues, we can omit `@Override` annotations? But overriding methods from Detector/XmlScanner may require matching signatures. We can use `@Override` without parameter annotations. But Lint API methods may have `@NonNull` annotations; overriding with unannotated parameters is fine in Java. We can import only needed.
+
+Need produce source file only. No markdown fences. The user explicitly: "Output ONLY the detector source file. No explanation, no markdown fences. Use exact package: com.android.tools.lint.checks. Class name: DuplicateIdDetector." So output just Java code.
+
+Need ensure code is complete and self-contained. Let's design thoroughly.
+
+### Lint API details
+
+Let's recall exact method signatures for `ResourceXmlDetector` and `XmlScanner`.
+
+`ResourceXmlDetector` extends `Detector` and implements `XmlScanner`. It may have default implementations returning null. We override:
+
+- `public Collection<String> getApplicableElements()` (from XmlScanner)
+- `public void visitElement(@NonNull XmlContext context, @NonNull Element element)` (from XmlScanner)
+
+Also can override `public Collection<String> getApplicableAttributes()` and `visitAttribute.
+
+For project-level callbacks, `Detector` has:
+
+- `public void beforeCheckProject(@NonNull Context context)`
+- `public void afterCheckProject(@NonNull Context context)`
+
+Need import `com.android.tools.lint.detector.api.Context` (not Android Context). The `Context` class has methods: `getMainProject()`, `getProject()`, `getDriver()`, `getFiles()`? Actually `Context` is base; `XmlContext` extends it. It has `getMainProject()`, `getProject()`, `getDriver()`, `getScope()`. For `beforeCheckProject`, context is project context. We can reset maps.
+
+`XmlContext` has `getFile()`, `getDocument()`, `getElement()`, `report(Issue, Location, String)`, `getLocation(Node)`, `getLocation(Handle)`, `getDriver()`, `getMainProject()`, `getProject()`, `getResourceFolderType()`.
+
+`Location` has static `create(File)` etc. `XmlContext.getLocation(Element)` returns Location.
+
+`Issue` creation: `Issue.create(id, briefDescription, explanation, category, priority, severity, implementation)`.
+
+`Implementation` constructor: `Implementation(DuplicateIdDetector.class, Scope.RESOURCE_FILE_SCOPE)` or ALL.
+
+`Scope` constants: `Scope.RESOURCE_FILE_SCOPE` is `EnumSet<Scope>` containing `Scope.RESOURCE_FILE`. For cross-file, use `Scope.ALL_RESOURCE_FILES_SCOPE`? Let's verify. In Lint API, there is `Scope.RESOURCE_FILE_SCOPE` = `EnumSet.of(Scope.RESOURCE_FILE)`. And `Scope.ALL_RESOURCE_FILES_SCOPE` = `EnumSet.of(Scope.RESOURCE_FILE, Scope.BINARY_RESOURCE_FILE)`? Hmm. Actually for detectors that need all resource files, use `Scope.ALL_RESOURCE_FILES_SCOPE`. Let's check definitions:
+
+From `com.android.tools.lint.detector.api.Scope`:
+```
+public enum Scope {
+    RESOURCE_FILE,
+    RESOURCE_FOLDER,
+    ALL_RESOURCE_FILES,
+    JAVA_FILE,
+    CLASS_FILE,
+    MANIFEST,
+    GRADLE_FILE,
+    PROTOTYPE,
+    OTHER;
+}
+```
+And static constants:
+```
+public static final EnumSet<Scope> JAVA_FILE_SCOPE = EnumSet.of(JAVA_FILE);
+public static final EnumSet<Scope> RESOURCE_FILE_SCOPE = EnumSet.of(RESOURCE_FILE);
+public static final EnumSet<Scope> ALL_RESOURCE_FILES_SCOPE = EnumSet.of(ALL_RESOURCE_FILES);
+public static final EnumSet<Scope> MANIFEST_SCOPE = EnumSet.of(MANIFEST);
+...
+```
+
+Wait, there is both `Scope.RESOURCE_FILE` and `Scope.ALL_RESOURCE_FILES`. The `ALL_RESOURCE_FILES` scope means the detector runs once over all resource files together (cross-file). The `RESOURCE_FILE` scope means each file individually. Implementation scope set determines which scanning mode. For cross-file, use `Scope.ALL_RESOURCE_FILES_SCOPE`. For XmlContext visits, when scope is ALL_RESOURCE_FILES, the detector still gets visitElement for each file? I think yes, but also project callbacks. The `Detector` can use `getApplicableElements` and will be called for each resource file. The difference is that it can also access all files via context.getProject().getSubset? Hmm.
+
+Actually in Lint, if Implementation scope is `Scope.RESOURCE_FILE_SCOPE`, the detector runs independently per file and cannot do cross-file analysis. If scope is `Scope.ALL_RESOURCE_FILES_SCOPE`, it runs once across all resource files and can store state across visits. So we need ALL_RESOURCE_FILES_SCOPE.
+
+Need `context.getDriver().getSuppressedLines`? Not needed.
+
+Need parse id attribute. Use `ANDROID_URI` constant? `XmlScanner` has constants? Actually `ResourceXmlDetector` has constants? We can use `SdkConstants.ANDROID_URI` or `XmlScannerConstants.ANDROID_URI`. In `com.android.tools.lint.detector.api.XmlScannerConstants`, there is `ANDROID_URI = "http://schemas.android.com/apk/res/android"`. Or `com.android.SdkConstants.ANDROID_URI`. Since package com.android.tools.lint.checks, we can import `com.android.SdkConstants`? Actually `com.android.SdkConstants` is in `com.android` package, available. But to avoid dependency, use literal string.
+
+Need parse `@+id/...` and `@id/...`. Use `Lint.stripIdPrefix`. Let's recall `Lint` class in `com.android.tools.lint.detector.api`. It has static methods:
+- `public static String getFileName(File file)`
+- `public static String stripIdPrefix(String id)` returns id name without `@+id/` or `@id/`. Yes.
+- `public static String getBaseName(String)`? 
+- `public static boolean isReferenceTo(String, String)`? 
+We can use `Lint.stripIdPrefix`.
+
+Need get layout name from include `layout` attribute. The include tag uses `layout` attribute in default namespace, value `@layout/name`. Could also be `@layout/name` with `?`? Use `element.getAttribute("layout")`. Need parse resource url. Could use `Lint.getBaseName`? Actually `Lint` has `getBaseName(String)` returns name after last slash? Or `getBaseName` returns basename of file. There is `ResourceUrl` class: `com.android.resources.ResourceUrl.parse(String)`? In `com.android.resources.ResourceUrl` maybe. But simpler: if value startsWith("@layout/"), substring 8. Also handle `@layout/name` and maybe `?attr/...`? Not needed.
+
+Need map layout name to file paths. We can collect during visit: `context.getFile().getPath()`. Also get layout name from file path: e.g., `res/layout/main.xml` -> name "main". Use `Lint.getBaseName(context.getFile().getName(), true)`? Actually `Lint.getBaseName` strips extension? Let's recall: `Lint.getBaseName(File)` returns base name without extension? Or `Lint.getBaseName(String)`? Hmm. We can compute manually: `String name = file.getName(); int dot = name.lastIndexOf('.'); if (dot > 0) name = name.substring(0, dot);`.
+
+Need handle `tools:layout`? Not needed.
+
+Need handle `view` tag? The `<view>` tag can have class attribute and id. But for ids, any element with android:id. We can just collect all elements with android:id.
+
+Need handle `merge` root? If a layout is included via include, root merge doesn't have id. Fine.
+
+Need handle `include` tag can include a layout that itself includes others. Need recursion.
+
+Need avoid reporting duplicate ids that are within the same included layout file (already reported by DuplicateIds if implemented). For DuplicateIncludedIds, we only report duplicates that involve at least two separate source files or include tags. But if a layout includes a file that itself has duplicate ids, those duplicates become duplicates in combined layout. Should we report? The issue says duplicate ids across layouts combined with include tags. If included layout has internal duplicate, then when included, findViewById may return unexpected view. But that's covered by DuplicateIds. We can still report under DuplicateIncludedIds? Might be redundant. We can ignore duplicates where all occurrences are within the same included file? But if included file has duplicate ids, those are two views in same layout; after include they remain duplicates. However the spec says "Duplicate ids across layouts combined with include tags". It might not include within-file duplicates. We can focus on duplicates where at least one occurrence is in a different layout than another. But if a layout includes itself? Not possible. We'll report any duplicate id in combined set where the sources are from different includes or own layout vs include. That covers cross-layout.
+
+Need compute transitive ids and source mapping. Let's design data structures.
+
+```java
+private static class FileInfo {
+    final File file;
+    final String layoutName;
+    final List<ElementInfo> ids = new ArrayList<>(); // own non-include elements with id
+    final List<IncludeInfo> includes = new ArrayList<>();
+    String rootId; // id of root element if any
+    Location rootLocation;
+}
+```
+
+`ElementInfo` holds id name, element, location.
+
+`IncludeInfo` holds element, referenced layout name, overrideId, location.
+
+During visitElement, if element tag is "include", parse layout attr and android:id override. Add to includes. Otherwise if element has android:id, add to ids. If element is root of document (i.e., `context.getElement() == element`? Actually `visitElement` called for each applicable element; root detection tricky. We can detect root by checking `element.getParentNode() instanceof Document` or `element.getParentNode().getNodeType() == Node.DOCUMENT_NODE`. But we only visit include and maybe all elements? If getApplicableElements returns all? We can return null to visit all elements. But then we can detect root. Let's set getApplicableElements to null? In XmlScanner, returning null means visit all elements? I think yes. Or return `XmlScannerConstants.SKIP?` Hmm. The `getApplicableElements()` returns `Collection<String>`; returning null means all elements. But we need to know root. We can also use `context.getDocument().getDocumentElement()`. In `visitElement`, we can compare element to document element. But `context.getDocument()` may be available. Let's use `context.getDocument().getDocumentElement()`.
+
+If getApplicableElements returns null, visit all elements. Then in visitElement, for each non-include element with android:id, add to ids; if it's document root, record rootId. For include, add IncludeInfo.
+
+But visiting all elements may be heavy but fine.
+
+Need skip `tools:` nodes? Not needed.
+
+Need parse android:id: `String id = element.getAttributeNS(ANDROID_URI, "id");` or `element.getAttribute("http://...:id")`? Using `getAttribute` without namespace may work if attribute has prefix? Actually DOM `Element.getAttribute(String)` returns attribute by name, not namespace. If attribute is `android:id`, name is "android:id"? In DOM, `getAttribute("android:id")` returns value if parser preserves prefix. But better use `getAttributeNS(ANDROID_URI, "id")`. However if namespace not declared? It will. Use `getAttributeNS(ANDROID_URI, "id")`.
+
+Need `ANDROID_URI` constant. Use `com.android.SdkConstants.ANDROID_URI` or literal. Let's import `com.android.SdkConstants.ANDROID_URI` if available. `com.android.SdkConstants` is in `com.android` package. It has `ANDROID_URI = "http://schemas.android.com/apk/res/android"`. Yes.
+
+Need parse include layout attr: `element.getAttribute("layout")` (no namespace). If value starts with "@layout/", extract name. Could also be "?layout/..."? Not typical. Use `value.startsWith("@layout/")` and substring. If value contains ':'? Not needed.
+
+Need parse override id: `element.getAttributeNS(ANDROID_URI, "id")`. Use `Lint.stripIdPrefix`.
+
+Need compute transitive ids. We need map layoutName -> list of FileInfo. Because multiple config files. For each layout name, union of ids across all its files. But includes reference layout name, not specific config. When included, the actual layout chosen depends on config. For duplicate detection, we should consider all possible ids in any config of that layout name. Because if one config has id X and parent has X, in that config duplicate. So union is conservative.
+
+But root id may differ across configs. For override handling, if include overrides root id, we remove root id from included ids. But root id may vary across configs. We can remove all root ids? Actually if an include has override id, it overrides the root view id of whichever config is chosen. If different configs have different root ids, override replaces whichever root id. So we should remove the root id of each config file and add override. But union across configs: for each config file, remove its root id and add override. Equivalent to: includedIds = union of ids across config files, minus union of root ids across config files, plus override if present. But if a root id also appears as a child id in another config, removing it might be wrong. However root id is only on root element; child ids union includes maybe same name. Hmm.
+
+Simpler: treat each layout file separately. For each include, resolve to a specific file? But include can resolve to multiple config files. For duplicate detection, we can pick one representative file per layout name (e.g., first encountered). That may miss duplicates in other configs. But acceptable for Lint? The built-in check likely uses resource repository to look up layout by name and gets all variants? Hard to know.
+
+Given complexity, we can map layoutName -> list of FileInfo and compute union. For root override, we can compute for each FileInfo its set of ids (excluding root) and root id. Then for include, includedIds = union over files of (ids - rootId) plus override if present. That handles override replacing root per config. Good.
+
+But if include references a layout name with multiple config files, and no override, includedIds = union of all ids in all config files (including root ids). Good.
+
+Need compute transitive includes. Since included layouts can include others, we need recursively compute. Use memoization and cycle detection.
+
+Define `Set<String> computeIds(FileInfo info, Deque<String> visiting)`. But because layoutName may map to multiple FileInfo, and includes reference layoutName, we need compute ids for a layoutName, not per file. However a file's own includes reference layout names; transitive ids for a layout name should union over all config files of that name. But each config file may include different layouts? Possibly. For conservative, union over all config files.
+
+Define `LayoutInfo` per layoutName: list of FileInfo. Compute ids for layoutName recursively:
+```
+Set<String> computeIds(String layoutName, Set<String> visiting) {
+    if (visiting.contains(layoutName)) return Collections.emptySet(); // cycle
+    List<FileInfo> files = mLayouts.get(layoutName);
+    if (files == null) return Collections.emptySet();
+    Set<String> ids = new HashSet<>();
+    for (FileInfo file : files) {
+        // own ids
+        ids.addAll(file.ownIds names);
+        // includes
+        for (IncludeInfo inc : file.includes) {
+            Set<String> incIds = computeIds(inc.layoutName, visiting);
+            if (inc.overrideId != null) {
+                // remove root ids of referenced layout? But computeIds returns union including roots.
+                // Need know root ids of referenced layout. Could compute rootIds for layoutName.
+                Set<String> roots = computeRootIds(inc.layoutName, visiting);
+                incIds = new HashSet<>(incIds);
+                incIds.removeAll(roots);
+                incIds.add(inc.overrideId);
+            }
+            ids.addAll(incIds);
+        }
+    }
+    return ids;
+}
+```
+
+But this returns union of ids across config files, not source mapping. For duplicate reporting, we need know which source elements cause duplicates. We can compute for each top-level file separately, traversing its own elements and includes, with source locations. That is more precise.
+
+Alternative: For each FileInfo (top-level layout file), do DFS over its DOM and includes, maintaining a map id -> first source location. When a new id is encountered, if already seen, report duplicate at current location. This avoids needing to compute transitive sets globally. But includes reference layout by name; we need traverse included layout files. We can do recursive DFS into FileInfo of included layout. For each included layout file, traverse its own elements and its includes. However there may be multiple config files for included layout name. Which one to traverse? We can traverse all config files? That would report duplicates for any config. But if we traverse all, we might report duplicates that only occur in one config. To be conservative, maybe okay. But could produce false positives if config-specific ids differ and only one config has duplicate with parent. However Lint built-in likely uses resource repository to resolve actual included layout? Hmm.
+
+Simpler approach: map layoutName to a single representative FileInfo (e.g., first). Use that for transitive traversal. This is less precise but avoids config complexity. The issue likely just checks layout names. We'll use representative.
+
+But to be robust, we can union ids across config files for duplicate detection but report at include tag if any config has duplicate. However reporting at include tag for duplicate ids from included layout is okay.
+
+Let's design a balanced implementation:
+
+- Collect FileInfo per file path.
+- Map layoutName -> list of FileInfo.
+- For each FileInfo, compute transitive id set and root id set using recursion over layoutName (union across config files). This gives us all ids that could be present when this file is included.
+- Then for each FileInfo (as top-level layout), check duplicates:
+   - Maintain a map `id -> Location` of ids seen so far in this top-level layout composition.
+   - First add own ids: for each own element, if id already seen, report duplicate at current location. Else record.
+   - Then for each include in file: compute included transitive ids (with override). For each id in included ids, if already seen, report duplicate at include location. But we don't know which specific id? We can iterate and report for each duplicate id. However computing mapping of id->location inside included layout requires traversal. Instead, we can compute transitive id set only; for each id in set, if already seen, report at include location with message listing id. But if multiple ids duplicate, report multiple times? Could aggregate into one report listing all duplicate ids. Lint allows one report per issue per location? We can report once with message containing all duplicate ids. But if include introduces many duplicate ids, one report is fine.
+   - But what about duplicates among two includes? When processing first include, record its ids. When processing second include, if any id matches, report at second include. Good.
+   - Need record included ids after processing.
+
+But we also need handle duplicates within an included layout itself (e.g., two children with same id). If we only check against already seen ids in parent, we won't report internal duplicates of included layout unless they also collide with parent or another include. But DuplicateIds check handles within-file duplicates. For DuplicateIncludedIds, maybe internal duplicates in included file are not the focus. However if layout A includes B and C, and B has internal duplicate id X, then in A there are two views with id X from B. That is a duplicate in combined layout. Should DuplicateIncludedIds report? The spec says duplicate ids across layouts combined with include tags. Internal duplicate in B is within same layout, but combined with include it becomes duplicate in A. But B's own duplicate would be flagged by DuplicateIds. If B has no internal duplicate but A and B share id, that's cross-layout. We'll focus on cross-layout duplicates (between own elements and includes or between includes). We can also detect internal duplicates in included layout when it has multiple config files? Not needed.
+
+But to be safe, we can also when computing transitive ids for a layout, detect internal duplicates? Not required.
+
+Need decide reporting location. For own element duplicate with included id, report at own element. For include duplicate, report at include tag. For duplicates between two includes, report at second include. Good.
+
+Need compute transitive ids with override. For each include, we need includedIds set. We can compute via recursion on layoutName. But we also need root ids of included layout to remove if override. Compute rootIds per layoutName similarly.
+
+Define methods:
+```
+private Set<String> getIdsForLayout(String layoutName, Set<String> visiting) { ... }
+private Set<String> getRootIdsForLayout(String layoutName, Set<String> visiting) { ... }
+```
+
+But these return union across config files. For override, remove root ids and add override. However if override id equals an existing id in included layout (other than root), it's still duplicate. Fine.
+
+But for reporting at include tag, we need know which ids from included layout are duplicate with already seen. We can compute includedIds set. Then for each id in includedIds, if seenIds contains id, report. But we also need record includedIds into seenIds. Good.
+
+But there is subtlety: If include overrides root id, and root id of included layout is duplicate with parent, but override id is unique, then no duplicate. Our includedIds set after override removes root ids and adds override, so root id not considered. Good.
+
+If include override id duplicates parent, report. Good.
+
+If include has no override, root id included. Good.
+
+Need handle `android:layout`? Actually include uses `layout` attribute in default namespace. Some may use `app:layout`? No.
+
+Need handle `tools:layout`? Not needed.
+
+Need handle `<merge>` root included directly? If a layout root is merge and included, the children are merged into parent; root merge has no id. Our traversal of included layout will add own ids of children and process includes. Good.
+
+Need handle `<include>` with `android:id` but no layout? layout attr required. If missing, ignore.
+
+Need handle `<view>` tag? The `<view>` tag has `class` attribute and can have id. Since we visit all elements, we'll capture its android:id. Good.
+
+Need handle `xmlns` and `tools` nodes? DOM elements only; namespaces are attributes.
+
+Need handle `android:id` value could be `@+id/foo` or `@id/foo` or `@android:id/bar`? Use stripIdPrefix.
+
+Need handle `style`? Not needed.
+
+Need handle `View` tags with `android:id` that are not direct children? We collect all.
+
+Need handle `include` tag itself can also have `android:id` for override; we should not add it to ownIds separately because it's not a view id in parent unless it overrides included root. But if include doesn't reference a layout? It still creates a view with that id? Actually include tag with android:id but no layout? Not typical. We'll treat override id as included root replacement only.
+
+What about `<include>` with `android:id` and `layout` where included layout root has no id; override id becomes id of included root. It can duplicate. Our method adds override id to includedIds. Good.
+
+What about `<include>` with `android:id` but the included layout is a `<merge>`; merge has no root id, override id maybe ignored? Actually if include a merge with an id, the id is ignored? Not sure. But we add override id anyway; conservative.
+
+Need ensure no duplicate reports for same id multiple times in same file. We can report each occurrence after first. But if three elements share id, we report second and third. For DuplicateIncludedIds, maybe only need one report per duplicate pair. But fine.
+
+However we must avoid reporting duplicates that are within the same layout file under DuplicateIncludedIds. We can skip own element checks if both occurrences are in same file and not involving includes. But our algorithm checks own elements against seen ids that include own ids. It would report within-file duplicates. We should avoid that. We can initialize seenIds with own ids? No, we need detect cross-layout. We can first add all own ids to seenIds (without reporting). Then process includes: for each id in include, if in seenIds, report. This detects own vs include and include vs include (since includes processed sequentially). It won't report within-file own duplicates. Good.
+
+But what about two includes both referencing same layout with same ids? Process first include: add its ids to seen. Process second include: ids match -> report at second include. Good.
+
+What about include that references a layout whose internal ids duplicate each other but not parent? We won't report. Acceptable.
+
+What about top-level file has no own ids but includes two layouts that share ids across config variants? We report.
+
+What about top-level file includes layout A which includes layout B; A has own id X, B has id X. When processing include A, includedIds includes X from A and X from B. Since X not in parent own ids, no duplicate reported at include A. But when A is included, the combined A+B has duplicate X internally. Should DuplicateIncludedIds report? The spec: duplicate ids across layouts combined with include tags. This is a chain: A includes B, and A and B share id. If top-level includes A, then top-level combined layout has duplicate. But the duplicate is within A's composition, not between A and parent. Should we report at A's include tag? The issue says "within any chain of included layouts". That suggests if A includes B and they share id, that's a duplicate in the chain. So we should report duplicates within any included layout chain, not just between parent and direct include.
+
+Thus our simple parent-vs-include check misses duplicates nested within an included layout. We need detect duplicates anywhere in the transitive include chain, and report at the include tag that brings in the chain? Or at the nested include? The spec: "duplicate ids within any chain of included layouts". So if layout A includes B includes C, and A and C share id, that's a duplicate chain. We need report at the include tag in A that includes B (or maybe at the top-level include). If A includes B and B has internal duplicate, report at A's include of B.
+
+Therefore we need compute for each include the set of ids it contributes and also detect internal duplicates within those ids (across the included layout's own elements and its includes). When checking a file, for each include, we should know if the included layout (transitively) has any duplicate ids among its own composition. If so, report at that include tag. Also check against parent seen ids.
+
+So we need for each layoutName compute not just id set but also whether it has internal duplicates (within its own chain). Then when parent includes it, if internal duplicates exist, report at include tag. Also if any id in included set collides with parent seen ids, report.
+
+But internal duplicates in included layout might be due to two includes within it. We can compute a boolean `hasDuplicates` per layoutName (transitive). Then parent reports if included layout has duplicates or if collision with parent.
+
+But we also need report specific duplicate ids? We can report message "The layout ... has duplicate ids ..."? The issue message can be generic.
+
+However the user asked implement detector for DuplicateIncludedIds. We can produce a reasonable implementation. It doesn't need to exactly match built-in. But should be correct and compile.
+
+Let's design a more comprehensive algorithm:
+
+For each FileInfo, compute:
+- `ids`: set of ids contributed by this file's own elements (excluding includes and root override).
+- `rootId`: id of root element if any.
+- `includes`: list of includes.
+- `allIds`: transitive set of all ids when this file is used as top-level or included, including own ids and all included ids with overrides.
+- `hasDuplicates`: boolean indicating whether this file's composed layout has any duplicate ids (within its own chain).
+
+Compute these recursively per layoutName (union across config files). Because includes reference layout names, the properties for a layout name should aggregate across config files conservatively.
+
+But for `hasDuplicates`, if any config file has duplicates, true. For `allIds`, union across config files.
+
+Then for each FileInfo (top-level), check:
+- `seen = new HashSet<String>()`
+- Add own ids (no reporting).
+- For each include in file (in document order):
+   - Let inc = include.
+   - Compute `incAllIds` for referenced layoutName (with override). Also `incHasDuplicates` for referenced layoutName.
+   - If `incHasDuplicates` or any id in incAllIds is in seen, report at include location with message.
+   - Add incAllIds to seen.
+
+But this reports nested internal duplicates at the include tag that brings in the nested layout. Good.
+
+But what about a top-level file that itself has internal duplicate ids (own elements). Not reported by DuplicateIncludedIds (DuplicateIds handles). We don't report.
+
+What about a top-level file includes layout A, and A includes B; A and B share id. Our computation of `incHasDuplicates` for A will be true because A's composition has duplicate. So we report at include A in top-level. Good.
+
+What about top-level file includes A and also includes B; A includes C; B includes C; C id collides with itself? A's composition includes C, B's composition includes C. Top-level seen after A includes C id. When processing B, incAllIds includes C id -> collision -> report at B include. Good. Also A's incHasDuplicates false (unless C internal duplicates). B's incHasDuplicates false. Good.
+
+What about top-level file includes A and also has own id X; A includes B with id X. Top-level own id X in seen. A's incAllIds includes X -> collision -> report at A include. Good.
+
+What about top-level file includes A (which includes B with id X) and also includes C with id X. A's incAllIds includes X. seen after A has X. C incAllIds includes X -> report at C. Good.
+
+What about A includes B and C, B and C share id X. A's incHasDuplicates true. Top-level includes A -> report at A. Good.
+
+Now need compute `incAllIds` with override. For layoutName L, `allIds(L)` = union over config files of:
+   - own ids
+   - for each include in file: `allIds(Lref)` with override applied (remove root ids of Lref, add override).
+If override id is same as some id in referenced layout other than root, it's duplicate within included layout? Actually override root id could collide with child ids in referenced layout, causing internal duplicate. Our `allIds` includes override and all child ids; if overlap, `hasDuplicates` true. Good.
+
+Need compute root ids for a layoutName. For override removal, we need remove root ids of referenced layout. But `allIds(Lref)` union across config files includes root ids of all config files. We can compute `rootIds(Lref)` = union of root ids across config files. Then apply override: `incIds = allIds(Lref) - rootIds(Lref) + override`. But if override is null, incIds = allIds(Lref). Good.
+
+But careful: If referenced layout has multiple config files with different root ids, removing all root ids means we don't consider any root id present. But only one config is chosen at runtime, so one root id will be present. Removing all root ids may miss duplicate between parent and a root id that is not in the chosen config? Since we don't know config, union approach is conservative: we consider all possible root ids. Removing all root ids means we ignore possible duplicates with any root id. But if override is present, it replaces the root id of the chosen config, so the root ids of unchosen configs are not present. Since we don't know which config, we can't know. Conservative approach: if override present, we could still keep root ids of configs that might be chosen? But we don't know. The safest: remove all root ids and add override. This may miss duplicates between override and a root id that would be present in a config where override doesn't apply? But override applies to whichever config is chosen. So root id of chosen config is replaced. Other root ids not present. So removing all root ids is correct for override. Good.
+
+But what if no override? Then root ids of chosen config are present. Since we don't know chosen config, we keep all root ids. That may cause false positives if parent id matches root id of a config not chosen. But Lint is conservative; okay.
+
+Now compute `hasDuplicates` for layoutName. We need detect if any duplicate id exists within the composed layout (own chain). We can compute recursively:
+```
+boolean hasDuplicates(String layoutName, Set<String> visiting) {
+    if (visiting.contains(layoutName)) return false; // cycle
+    List<FileInfo> files = mLayouts.get(layoutName);
+    if (files == null) return false;
+    boolean dup = false;
+    for (FileInfo file : files) {
+        Set<String> seen = new HashSet<>();
+        // own ids duplicates
+        for (ElementInfo e : file.ids) {
+            if (!seen.add(e.id)) dup = true;
+            seen.add(e.id); // actually add returns false if already present
+        }
+        // includes
+        for (IncludeInfo inc : file.includes) {
+            Set<String> incIds = getAllIds(inc.layoutName, visiting);
+            if (inc.overrideId != null) {
+                Set<String> roots = getRootIds(inc.layoutName, visiting);
+                incIds = new HashSet<>(incIds);
+                incIds.removeAll(roots);
+                incIds.add(inc.overrideId);
+            }
+            for (String id : incIds) {
+                if (!seen.add(id)) dup = true;
+            }
+        }
+    }
+    return dup;
+}
+```
+
+But this computes duplicates per config file. If any config has duplicates, true. Good.
+
+However `getAllIds` and `hasDuplicates` share recursion; we can compute both in one pass per layoutName and memoize. Use a `LayoutResult` object containing `allIds`, `rootIds`, `hasDuplicates`. Compute recursively with visiting stack. For each layoutName, compute union over files.
+
+```
+private static class LayoutResult {
+    Set<String> allIds;
+    Set<String> rootIds;
+    boolean hasDuplicates;
+}
+```
+
+Map `mLayoutResults` memo. Compute with visiting set.
+
+But `LayoutResult` for a layoutName should aggregate across config files. For each file:
+- ownIds set.
+- rootId set (maybe empty if no root).
+- includes: for each include, get LayoutResult of referenced layout (recursively). Apply override: incAllIds = ref.allIds - ref.rootIds + override. incRootIds? For nested includes, root ids of referenced layout are included if no override. If override, root ids replaced.
+- fileAllIds = ownIds ∪ incAllIds for all includes.
+- fileHasDuplicates: check duplicates among ownIds and incAllIds sets. But if incAllIds set itself has duplicates (ref.hasDuplicates true), then fileAllIds has duplicates. Also if two includes contribute same id, duplicate. If own id matches include id, duplicate.
+- Aggregate: layoutAllIds = union of fileAllIds; layoutRootIds = union of fileRootIds; layoutHasDuplicates = OR of fileHasDuplicates.
+
+But note: If a layout has multiple config files, and one config includes layout X with override, another config includes X without override, the union allIds includes both scenarios. That's conservative.
+
+Now for top-level file check, we need compute allIds for each include with override. We can use LayoutResult of referenced layout. For each include:
+```
+Set<String> incIds = new HashSet<>(ref.allIds);
+if (override != null) {
+    incIds.removeAll(ref.rootIds);
+    incIds.add(override);
+}
+```
+
+Then check collisions with parent seen and ref.hasDuplicates.
+
+But wait: `ref.hasDuplicates` indicates duplicates within referenced layout's own chain across any config. If true, report at include. Good.
+
+What about top-level file includes layout A, and A's allIds contains id X, and parent own id X. We report collision. Good.
+
+What about top-level file includes A and B, where A's allIds contains X and B's allIds contains X. We process A first, add X to seen. Process B, collision -> report at B. Good.
+
+What about top-level file includes A, A includes B, and parent own id X, B has X. A's allIds includes X, collision -> report at A. Good.
+
+What about top-level file includes A, A includes B and C, B and C share X. A.hasDuplicates true -> report at A. Good.
+
+What about top-level file includes A and B, A includes C, B includes C, C has X. A.allIds includes X, B.allIds includes X. Process A add X. Process B collision -> report at B. Also A.hasDuplicates false (C only once in A). Good.
+
+Now reporting location. For own element collision with include, we process includes after own ids. So report at include tag. But maybe better report at own element? The duplicate is due to include bringing in id. Reporting at include is fine. For two includes, report at second. Good.
+
+But what if top-level file includes A then includes B, and A has id X, parent also has own element id X. We report at A include (since parent seen has X). Good.
+
+What about top-level file includes A, A has internal duplicate. We report at A include. Good.
+
+Now need compute LayoutResult efficiently. Use memoization with visiting set to avoid cycles. Because layoutName can map to multiple FileInfo, and FileInfo includes reference layoutNames. We need compute LayoutResult per layoutName. Use map `mResults`.
+
+Implementation details:
+- `mFileInfos`: Map<String, FileInfo> by path.
+- `mLayouts`: Map<String, List<FileInfo>> by layout name.
+- `mResults`: Map<String, LayoutResult>.
+
+During `visitElement`, populate mFileInfos and mLayouts. But we need know file path and layout name. We can do this in `visitElement` or `beforeCheckFile`. Better in `beforeCheckFile`: create FileInfo for file if layout. But `beforeCheckFile` receives Context; we can cast to XmlContext? Actually `beforeCheckFile(Context context)` is called for each file. We can check `context.getResourceFolderType() == ResourceFolderType.LAYOUT` and create FileInfo. Then in `visitElement`, add ids/includes to existing FileInfo. But `visitElement` only called if applicable. We need ensure FileInfo exists. Use `context.getFile().getPath()` as key.
+
+Alternatively, in `visitElement`, lazily create FileInfo. But we need document root detection; root can be visited. Let's use `beforeCheckFile`.
+
+`beforeCheckFile(Context context)` signature: `public void beforeCheckFile(@NonNull Context context)`. We can check `context.getResourceFolderType() == ResourceFolderType.LAYOUT`. But `Context` may not have `getResourceFolderType()`? Actually `Context` has `getResourceFolderType()`? I think `XmlContext` has it. `Context` base may not. We can cast: `XmlContext xmlContext = (XmlContext) context;`. Or check in `visitElement` using `context.getResourceFolderType()`.
+
+Simpler: Do everything in `visitElement`. At first call for a file, create FileInfo if not exists. But we need file path; `context.getFile().getPath()`. We can use a map. In `visitElement`, check `mFileInfos.get(path)`; if null, create. Determine layout name from file name. Also record root when element is document element.
+
+But if file has no elements? Not possible. If file has only elements without id and no includes, visitElement won't be called if getApplicableElements returns only include? We want visit all elements. So return null from getApplicableElements. Then visitElement called for root at least. Good.
+
+Let's use `getApplicableElements()` returns null to visit all. Then in visitElement, lazily create FileInfo.
+
+Need detect root: `Element documentElement = context.getDocument().getDocumentElement(); if (element == documentElement) ...`. But `context.getDocument()` returns `Document`. Good.
+
+Need detect include: tag equals "include" (no namespace). Use `element.getTagName()`. Note tag name might be lowercase. Compare `equals("include")`.
+
+Need parse android:id. Use `element.getAttributeNS(ANDROID_URI, "id")`. For include, parse layout attr: `element.getAttribute("layout")`. The `layout` attribute is in default namespace, no prefix. Use `getAttribute("layout")`.
+
+Need parse id value: if not empty, `Lint.stripIdPrefix(id)`. If result not empty, store.
+
+Need location: `context.getLocation(element)`. But if we store location in FileInfo, we can use it later. However `XmlContext.getLocation` may create a Location object tied to current context; storing is fine.
+
+Need report: `context.report(ISSUE, location, message)`. But in `afterCheckProject`, the context is project Context, not XmlContext. We need report with a location. The `Context.report` method? Does `Context` have `report(Issue, Location, String)`? I think `Context` has `report` method. Actually `XmlContext` extends `Context` and adds `getLocation`. The `Context` class has `report(Issue, Location, String)`? Let me recall. In Lint API, `Context` has methods: `report(Issue issue, Location location, String message)` and `report(Issue issue, Location location, String message, Object data)` and `report(Issue issue, Location location, String message, LintFix fix)`. Yes. So in `afterCheckProject`, we can call `context.report(ISSUE, location, message)`. Good.
+
+But we need locations for elements from different files. `Location` objects can be created from `XmlContext.getLocation` during visit and stored. In afterCheckProject, use stored Location. Good.
+
+Need avoid storing `Element` nodes? We can store Location and id. For includes, store Location. For own ids, store Location. For root, store id and Location maybe not needed except for override removal? We only need root id set. We can store rootId in FileInfo.
+
+Need compute LayoutResult. Let's write helper methods.
+
+Potential issue: `Context` in `afterCheckProject` is the main project context. Reporting with that context is fine; it will associate with file in location.
+
+Need ensure we reset maps in `beforeCheckProject`.
+
+Need issue definition. Use `Issue.create("DuplicateIncludedIds", "Duplicate ids across layouts combined with include tags", "It's okay for two independent layouts to use the same ids. However, if layouts are combined with include tags, then the ids need to be unique within any chain of included layouts, or Activity#findViewById() can return an unexpected view.", Category.CORRECTNESS, 6, Severity.WARNING, new Implementation(DuplicateIdDetector.class, Scope.ALL_RESOURCE_FILES_SCOPE))`. Need choose priority/severity. Built-in DuplicateIncludedIds maybe WARNING priority 6. We'll use WARNING.
+
+Need explanation text maybe shorter. Use provided spec.
+
+Need category: `Category.CORRECTNESS`. Severity: `Severity.WARNING`.
+
+Need import `Category`, `Severity`, `Implementation`, `Issue`, `Location`, `ResourceXmlDetector`, `Scope`, `XmlContext`, `Context`, `Lint`, `ResourceFolderType`. Also `com.android.SdkConstants.ANDROID_URI` maybe.
+
+Need ensure `ResourceFolderType` import: `com.android.resources.ResourceFolderType`.
+
+Need `Lint` import: `com.android.tools.lint.detector.api.Lint`.
+
+Need `org.w3c.dom.Element`.
+
+Need `java.util.*`.
+
+Need class and methods.
+
+Let's write code.
+
+But before coding, let's verify exact API signatures and constants.
+
+#### `Scope` constants
+
+I need to be sure about `Scope.ALL_RESOURCE_FILES_SCOPE`. Let me recall from `com.android.tools.lint.detector.api.Scope`:
+```
+public static final EnumSet<Scope> ALL_RESOURCE_FILES_SCOPE = EnumSet.of(Scope.ALL_RESOURCE_FILES);
+```
+Yes. Implementation scope set should be `Scope.ALL_RESOURCE_FILES_SCOPE`.
+
+#### `Lint.stripIdPrefix`
+
+Signature: `public static String stripIdPrefix(String id)`. It handles `@+id/`, `@id/`, `@android:id/`, etc. Returns the id name. Good.
+
+#### `Context.getResourceFolderType`
+
+`Context` has `public ResourceFolderType getResourceFolderType()`. Actually I think `Context` has it. Let's check: In Lint API, `Context` class has fields `file`, `driver`, `project`, `mainProject`, `scope`. Methods include `getResourceFolderType()`. Yes.
+
+#### `XmlContext.getDocument`
+
+`public Document getDocument()`. Good.
+
+#### `XmlContext.getLocation`
+
+`public Location getLocation(Node node)`. Good.
+
+#### `Context.report`
+
+`public void report(Issue issue, Location location, String message)`. Good.
+
+#### `Detector.beforeCheckProject` and `afterCheckProject`
+
+Signatures:
+```
+public void beforeCheckProject(@NonNull Context context)
+public void afterCheckProject(@NonNull Context context)
+```
+Override.
+
+#### `Detector.beforeCheckFile`/`afterCheckFile`
+
+Maybe not needed. But we can use `beforeCheckFile` to create FileInfo. However `beforeCheckFile(Context)` may not be called for all files? It is. But we can avoid and create lazily in visitElement. Let's create lazily to reduce methods.
+
+#### `ResourceXmlDetector.getApplicableElements`
+
+Returns `Collection<String>`. Returning null means all elements. But in some versions, returning `XmlScannerConstants.ALL`? Actually XmlScanner has method `getApplicableElements()` returning `Collection<String>`. Returning null means all elements. I think yes. But to be safe, we can return `Collections.emptyList()`? No, that means none. We need all. Return null.
+
+But if API expects non-null? It likely handles null. In built-in detectors, they return null for all. E.g., `RtlModeDetector` returns null. Good.
+
+#### `ResourceXmlDetector.getApplicableAttributes`
+
+Not needed.
+
+#### `Element.getAttributeNS`
+
+Need ANDROID_URI. Use `SdkConstants.ANDROID_URI`. Import `com.android.SdkConstants`. But `SdkConstants` is a large class; importing is fine. Or define private static final String ANDROID_URI = "http://schemas.android.com/apk/res/android". Simpler.
+
+#### `Layout` attribute parsing
+
+`element.getAttribute("layout")`. The include tag's `layout` attribute is in no namespace. DOM `getAttribute` returns value by qualified name. Since attribute name is "layout" (no prefix), works. If someone uses `app:layout`? Not standard. Ignore.
+
+#### `ResourceFolderType.LAYOUT`
+
+`com.android.resources.ResourceFolderType` enum has `LAYOUT`. Good.
+
+#### `Location`
+
+No need to import details.
+
+#### `Issue.create`
+
+Need use `Issue.create(String, String, String, Category, int, Severity, Implementation)`. There are overloads with `String explanation` and `String moreInfo`. We'll use standard.
+
+#### `Implementation`
+
+`new Implementation(DuplicateIdDetector.class, Scope.ALL_RESOURCE_FILES_SCOPE)`.
+
+Now code structure.
+
+```java
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Lint;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceXmlDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Element;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+public class DuplicateIdDetector extends ResourceXmlDetector {
+    private static final String ANDROID_URI = "http://schemas.android.com/apk/res/android";
+    private static final String INCLUDE = "include";
+    private static final String LAYOUT_PREFIX = "@layout/";
+
+    public static final Issue ISSUE = Issue.create(
+            "DuplicateIncludedIds",
+            "Duplicate ids across layouts combined with include tags",
+            "It's okay for two independent layouts to use the same ids. However, if "
+                    + "layouts are combined with include tags, then the ids need to be unique "
+                    + "within any chain of included layouts, or Activity#findViewById() can "
+                    + "return an unexpected view.",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(DuplicateIdDetector.class, Scope.ALL_RESOURCE_FILES_SCOPE));
+
+    private final Map<String, FileInfo> mFileInfos = new HashMap<>();
+    private final Map<String, List<FileInfo>> mLayoutInfos = new HashMap<>();
+    private final Map<String, LayoutResult> mResults = new HashMap<>();
+
+    private static class FileInfo {
+        final File file;
+        final String layoutName;
+        final List<IdOccurrence> ids = new ArrayList<>();
+        final List<IncludeInfo> includes = new ArrayList<>();
+        final Set<String> rootIds = new HashSet<>();
+        final List<Location> rootLocations = new ArrayList<>(); // maybe not needed
+    }
+
+    private static class IdOccurrence {
+        final String id;
+        final Location location;
+        IdOccurrence(String id, Location location) { ... }
+    }
+
+    private static class IncludeInfo {
+        final Element element;
+        final String layoutName;
+        final String overrideId;
+        final Location location;
+        IncludeInfo(Element element, String layoutName, String overrideId, Location location) { ... }
+    }
+
+    private static class LayoutResult {
+        final Set<String> allIds;
+        final Set<String> rootIds;
+        final boolean hasDuplicates;
+        LayoutResult(Set<String> allIds, Set<String> rootIds, boolean hasDuplicates) { ... }
+    }
+
+    @Override
+    public void beforeCheckProject(@NonNull Context context) {
+        mFileInfos.clear();
+        mLayoutInfos.clear();
+        mResults.clear();
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return null; // visit all elements
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        if (context.getResourceFolderType() != ResourceFolderType.LAYOUT) {
+            return;
+        }
+        FileInfo fileInfo = getFileInfo(context);
+        String tag = element.getTagName();
+        if (INCLUDE.equals(tag)) {
+            String layout = element.getAttribute("layout");
+            if (layout != null && layout.startsWith(LAYOUT_PREFIX)) {
+                String included = layout.substring(LAYOUT_PREFIX.length());
+                String override = stripId(element.getAttributeNS(ANDROID_URI, "id"));
+                fileInfo.includes.add(new IncludeInfo(element, included, override,
+                        context.getLocation(element)));
+            }
+            return;
+        }
+        String id = stripId(element.getAttributeNS(ANDROID_URI, "id"));
+        if (id != null && !id.isEmpty()) {
+            fileInfo.ids.add(new IdOccurrence(id, context.getLocation(element)));
+            if (element == context.getDocument().getDocumentElement()) {
+                fileInfo.rootIds.add(id);
+            }
+        }
+    }
+
+    private FileInfo getFileInfo(XmlContext context) {
+        String path = context.getFile().getPath();
+        FileInfo info = mFileInfos.get(path);
+        if (info == null) {
+            File file = context.getFile();
+            String name = file.getName();
+            int dot = name.lastIndexOf('.');
+            if (dot > 0) {
+                name = name.substring(0, dot);
+            }
+            info = new FileInfo(file, name);
+            mFileInfos.put(path, info);
+            List<FileInfo> list = mLayoutInfos.get(name);
+            if (list == null) {
+                list = new ArrayList<>();
+                mLayoutInfos.put(name, list);
+            }
+            list.add(info);
+        }
+        return info;
+    }
+
+    @Nullable
+    private static String stripId(String id) {
+        if (id == null || id.isEmpty()) {
+            return null;
+        }
+        return Lint.stripIdPrefix(id);
+    }
+
+    @Override
+    public void afterCheckProject(@NonNull Context context) {
+        for (FileInfo fileInfo : mFileInfos.values()) {
+            checkFile(context, fileInfo);
+        }
+    }
+
+    private void checkFile(Context context, FileInfo fileInfo) {
+        Set<String> seen = new HashSet<>();
+        for (IdOccurrence occ : fileInfo.ids) {
+            seen.add(occ.id);
+        }
+        for (IncludeInfo include : fileInfo.includes) {
+            LayoutResult result = computeLayoutResult(include.layoutName, new HashSet<String>());
+            Set<String> incIds = new HashSet<>(result.allIds);
+            if (include.overrideId != null) {
+                incIds.removeAll(result.rootIds);
+                incIds.add(include.overrideId);
+            }
+            boolean duplicate = result.hasDuplicates;
+            List<String> duplicateIds = new ArrayList<>();
+            for (String id : incIds) {
+                if (!seen.add(id)) {
+                    duplicate = true;
+                    duplicateIds.add(id);
+                }
+            }
+            if (duplicate) {
+                String message = buildMessage(include.layoutName, duplicateIds);
+                context.report(ISSUE, include.location, message);
+            }
+        }
+    }
+
+    private String buildMessage(String layoutName, List<String> duplicateIds) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("The included layout \"@layout/").append(layoutName).append("\"");
+        if (!duplicateIds.isEmpty()) {
+            sb.append(" contains id");
+            if (duplicateIds.size() > 1) {
+                sb.append("s");
+            }
+            sb.append(" (");
+            for (int i = 0; i < duplicateIds.size(); i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(duplicateIds.get(i));
+            }
+            sb.append(") that conflict");
+            if (duplicateIds.size() == 1) {
+                sb.append("s");
+            }
+            sb.append(" with ids already used in this layout");
+        } else {
+            sb.append(" has duplicate ids");
+        }
+        return sb.toString();
+    }
+
+    @NonNull
+    private LayoutResult computeLayoutResult(@NonNull String layoutName, @NonNull Set<String> visiting) {
+        LayoutResult cached = mResults.get(layoutName);
+        if (cached != null) {
+            return cached;
+        }
+        if (!visiting.add(layoutName)) {
+            return new LayoutResult(Collections.<String>emptySet(), Collections.<String>emptySet(), false);
+        }
+        List<FileInfo> files = mLayoutInfos.get(layoutName);
+        if (files == null) {
+            visiting.remove(layoutName);
+            return new LayoutResult(Collections.<String>emptySet(), Collections.<String>emptySet(), false);
+        }
+        Set<String> allIds = new HashSet<>();
+        Set<String> rootIds = new HashSet<>();
+        boolean hasDuplicates = false;
+        for (FileInfo file : files) {
+            Set<String> fileIds = new HashSet<>();
+            // own ids
+            for (IdOccurrence occ : file.ids) {
+                if (!fileIds.add(occ.id)) {
+                    hasDuplicates = true;
+                }
+                allIds.add(occ.id);
+            }
+            rootIds.addAll(file.rootIds);
+            // includes
+            for (IncludeInfo include : file.includes) {
+                LayoutResult child = computeLayoutResult(include.layoutName, visiting);
+                Set<String> childIds = new HashSet<>(child.allIds);
+                if (include.overrideId != null) {
+                    childIds.removeAll(child.rootIds);
+                    childIds.add(include.overrideId);
+                }
+                for (String id : childIds) {
+                    if (!fileIds.add(id)) {
+                        hasDuplicates = true;
+                    }
+                    allIds.add(id);
+                }
+            }
+        }
+        visiting.remove(layoutName);
+        LayoutResult result = new LayoutResult(allIds, rootIds, hasDuplicates);
+        mResults.put(layoutName, result);
+        return result;
+    }
+}
+```
+
+Need refine: `computeLayoutResult` uses `visiting` set and removes layoutName before returning. But because multiple files for same layout may call recursively, and we cache result. The visiting set should be passed by caller and mutated. We add layoutName at start, remove at end. Good.
+
+But there is a subtle bug: When computing `hasDuplicates` for a layout file, if an include's child layout has internal duplicates (`child.hasDuplicates` true), we set `hasDuplicates = true` only if we detect collision in fileIds. But childIds set may not reflect internal duplicates because it's a set. If child layout has duplicate ids, childIds set has unique ids, so no collision in parent unless overlap. But we need propagate child.hasDuplicates. We should set `hasDuplicates = hasDuplicates || child.hasDuplicates`. In code above, we only set when collision. Need add `if (child.hasDuplicates) hasDuplicates = true;` before merging. Also if child override causes internal duplicate? child.hasDuplicates should account. Good.
+
+Also for top-level check, `result.hasDuplicates` indicates included layout has duplicates. Good.
+
+Need also handle case where include references unknown layout (mLayoutInfos null). computeLayoutResult returns empty. No report.
+
+Need handle `Lint.stripIdPrefix` may return same string if not id format? It likely returns substring after last slash? Let's check. It handles `@+id/`, `@id/`, `@android:id/`, `@+android:id/`. If no prefix, returns input? We can guard by checking value contains "/". But `Lint.stripIdPrefix` robust. If attribute value is `?attr/...`, it returns `...` maybe. But we only call on android:id, which should be id reference. Fine.
+
+Need handle `element.getAttributeNS(ANDROID_URI, "id")` returns empty string if missing. We check null/empty. Good.
+
+Need handle include override id: `stripId` returns null if empty.
+
+Need handle root detection: `element == context.getDocument().getDocumentElement()`. But `getDocumentElement()` may return null? Not for valid XML. Good.
+
+Need handle `context.getDocument()` maybe not available? It is.
+
+Need handle `getApplicableElements()` returning null. In some Lint versions, returning null may cause NullPointerException? I think returning null is allowed and means all. But to be safe, we can return `Collections.emptyList()`? No. We can return `Arrays.asList(INCLUDE)` and also use `visitElement` for includes, but then we wouldn't collect other ids. We need all elements. So null is correct.
+
+But maybe the API expects `Collection<String>` and null not allowed. Let's check `XmlScanner` interface:
+```
+@Nullable
+Collection<String> getApplicableElements();
+```
+Yes nullable. Good.
+
+Need import `Collection`. Already.
+
+Need import `File`. Use `java.io.File`. Add.
+
+Need ensure `FileInfo` constructor sets fields. Use final.
+
+Need `Location` import.
+
+Need `Context` import.
+
+Need `ResourceFolderType` import.
+
+Need `Lint` import.
+
+Need `SdkConstants`? We used literal ANDROID_URI. Fine.
+
+Need `NonNull`/`Nullable` imports. Use `com.android.annotations.NonNull` and `Nullable`. But if not available, compile fails. The package `com.android.annotations` exists in `com.android.tools.lint`? Actually `com.android.annotations.NonNull` is in `com.android.tools`? Hmm. In Android tools, there is `com.android.annotations.NonNull` in `com.android.tools.common`? I think it's `com.android.annotations.NonNull` from `com.android.tools:common`. Built-in detectors use it. But to be safe, we can omit parameter annotations entirely. The instructions: "correct, idiomatic, and compile cleanly". Built-in style uses `@NonNull`. But if environment doesn't have it, compile fails. However the package `com.android.tools.lint.checks` is part of Android Lint built-in checks, which definitely have `com.android.annotations.NonNull` available. So okay.
+
+But we can also use `org.jetbrains.annotations.NotNull`? Lint API uses `org.jetbrains.annotations.NotNull`? Actually `com.android.tools.lint.detector.api.Context` methods are annotated with `@NonNull` from `com.android.annotations`? Not sure. Use `com.android.annotations.NonNull`.
+
+Need ensure imports for annotations. Add.
+
+Need ensure `Collection<String> getApplicableElements()` return type. Use `Collection`. Good.
+
+Need ensure `visitElement` signature matches `XmlScanner`: `void visitElement(XmlContext context, Element element)`. Use `@NonNull` on params.
+
+Need ensure `beforeCheckProject` and `afterCheckProject` signatures. Good.
+
+Potential issue: `context.getResourceFolderType()` in `visitElement` may be expensive but fine.
+
+Potential issue: `mFileInfos` and maps need to be instance fields. Good.
+
+Potential issue: `computeLayoutResult` caches but uses `visiting` set that is per top-level call. If a layout is visited in two separate top-level checks, cached result used, no recursion. Good.
+
+Potential issue: Cycles: If A includes B and B includes A, visiting set prevents infinite. But result for A may be incomplete because B's result depends on A which is currently visiting. We return empty for B when cycle detected. Then A's result includes only own ids. Later when computing B as top-level, A's result may be computed fully (since B not visiting). But if mutual, top-level A will not detect duplicates involving B's ids beyond own. Acceptable for cycle (invalid anyway).
+
+Potential issue: `computeLayoutResult` returns empty for unknown layout. Good.
+
+Potential issue: `buildMessage` grammar. Let's refine message. For duplicateIds list not empty: "The included layout "@layout/name" contains id(s) (foo, bar) that conflict with ids already used in this layout." For singular: "contains id (foo) that conflicts with ids already used in this layout." Hmm "ids already used" plural even if one. Fine. For no duplicateIds but hasDuplicates true: "The included layout "@layout/name" has duplicate ids within its include chain." Good.
+
+But if `result.hasDuplicates` true and also collisions, duplicateIds not empty. Message includes both? We can include "and has additional internal duplicates"? Keep simple.
+
+Potential issue: We report at include location for internal duplicates of included layout even if no collision with parent. Good.
+
+Potential issue: We don't report top-level file's own id colliding with nested included id at the own element location; we report at include. That's okay.
+
+Potential issue: If top-level file includes A and B, and A has id X, B has id X. We report at B. Message says B contains id X that conflicts with ids already used in this layout. Good.
+
+Potential issue: If top-level file includes A and also has own id X, A includes B with X. We report at A. Message says A contains id X conflict. Good.
+
+Potential issue: If top-level file includes A which has internal duplicate X (two children), we report at A. Message says A has duplicate ids. Good.
+
+Potential issue: If top-level file includes A and B, A includes C, B includes C, C has id X. We report at B. Good.
+
+Potential issue: If top-level file includes A, A includes B and C with same X. A.hasDuplicates true -> report at A. Good.
+
+Potential issue: If top-level file includes A, A includes B with id X, and A also has own id X. A.hasDuplicates true -> report at A. Good.
+
+Potential issue: If top-level file includes A, A includes B with id X, and parent has id X. Report at A. Good.
+
+Now, do we need to also check top-level file's own ids against each other? No, DuplicateIds handles.
+
+Do we need to check top-level file includes unknown layout? No.
+
+Do we need to handle `<include>` with `android:id` override but no layout attr? We skip.
+
+Do we need to handle `layout="@layout/name" ` with whitespace? `getAttribute` returns trimmed? DOM returns raw value; likely no whitespace. We can trim: `layout.trim()`.
+
+Do we need to handle `layout="@layout/name"` with `?` or `*`? Not needed.
+
+Do we need to handle `tools:layout`? Not needed.
+
+Do we need to handle `app:layout`? Not needed.
+
+Do we need to handle `android:layout`? No.
+
+Now, let's think about compile issues with `Lint.stripIdPrefix`. It is in `com.android.tools.lint.detector.api.Lint`. Yes.
+
+What about `Scope.ALL_RESOURCE_FILES_SCOPE`? Need import `java.util.EnumSet`? No, constant is already EnumSet. Implementation constructor takes `EnumSet<Scope>`. Good.
+
+What about `Issue.create` explanation parameter type? It accepts `String`. Good.
+
+What about `Category.CORRECTNESS`? Yes.
+
+What about `Severity.WARNING`? Yes.
+
+Now, let's consider if `ResourceXmlDetector` is abstract? It extends `Detector` and implements `XmlScanner`. It may be abstract? I think it's a concrete class. We can extend it.
+
+Need ensure class is `public class DuplicateIdDetector extends ResourceXmlDetector`.
+
+Now, potential issue: `getApplicableElements()` returning null might cause `visitElement` to be called for elements in all XML files, including manifest, values, etc. We filter by `ResourceFolderType.LAYOUT`. Good.
+
+But `context.getResourceFolderType()` may return null for files not under res? Layout files are under res. Good.
+
+Now, potential issue: `context.getDocument().getDocumentElement()` may be null if document not parsed? Not for layout.
+
+Now, potential issue: `Element.getTagName()` for include may be lowercase. Good.
+
+Now, potential issue: `element.getAttribute("layout")` returns empty string if missing, not null. We check `layout != null && layout.startsWith(...)`. Empty string not null, but `startsWith` false. Good. Could also check `!layout.isEmpty()`.
+
+Now, potential issue: `element.getAttributeNS(ANDROID_URI, "id")` returns empty string if missing. `stripId` returns null. Good.
+
+Now, potential issue: `Lint.stripIdPrefix` may throw if value not id? It handles. Good.
+
+Now, potential issue: `FileInfo` stores `rootIds` set. For root detection, if root element has android:id, add to rootIds. If multiple config files, rootIds union. Good.
+
+Now, potential issue: In `computeLayoutResult`, when applying override, we remove `child.rootIds`. But `child.rootIds` is union of root ids across config files. Good.
+
+Now, potential issue: `computeLayoutResult` caches result per layoutName. But result depends on `mLayoutInfos` which is built during visit. After project check, maps stable. Good.
+
+Now, potential issue: `computeLayoutResult` uses `visiting` set passed by caller. If we call from `checkFile`, we pass `new HashSet<>()`. Good.
+
+Now, potential issue: `computeLayoutResult` modifies visiting set by adding and removing. If cached result exists, we don't add. Good.
+
+Now, potential issue: `computeLayoutResult` for a layoutName currently being computed but not in visiting? We add at start. Good.
+
+Now, potential issue: When computing `hasDuplicates` for a layout, if a file has two includes referencing same child layout with same ids, childIds set unique, so no collision. But the actual composed layout would have duplicate because two separate instances of same included layout each with same ids. Wait, if a layout includes the same layout twice, e.g., two `<include layout="@layout/foo"/>` where foo has id bar. Then the composed layout has two views with id bar. That's a duplicate. Our `fileIds` set merging childIds (unique) would not detect it because we add childIds once. We need detect duplicates when the same include layout is included multiple times or when two includes reference layouts sharing ids. The latter is detected in parent check if parent processes both includes. But internal to a layout file, if it includes same layout twice, we should mark hasDuplicates. Our current merging of sets loses multiplicity.
+
+To handle this, we should not use a set for fileIds when checking duplicates; we should track counts. For each own id, count 1. For each include, add childIds counts (with multiplicity). If any count >1, duplicate. But child layout may itself have duplicates; we need propagate counts? Simpler: For hasDuplicates boolean, we can check if any id appears in more than one source within the file. Since childIds is a set of ids in one instance of child layout. If same child included twice, the id appears in both instances -> duplicate. So we need compare against already seen ids in this file, not just add to set. Use a `Set<String> seenInFile` and for each source, if id already in seen, duplicate. But if child layout has internal duplicate, childIds set doesn't contain duplicate count, but child.hasDuplicates true. So we propagate.
+
+But if child layout includes same grandchild twice, child.hasDuplicates true. Good.
+
+So for each file, maintain `Set<String> seenInFile`. For own ids: if not added, add; else duplicate. For each include: for each id in childIds (after override), if already in seenInFile, duplicate; else add. Also if child.hasDuplicates, duplicate. This handles multiple includes of same layout.
+
+But what about a layout file with multiple config files? We aggregate hasDuplicates across config files. For allIds, union across config files. That's fine.
+
+However, for parent check, when we process an include, we use `result.allIds` set. If the included layout includes the same grandchild twice, result.hasDuplicates true. Good. If parent includes the same layout twice, we process first include: add incIds to parent seen. Process second include: incIds ids already in parent seen -> duplicate. Good.
+
+So modify `computeLayoutResult` duplicate detection to use counts.
+
+Implementation:
+```
+for (FileInfo file : files) {
+    Set<String> seenInFile = new HashSet<>();
+    for (IdOccurrence occ : file.ids) {
+        if (!seenInFile.add(occ.id)) hasDuplicates = true;
+        allIds.add(occ.id);
+    }
+    rootIds.addAll(file.rootIds);
+    for (IncludeInfo include : file.includes) {
+        LayoutResult child = computeLayoutResult(include.layoutName, visiting);
+        if (child.hasDuplicates) hasDuplicates = true;
+        Set<String> childIds = new HashSet<>(child.allIds);
+        if (include.overrideId != null) {
+            childIds.removeAll(child.rootIds);
+            childIds.add(include.overrideId);
+        }
+        for (String id : childIds) {
+            if (!seenInFile.add(id)) hasDuplicates = true;
+            allIds.add(id);
+        }
+    }
+}
+```
+
+Good.
+
+But note: `allIds` union across config files. If one config has duplicate id X, allIds contains X. Good.
+
+Now, for top-level check, we also need detect if the top-level file includes same layout twice. Our `seen` set and processing includes sequentially handles it. Good.
+
+Now, what about top-level file has own id X and includes layout A which includes layout B with id X. We report at A. Good.
+
+Now, what about top-level file includes layout A which includes layout B with id X, and also includes layout C with id X. A.hasDuplicates? A's seenInFile includes B ids and C ids; if X in both, duplicate -> A.hasDuplicates true -> report at A. Good.
+
+Now, what about top-level file includes layout A which includes layout B with id X twice. A.hasDuplicates true -> report at A. Good.
+
+Now, what about top-level file includes layout A and layout B, where A includes C with X and B includes C with X. Top-level seen after A includes X. B incIds includes X -> report at B. A.hasDuplicates false, B.hasDuplicates false. Good.
+
+Now, need adjust `buildMessage` for case where duplicateIds empty but hasDuplicates true. It says "has duplicate ids". Good.
+
+But if duplicateIds not empty and hasDuplicates also true, message only mentions conflict ids, not internal duplicates. Could improve: "contains id(s) ... that conflict with ids already used in this layout (and may have additional duplicate ids)". But not necessary.
+
+Now, need ensure `computeLayoutResult` caches. But if we use `visiting` set and remove layoutName at end, caching works.
+
+Potential issue: If layoutName not in mLayoutInfos, we return empty and don't cache. Could cache to avoid repeated lookups. Fine.
+
+Potential issue: `computeLayoutResult` returns a new empty result each time for unknown layout if not caching. We can cache unknown as empty. But fine.
+
+Potential issue: `mResults` may contain result for layoutName while currently computing? We add to visiting before checking cache. If a recursive call for same layoutName occurs while computing, it will find visiting contains it and return empty. It won't check cache because not cached yet. Good.
+
+Potential issue: `visiting` set is passed by caller; if we cache result, subsequent calls with different visiting set use cache. Good.
+
+Now, need think about `Location` for include. We stored `context.getLocation(element)`. In `afterCheckProject`, `context.report(ISSUE, include.location, message)`. The `context` is project Context. Does `Context.report` accept a Location from a different file? Yes, Location contains file. It should work.
+
+But `XmlContext.getLocation(element)` returns a Location tied to the file. Good.
+
+Now, need think about `context.getFile()` returns `File`. Good.
+
+Now, need think about `ResourceFolderType` import path. `com.android.resources.ResourceFolderType`. Good.
+
+Now, need think about `Lint.stripIdPrefix` import. `com.android.tools.lint.detector.api.Lint`. Good.
+
+Now, need think about `Collection` import. `java.util.Collection`. Good.
+
+Now, need think about `Arrays.asList`? Not used. We use null for getApplicableElements. Good.
+
+Now, need think about `EnumSet`? Not used directly; Scope constant is EnumSet. Good.
+
+Now, need think about `Nullable` import. `com.android.annotations.Nullable`. Good.
+
+Now, need think about `NonNull` import. `com.android.annotations.NonNull`. Good.
+
+Now, need think about `org.w3c.dom.Element` import. Good.
+
+Now, need think about `java.io.File` import. Good.
+
+Now, need think about `java.util.*` covers. But explicit imports are fine.
+
+Let's write final code. But before final, let's consider if there is a simpler known implementation. The user may expect a detector that uses `ResourceXmlDetector` and `getApplicableElements` returning `Arrays.asList(INCLUDE)`. But we need collect ids, so all elements. Fine.
+
+Potential issue: `getApplicableElements()` returning null might cause Lint to call visitElement for every element in every resource file, including values, drawable XML. We filter by layout. Good.
+
+Potential issue: `context.getResourceFolderType()` may not be available in `visitElement`? It is in XmlContext. Good.
+
+Potential issue: `context.getDocument().getDocumentElement()` may be called repeatedly. Fine.
+
+Potential issue: `element == context.getDocument().getDocumentElement()` uses reference equality. DOM nodes are same. Good.
+
+Potential issue: If a layout file uses `<merge>` as root and includes another layout, root has no id. Fine.
+
+Potential issue: If a layout file has `<include>` as root, root id detection on include? We skip adding include to own ids. But include can have android:id override; we store in IncludeInfo. Should we also consider include root override as root id of this file? If this file is included elsewhere, the include tag's override id becomes the root id of this file's composition? Actually if file A has root `<include layout="@layout/B" android:id="foo"/>`, and another file includes A, then A's composition includes B's ids with override foo. The root id of A's composition is foo (override). For duplicate detection when A is included, we treat include override as part of included ids. But for A being included by parent, parent processes A's include and applies A's own override? Wait, A is a layout file. When parent includes A, `computeLayoutResult(A)` computes A's allIds. A's own includes are processed. If A's root is include with override, that override replaces B's root id. Our `computeLayoutResult` for A will process that include and apply override. Good. The root id of A itself (as a file) is not relevant unless A is included and its root has id. But A's root include override is handled. What if A's root is a FrameLayout with id foo, and parent includes A. Then A's root id foo is part of A's allIds. We record rootIds for A. If parent includes A with override bar, we remove foo and add bar. Good.
+
+But what if A's root is include with override foo? We don't record a rootId for A because include is not own element. However A's allIds includes foo because override applied to B. If parent includes A with override bar, we remove A's rootIds (which may be B's root id if B's root not overridden? Wait, A's rootIds set is for A's own root element. Since A's root is include, we don't add override foo to rootIds. But when parent includes A, it overrides A's root id (which would be the id of A's root element if it had one). Since A's root is include, the parent override replaces the include's override? Actually if parent includes A with android:id="bar", it overrides the id of A's root view. A's root view is the view inflated from the include inside A (B's root). The include inside A has override foo, so A's root view id is foo. Parent override bar replaces foo. So parent should remove foo from A's allIds and add bar. But our `computeLayoutResult(A)` returns rootIds = A's own root ids (FrameLayout root id), not include override foo. So parent override bar would remove wrong ids.
+
+Thus we need rootIds of a layout to include the effective root id of the layout's composition, which may be an include override if root is include. More generally, the root id of a layout file is the id of its root element after include override. If root is include, the effective root id is the include's override id (or the included layout's root id if no override). If root is normal view, effective root id is its android:id.
+
+Our current `rootIds` only records own root element android:id. We need compute effective root ids for each file. For a layout file, effective root id:
+- If document root is include: effective root id = include.overrideId if present, else root id of referenced layout (child.rootIds after applying child's includes? Actually the referenced layout's root id is its effective root id).
+- If document root is normal element: effective root id = its android:id if any.
+- If document root is merge: no root id.
+
+But for parent override, we need remove the effective root id(s) of the included layout. Since layout can have multiple config files with different roots, effective root ids union.
+
+So we need compute effective root ids per file, not just own root element id. Then `rootIds` for LayoutResult is union of file effective root ids.
+
+Let's adjust.
+
+In FileInfo, store `effectiveRootIds` set. During visit, after document fully visited? We need know root element and if it's include, need child layout info. We can compute effective root ids in `afterCheckProject` per file using mLayoutInfos.
+
+Simpler: In `computeLayoutResult`, for each file, compute effectiveRootIds:
+- Determine root element of file. We can store rootElement in FileInfo. During visitElement, if element is document element, store reference? But we may not want to store Element. We can store a boolean `isRootInclude` and override/root id. Actually we can store `rootId` string if root is normal; `rootIncludeLayout` and `rootIncludeOverride` if root is include.
+
+Let's add fields to FileInfo:
+```
+Element rootElement; // store reference to document root
+String rootOverrideId; // if root is include, override id
+```
+During visitElement, if element == documentElement, store `rootElement = element`. If tag is include, parse override and layout. But we already add include to includes list. We can also mark if it's root include. Since includes list contains it, we can find it: if fileInfo.includes contains an IncludeInfo whose element == rootElement. We can check in compute.
+
+Better: In FileInfo, store `rootElement` reference. Then in compute, check rootElement tag. If include, find matching IncludeInfo (by element reference) to get override and layout. If override present, effective root id = override. Else effective root id = effective root id(s) of referenced layout (child.rootIds). If normal element, effective root id = its android:id.
+
+But storing Element references after project check is okay; DOM still available? The `Context` may keep documents. Usually yes. But to be safe, compute effective root ids during visit: when root element visited, if include, store rootInclude fields; if normal, store rootId.
+
+Let's add fields:
+```
+final List<IncludeInfo> includes;
+String rootId; // id if root is non-include and has android:id
+IncludeInfo rootInclude; // if root is include
+```
+During visitElement:
+- If element == documentElement:
+   - if tag is INCLUDE: find or create IncludeInfo? We will create IncludeInfo anyway because tag is include. Set `fileInfo.rootInclude = includeInfo`.
+   - else: parse id and set `fileInfo.rootId = id`.
+But we also add include to includes list. So rootInclude reference can be set after adding.
+
+Implementation:
+```
+if (element == context.getDocument().getDocumentElement()) {
+    if (INCLUDE.equals(tag)) {
+        // after adding include below, set rootInclude
+    } else {
+        String rootId = stripId(...);
+        if (rootId != null) fileInfo.rootId = rootId;
+    }
+}
+if (INCLUDE.equals(tag)) { ... add include ... if (root) fileInfo.rootInclude = includeInfo; }
+```
+
+But we need includeInfo object before adding. Create IncludeInfo, add to list, and if root, assign.
+
+For normal root, set rootId.
+
+Then in computeLayoutResult, for each file:
+```
+Set<String> effectiveRootIds = new HashSet<>();
+if (file.rootId != null) effectiveRootIds.add(file.rootId);
+if (file.rootInclude != null) {
+    LayoutResult child = computeLayoutResult(file.rootInclude.layoutName, visiting);
+    if (file.rootInclude.overrideId != null) {
+        effectiveRootIds.add(file.rootInclude.overrideId);
+    } else {
+        effectiveRootIds.addAll(child.rootIds);
+    }
+}
+fileRootIds = effectiveRootIds;
+rootIds (layout) addAll(fileRootIds);
+```
+
+But careful: If root is include and override null, child.rootIds may be empty if child root is merge. Fine.
+
+Now, when parent includes this layout with override, we remove this layout's rootIds (effectiveRootIds) and add override. Good.
+
+Also, when computing `allIds` for this layout, we need include root's ids. The include in root is also in includes list, so processed. But if root include has override, the override id is included in allIds via the include processing (remove child.rootIds, add override). The effectiveRootIds also includes override. That's consistent.
+
+But if root include has no override, allIds includes child.rootIds (because no override). effectiveRootIds includes child.rootIds. Good.
+
+Now, for duplicate detection within file, root include's ids are processed as an include. Good.
+
+Now, for top-level check, parent includes layout A with override. We remove A.rootIds (effective root ids) and add override. Good.
+
+Now, what about layout A root is include with override foo, and parent includes A with override bar. Parent should remove foo and add bar. Our A.rootIds contains foo. Parent override removes foo, adds bar. Good.
+
+What about layout A root is include with no override, referencing B whose root id is baz. A.rootIds contains baz. Parent includes A with override bar -> remove baz, add bar. Good.
+
+What about layout A root is FrameLayout with id foo. A.rootIds contains foo. Parent includes A with override bar -> remove foo, add bar. Good.
+
+Now, need store rootInclude in FileInfo. Add field.
+
+Let's adjust FileInfo:
+```
+static class FileInfo {
+    final File file;
+    final String layoutName;
+    final List<IdOccurrence> ids = new ArrayList<>();
+    final List<IncludeInfo> includes = new ArrayList<>();
+    String rootId;
+    IncludeInfo rootInclude;
+}
+```
+
+In visitElement, detect root and set.
+
+In computeLayoutResult, compute effectiveRootIds.
+
+Let's rewrite computeLayoutResult accordingly.
+
+```
+private LayoutResult computeLayoutResult(String layoutName, Set<String> visiting) {
+    LayoutResult cached = mResults.get(layoutName);
+    if (cached != null) return cached;
+    if (!visiting.add(layoutName)) return new LayoutResult(emptySet, emptySet, false);
+    List<FileInfo> files = mLayoutInfos.get(layoutName);
+    if (files == null) {
+        visiting.remove(layoutName);
+        return new LayoutResult(emptySet, emptySet, false);
+    }
+    Set<String> allIds = new HashSet<>();
+    Set<String> rootIds = new HashSet<>();
+    boolean hasDuplicates = false;
+    for (FileInfo file : files) {
+        Set<String> seenInFile = new HashSet<>();
+        // own ids
+        for (IdOccurrence occ : file.ids) {
+            if (!seenInFile.add(occ.id)) hasDuplicates = true;
+            allIds.add(occ.id);
+        }
+        // effective root ids
+        Set<String> fileRootIds = new HashSet<>();
+        if (file.rootId != null) fileRootIds.add(file.rootId);
+        if (file.rootInclude != null) {
+            LayoutResult child = computeLayoutResult(file.rootInclude.layoutName, visiting);
+            if (file.rootInclude.overrideId != null) {
+                fileRootIds.add(file.rootInclude.overrideId);
+            } else {
+                fileRootIds.addAll(child.rootIds);
+            }
+        }
+        rootIds.addAll(fileRootIds);
+        // includes
+        for (IncludeInfo include : file.includes) {
+            LayoutResult child = computeLayoutResult(include.layoutName, visiting);
+            if (child.hasDuplicates) hasDuplicates = true;
+            Set<String> childIds = new HashSet<>(child.allIds);
+            if (include.overrideId != null) {
+                childIds.removeAll(child.rootIds);
+                childIds.add(include.overrideId);
+            }
+            for (String id : childIds) {
+                if (!seenInFile.add(id)) hasDuplicates = true;
+                allIds.add(id);
+            }
+        }
+    }
+    visiting.remove(layoutName);
+    LayoutResult result = new LayoutResult(allIds, rootIds, hasDuplicates);
+    mResults.put(layoutName, result);
+    return result;
+}
+```
+
+Wait: If file.rootInclude is also in file.includes list, we process it twice: once for rootIds, once in includes loop. That's okay; the include loop adds its ids to allIds and seenInFile. The rootIds computation uses it separately. But if rootInclude has override, include loop removes child.rootIds and adds override. Good. The rootIds computation adds override. Consistent.
+
+But if rootInclude override null, rootIds adds child.rootIds. Include loop adds child.allIds (including child.rootIds). Good.
+
+Now, what about a file with root include and also other includes. Duplicate detection within file uses seenInFile. Good.
+
+Now, for top-level check, we need compute LayoutResult for each include's layoutName. But note: The include's referenced layout may have multiple config files. We use aggregated result. Good.
+
+Now, for top-level file itself, we don't compute its LayoutResult unless it's included by another file. But we check it directly.
+
+Now, potential issue: `computeLayoutResult` for layoutName currently being computed but called from a different branch? Visiting set handles.
+
+Now, potential issue: `file.rootInclude` may reference a layout not found. `computeLayoutResult` returns empty. effectiveRootIds empty. Fine.
+
+Now, potential issue: `file.rootInclude.overrideId` may be null and child.rootIds empty (merge). effectiveRootIds empty. Fine.
+
+Now, potential issue: `file.rootId` may be null. Fine.
+
+Now, need adjust `checkFile` to use `result.hasDuplicates` and duplicateIds.
+
+```
+private void checkFile(Context context, FileInfo fileInfo) {
+    Set<String> seen = new HashSet<>();
+    for (IdOccurrence occ : fileInfo.ids) {
+        seen.add(occ.id);
+    }
+    for (IncludeInfo include : fileInfo.includes) {
+        LayoutResult result = computeLayoutResult(include.layoutName, new HashSet<String>());
+        Set<String> incIds = new HashSet<>(result.allIds);
+        if (include.overrideId != null) {
+            incIds.removeAll(result.rootIds);
+            incIds.add(include.overrideId);
+        }
+        boolean hasDuplicates = result.hasDuplicates;
+        List<String> duplicateIds = new ArrayList<>();
+        for (String id : incIds) {
+            if (!seen.add(id)) {
+                hasDuplicates = true;
+                duplicateIds.add(id);
+            }
+        }
+        if (hasDuplicates) {
+            context.report(ISSUE, include.location, buildMessage(include.layoutName, duplicateIds));
+        }
+    }
+}
+```
+
+But if `result.hasDuplicates` true and duplicateIds empty, we report. Good.
+
+But if `result.hasDuplicates` false but duplicateIds not empty, report. Good.
+
+But if both true, report once. Good.
+
+Now, `buildMessage` for duplicateIds not empty: "contains id(s) ... that conflict with ids already used in this layout". For hasDuplicates true and duplicateIds empty: "has duplicate ids". For both: message only mentions conflict ids. Could add "and has additional duplicate ids" if result.hasDuplicates && !duplicateIds.isEmpty(). Let's adjust message to mention both.
+
+```
+private String buildMessage(String layoutName, List<String> duplicateIds, boolean hasInternalDuplicates) {
+    StringBuilder sb = new StringBuilder();
+    sb.append("The included layout \"@layout/").append(layoutName).append("\"");
+    if (!duplicateIds.isEmpty()) {
+        sb.append(" contains id");
+        if (duplicateIds.size() > 1) sb.append("s");
+        sb.append(" (");
+        for (int i = 0; i < duplicateIds.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(duplicateIds.get(i));
+        }
+        sb.append(") that conflict");
+        if (duplicateIds.size() == 1) sb.append("s");
+        sb.append(" with ids already used in this layout");
+    }
+    if (hasInternalDuplicates) {
+        if (!duplicateIds.isEmpty()) sb.append(" and");
+        sb.append(" has duplicate ids within its include chain");
+    }
+    return sb.toString();
+}
+```
+
+Call with `result.hasDuplicates` (internal duplicates of included layout). Note: `result.hasDuplicates` may be true due to collisions with parent? No, `result.hasDuplicates` is computed independently of parent. It indicates internal duplicates within the included layout's chain. Good.
+
+But if `result.hasDuplicates` is true because the included layout includes itself? Cycle returns empty, no duplicates. Fine.
+
+Now, what about top-level file includes layout A, and A has internal duplicate id X that also collides with parent id Y? duplicateIds contains Y, hasInternalDuplicates true. Message mentions both. Good.
+
+Now, need ensure `computeLayoutResult` caches. But `result.hasDuplicates` for layout A includes duplicates within A's chain. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A may be called from `checkFile` and also from rootInclude of some file. The visiting set is new each call. Caching avoids recomputation.
+
+Now, potential issue: `computeLayoutResult` uses `mLayoutInfos` which maps layout name to list of FileInfo. We populate in `getFileInfo`. Good.
+
+Now, potential issue: `getFileInfo` uses file name without extension as layoutName. For files in `layout-land/foo.xml`, name is `foo`. Good.
+
+Now, potential issue: `mFileInfos` key path; `mLayoutInfos` list includes all config variants. Good.
+
+Now, potential issue: `context.getFile().getName()` returns name with extension. Good.
+
+Now, potential issue: `FileInfo` constructor. Let's write:
+```
+FileInfo(File file, String layoutName) {
+    this.file = file;
+    this.layoutName = layoutName;
+}
+```
+
+Now, need ensure `IdOccurrence` and `IncludeInfo` constructors.
+
+Now, need ensure `LayoutResult` constructor.
+
+Now, need ensure `emptySet` usage. We can use `Collections.emptySet()`. But generic type inference: `Collections.<String>emptySet()`. Good.
+
+Now, need ensure `HashSet<String>` creation. Good.
+
+Now, need ensure `List<FileInfo>` etc.
+
+Now, need ensure imports include `java.io.File`.
+
+Now, need ensure no extra explanation output.
+
+Now, let's consider if `Lint.stripIdPrefix` might return empty string for `@+id/`? If id value is `@+id/` with no name, returns empty. We treat as null? `stripId` returns null if empty. Good.
+
+Now, need think about `android:id` on include override. If include has android:id but no layout attr, we still store override. But in compute, include.layoutName may be null? We only add include if layout attr starts with @layout/. So layoutName non-null. override may be non-null. Good.
+
+Now, need think about `layout` attribute value could be `@layout/name` with `+`? No.
+
+Now, need think about `layout` attribute could reference a layout in a library. Name only; we map by name. Good.
+
+Now, need think about `layout` attribute could be `@layout/name` but with `tools:layout`? Not needed.
+
+Now, need think about `include` tag can have `android:layout`? No.
+
+Now, need think about `view` tag class attribute and id. We capture id. Good.
+
+Now, need think about `fragment` tags with `android:id`. Captured. Good.
+
+Now, need think about `merge` root with `android:id`? Merge shouldn't have id but if it does, captured as rootId. Fine.
+
+Now, need think about `tools:viewBindingIgnore`? Not needed.
+
+Now, need think about `tools:node`? Not needed.
+
+Now, need think about `Location` objects stored in `IdOccurrence`. We don't use them currently except include. We could remove IdOccurrence location to save memory, but fine. Actually we don't use own id locations for reporting. We report at include. So we can store only id string in a list. But keep simple.
+
+Now, need think about `seen.add` returns boolean. We use `if (!seen.add(id))`. Good.
+
+Now, need think about `computeLayoutResult` `seenInFile.add` returns false if duplicate. Good.
+
+Now, need think about `allIds` union across config files. If a layout has duplicates in one config, allIds contains id. Good.
+
+Now, need think about `rootIds` union across config files. Good.
+
+Now, potential issue: `computeLayoutResult` for layoutName currently in visiting returns empty set. But if a cycle exists, the layout's result may be incomplete. However cycles are invalid; fine.
+
+Now, potential issue: `computeLayoutResult` uses `visiting.remove(layoutName)` before caching. If a recursive call for same layoutName happens after removal but before caching (not possible because we only remove at end after all recursion done). Good.
+
+Now, potential issue: `computeLayoutResult` may compute result for layoutName and cache. If later a new file with same layoutName? Files are all known before afterCheckProject. Good.
+
+Now, potential issue: `beforeCheckProject` clears maps. Good.
+
+Now, potential issue: `afterCheckProject` iterates mFileInfos.values(). The order not important.
+
+Now, potential issue: `context.report` in `afterCheckProject` with project Context. Does it need `Scope`? No.
+
+Now, potential issue: `Issue` ID "DuplicateIncludedIds". Good.
+
+Now, potential issue: `Category.CORRECTNESS` maybe `Category.CORRECTNESS` is a `Category` object. Yes.
+
+Now, potential issue: `Severity.WARNING` object. Yes.
+
+Now, potential issue: `Scope.ALL_RESOURCE_FILES_SCOPE` constant. Need verify exact name. I recall `Scope.ALL_RESOURCE_FILES_SCOPE`. Let's double-check. In Lint API, there is `Scope.RESOURCE_FILE_SCOPE` and `Scope.ALL_RESOURCE_FILES_SCOPE`. Yes. Implementation constructor: `Implementation(DuplicateIdDetector.class, Scope.ALL_RESOURCE_FILES_SCOPE)`. Good.
+
+Now, potential issue: `ResourceXmlDetector` may require `getApplicableElements` to return non-null? It implements `XmlScanner`. The interface method annotated `@Nullable`. Good.
+
+Now, potential issue: `visitElement` may be called for elements in non-layout files if getApplicableElements null. We filter. Good.
+
+Now, potential issue: `context.getDocument().getDocumentElement()` may be called for every element to check root. Slight overhead. Could store documentElement in FileInfo? Not necessary.
+
+Now, potential issue: `element == context.getDocument().getDocumentElement()` reference equality. For each visit, `getDocumentElement()` returns same node. Good.
+
+Now, potential issue: If a layout file has `<include>` as root, we set `fileInfo.rootInclude = includeInfo`. But we also add includeInfo to includes list. Good.
+
+Now, potential issue: If root is include and has override, `fileInfo.rootId` remains null. Good.
+
+Now, potential issue: If root is include and override null, effective root id comes from child. Good.
+
+Now, potential issue: If root is include and child not found, effective root empty. Good.
+
+Now, potential issue: If root is normal element with id, `fileInfo.rootId` set. Good.
+
+Now, potential issue: If root is normal element without id, rootId null. Good.
+
+Now, potential issue: If file has multiple elements and root visited after children? DOM traversal order is depth-first pre-order? `visitElement` likely called in document order. Root first. So rootInclude set before children. Good.
+
+Now, potential issue: `getFileInfo` creates FileInfo on first visit. If root is first element, fine.
+
+Now, potential issue: `mLayoutInfos` list for layout name. Good.
+
+Now, potential issue: `computeLayoutResult` for layoutName with multiple files. It computes union. But if one file has root include override and another file has root view id, rootIds union includes both. Good.
+
+Now, potential issue: `computeLayoutResult` for layoutName with multiple files where one file includes layout X and another includes Y. allIds union includes both. Good.
+
+Now, potential issue: `computeLayoutResult` for layoutName with multiple files where one file has duplicate and another doesn't. hasDuplicates true. Good.
+
+Now, potential issue: `checkFile` for top-level file uses `computeLayoutResult` on include layoutName. This aggregates all config files. If a duplicate only occurs in a config not used at runtime, we may report false positive. But Lint is conservative. Acceptable.
+
+Now, potential issue: `checkFile` for top-level file does not compute LayoutResult for the file itself. If the file is a layout that is only top-level, fine. But if it is also included by another file, we check it as top-level and as included. Good.
+
+Now, potential issue: `checkFile` reports at include tag for any collision. But if a top-level file has own id X and includes A which includes B with X, we report at A. The own element with X is not flagged. That's okay.
+
+Now, potential issue: `checkFile` does not report if top-level file includes A and B, and A and B share id X but A and B are not direct includes? They are direct includes. We report at B. Good.
+
+Now, potential issue: `checkFile` does not report if top-level file includes A, and A includes B, and A and parent share no ids, but B and parent share id X. We report at A. Good.
+
+Now, potential issue: `checkFile` does not report if top-level file includes A, A includes B, B includes C, and C id X duplicates parent id X. A.hasDuplicates? A's allIds includes X via B->C. Parent seen includes X. When processing A include, incIds includes X -> collision -> report at A. Good.
+
+Now, potential issue: `checkFile` does not report if top-level file includes A, A includes B and C, B includes D, C includes D, D has id X. A's allIds includes X once (D ids set). A.hasDuplicates false. Parent includes A only, no collision. But actual layout has two D views (via B and C) with same id X. Wait, A includes B and C, both include D. Then A's composition has two instances of D, each with id X. That's a duplicate within A. Does our `computeLayoutResult(A)` detect this? A's seenInFile: process B include -> add D ids (X). Process C include -> add D ids (X) -> seenInFile already contains X -> duplicate. So A.hasDuplicates true. Good. Report at A in parent. Good.
+
+Now, potential issue: `computeLayoutResult` uses `child.allIds` set, losing multiplicity within child. But child.hasDuplicates propagates. For duplicate within child due to two includes of same grandchild, child.hasDuplicates true. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A that includes B and C (both include D). It detects duplicate X because B and C both add X. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A that includes B twice. B's allIds set added twice -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A that includes B and C where B and C each have id X but B and C are different layouts. A's seenInFile: add B ids X, add C ids X -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A that includes B which includes C and D sharing X. B.hasDuplicates true -> A.hasDuplicates true. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A that includes B which includes C with X, and A also includes C with X. A's seenInFile: B include adds X, C include adds X -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A that includes B with override X, and B's child has X. B.hasDuplicates? B's seenInFile: own child X, include override X -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root include with override X, and A also has child with X. A's seenInFile: root include adds X (override), own child X -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X and includes B with X. A's seenInFile: own root X, include B X -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X and root include override X? Root can't be both. Fine.
+
+Now, potential issue: `computeLayoutResult` for layout A with no own ids and includes B and C sharing X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B with override X, and includes C with X. A's seenInFile: B incIds includes override X, C incIds includes X -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B with override X, and B's root id is Y. A's rootIds effective? If A root is normal with id Z, rootIds {Z}. Parent includes A with override W -> remove Z add W. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root is include with override X. A.rootIds {X}. Parent includes A with override W -> remove X add W. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root is include with no override referencing B. A.rootIds = B.rootIds. Parent includes A with override W -> remove B.rootIds add W. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root is include with override X referencing B. A's allIds includes B ids with root replaced by X. A.rootIds includes X. Parent includes A with override W -> remove X add W. But A's allIds also contains X (override). Removing X and adding W correct. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root is include with override X referencing B, and B has child id X. A.hasDuplicates true. Parent includes A with override W. incIds = A.allIds - A.rootIds + W = (B ids with X instead of B.root) - {X} + W. Since X was duplicate, removing X may leave X from child still present. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root is include with override X referencing B, and B's root id is Y. A.allIds includes X (override) and B children. A.rootIds {X}. Parent includes A with override W -> remove X add W. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B with override X, and A's root id is X. A's seenInFile: root X, include B override X -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B with override X, and A includes C with X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B, B's root id X. A's root id X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B, B has child X. A includes C, C has child X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B, B includes C, C has X. A includes D, D includes C, C has X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B and C. B and C are same layout but included once each. If layout L has id X, then A has two views X. Duplicate. Our code: B include adds X, C include adds X -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B and C. B and C are different layouts but share id X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B. B has internal duplicate X and Y. B.hasDuplicates true. A.hasDuplicates true. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B. B has id X. A includes B again. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B. B has id X. A's parent includes A and also includes B. Parent check: A incIds includes X, B incIds includes X -> collision at B. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B with override X. B's root id Y. A's allIds includes X and B children. A.rootIds {X}. Parent includes A with override Z -> remove X add Z. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B with override X. B's root id Y. A includes C with X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B with override X. B has child X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B with override X. B's root id X (same as override). No duplicate. A.rootIds {X}. Parent includes A with override Y -> remove X add Y. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B with override X. B's root id Y, child Z. A's allIds {X, Z}. A.rootIds {X}. Parent includes A no override -> A.allIds {X,Z}. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override. B's root id Y, child Z. A's allIds {Y,Z}. A.rootIds {Y}. Parent includes A override X -> remove Y add X -> {X,Z}. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override. B's root id Y. A's root id Y. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root include override X referencing B. B's root id Y. A's allIds {X, B children}. A.rootIds {X}. Parent includes A override Z -> remove X add Z. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root include no override referencing B. B's root id Y. A's allIds {Y, B children}. A.rootIds {Y}. Parent includes A override Z -> remove Y add Z. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root include override X referencing B. A also includes C with X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root include override X referencing B. A's own child has X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with override X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with root id X (no override). Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with child X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with override Y. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with override X but B's root id Y. Duplicate because override X equals A root X. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with override Y, B has child X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with override Y, B has root id X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with override Y, B has child Z. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with override X, B has child X. Duplicate (override X and child X). Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with override X, B's root id Y. Duplicate (override X equals root X). Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with override X, B has child W. Duplicate only X. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with override X, B includes C with X. Duplicate X multiple. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with override Y, B includes C with X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A root view id X. A includes B with override Y, B includes C with Y. A's seenInFile: root X, B incIds {Y, C ids maybe Y}. If C has Y, B incIds contains Y (from C) and override Y? Wait B override Y replaces B's root. B's allIds includes Y (override) and C ids. If C has Y, duplicate within B -> B.hasDuplicates true. A's seenInFile adds Y once. No collision with X. A.hasDuplicates true due to B. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B with override Y, B's root id X. A's root id X. A's seenInFile: root X, B incIds includes Y and B children. Does B incIds include X? No, because override Y replaces B root X. So A's seenInFile has X and Y and children. No collision between X and Y unless child X. But A root X duplicates with B root X? B root X is replaced by Y, so not present. Correct.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B's root id X. A's root id X. A's seenInFile: root X, B incIds includes X (B root) -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B's root id X. A's root id Y. A's seenInFile: root Y, B incIds includes X. No duplicate unless X=Y. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B's root id X. A includes C no override, C's root id X. A's seenInFile: B X, C X -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B's root id X. A includes C no override, C has child X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C no override, C has child X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C with override X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C with override Y, C root id X. Duplicate? C incIds = C ids - C.rootIds + Y. C root id X removed, Y added. If C child X remains, duplicate with B child X. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C with override Y, C root id X, no child X. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C with override X, C root id Y. C incIds includes X (override) and C children. Duplicate with B child X. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C with override X, C has child X. Duplicate within C and with B. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C with override X, C root id X. C incIds: remove root X add X -> same. C allIds includes X and children. Duplicate with B. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C with override Y, C root id X, child X. C incIds: remove X add Y. C allIds includes Y and child X. Duplicate with B child X. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C with override Y, C root id Z, child X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C with override Y, C root id Z, child W. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C with override Y, C root id Z, child W. A's root id X. A's seenInFile: root X, B child X duplicate, C incIds {Y,W,Z removed}. No duplicate with C. A.hasDuplicates true. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C with override Y, C root id Z, child W. A's root id Y. A's seenInFile: root Y, B X, C incIds {Y,W}. Y collision -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C with override Y, C root id Z, child W. A's root id W. A's seenInFile: root W, B X, C incIds {Y,W}. W collision -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C with override Y, C root id Z, child W. A's root id Z. A's seenInFile: root Z, B X, C incIds {Y,W}. No collision. But C root id Z is removed because override Y. So A root Z does not duplicate with C root Z (not present). Correct.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C no override, C root id Z. A's root id Z. A's seenInFile: root Z, B X, C incIds includes Z (C root). Z collision -> duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B has child X. A includes C no override, C root id Z. A's root id Y. No collision. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C child X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C with override X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C with override Y, C root id X. C incIds: remove X add Y. No duplicate with B root X. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C with override Y, C root id X, child X. C incIds: remove X add Y, child X remains. Duplicate with B root X. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C with override Y, C root id X, child W. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C with override Y, C root id W, child X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C with override Y, C root id W, child Z. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C with override Y, C root id W, child Z. A root id Z. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C with override Y, C root id W, child Z. A root id Y. Duplicate (override Y equals root Y). Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C with override Y, C root id W, child Z. A root id W. Duplicate? C root W removed by override Y, so not present. No duplicate. Correct.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C with override Y, C root id W, child Z. A root id X. Duplicate with B root X. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C with override Y, C root id W, child Z. A root id V. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A root id W. Duplicate with C root W. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A root id X. Duplicate with B root X. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A root id U. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D child X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D with override X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D with override Y, D root id X. D incIds remove X add Y. No duplicate with B root X. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D with override Y, D root id X, child X. D incIds remove X add Y, child X remains. Duplicate with B root X. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D with override Y, D root id X, child Z. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D with override Y, D root id Z, child X. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D with override Y, D root id Z, child V. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D with override Y, D root id Z, child V. A root id V. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D with override Y, D root id Z, child V. A root id Y. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D with override Y, D root id Z, child V. A root id Z. D root Z removed by override Y, so no duplicate. Correct.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D with override Y, D root id Z, child V. A root id X. Duplicate with B. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D with override Y, D root id Z, child V. A root id U. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A root id U. Duplicate with D root U. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A root id V. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id U. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E with override U. Duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E with override V, E root id U. E incIds remove U add V. No duplicate with D root U. Correct.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E with override V, E root id U, child U. E incIds remove U add V, child U remains. Duplicate with D root U. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E with override V, E root id U, child T. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E with override V, E root id U, child T. A root id T. Duplicate with E child T. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E with override V, E root id U, child T. A root id V. Duplicate with override V. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E with override V, E root id U, child T. A root id U. E root U removed by override V, so no duplicate. Correct.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E with override V, E root id U, child T. A root id X. Duplicate with B. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E with override V, E root id U, child T. A root id S. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A root id S. Duplicate with E. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A root id R. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A root id R. Duplicate with F. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A root id Q. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A includes G no override, G root id Q. Duplicate with A root Q. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A includes G no override, G root id Q. A root id P. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A includes G no override, G root id Q. A includes H no override, H root id P. Duplicate with A root P. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A includes G no override, G root id Q. A includes H no override, H root id P. A root id O. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A includes G no override, G root id Q. A includes H no override, H root id P. A includes I no override, I root id O. Duplicate with A root O. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A includes G no override, G root id Q. A includes H no override, H root id P. A includes I no override, I root id O. A root id N. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A includes G no override, G root id Q. A includes H no override, H root id P. A includes I no override, I root id O. A includes J no override, J root id N. Duplicate with A root N. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A includes G no override, G root id Q. A includes H no override, H root id P. A includes I no override, I root id O. A includes J no override, J root id N. A root id M. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A includes G no override, G root id Q. A includes H no override, H root id P. A includes I no override, I root id O. A includes J no override, J root id N. A includes K no override, K root id M. Duplicate with A root M. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A includes G no override, G root id Q. A includes H no override, H root id P. A includes I no override, I root id O. A includes J no override, J root id N. A includes K no override, K root id M. A root id L. No duplicate. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A includes G no override, G root id Q. A includes H no override, H root id P. A includes I no override, I root id O. A includes J no override, J root id N. A includes K no override, K root id M. A includes L no override, L root id L. Duplicate with A root L. Good.
+
+Now, potential issue: `computeLayoutResult` for layout A includes B no override, B root id X. A includes C no override, C root id W. A includes D no override, D root id U. A includes E no override, E root id S. A includes F no override, F root id R. A includes G no override, G root id Q. A includes H no override, H root id P. A includes I no override, I root id O. A includes J no override, J root id N. A includes K no override, K root id M. A includes L no override, L root id L. A root id K. K root id M,

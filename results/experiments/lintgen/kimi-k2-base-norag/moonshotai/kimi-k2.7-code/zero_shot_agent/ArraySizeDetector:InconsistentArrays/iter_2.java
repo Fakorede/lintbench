@@ -1,0 +1,243 @@
+package com.android.tools.lint.checks;
+
+import static com.android.SdkConstants.ATTR_NAME;
+import static com.android.SdkConstants.DOT_XML;
+import static com.android.SdkConstants.FD_RES_VALUES;
+import static com.android.SdkConstants.TAG_ARRAY;
+import static com.android.SdkConstants.TAG_INTEGER_ARRAY;
+import static com.android.SdkConstants.TAG_ITEM;
+import static com.android.SdkConstants.TAG_STRING_ARRAY;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Project;
+import com.android.tools.lint.detector.api.ResourceXmlDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.utils.XmlUtils;
+
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+public class ArraySizeDetector extends ResourceXmlDetector {
+
+    private static final String DEFAULT_VALUES = "values";
+
+    private final Map<String, List<ArrayDeclaration>> mDeclarations = new HashMap<>();
+    private final Set<File> mPreloaded = new HashSet<>();
+
+    public static final Issue ISSUE = Issue.create(
+            "InconsistentArrays",
+            "Inconsistency in array element counts",
+            "When an array is translated in a different locale, it should normally have the same number of elements as the original array. When adding or removing elements to an array, it is easy to forget to update all the locales, and this lint warning finds inconsistencies like these.\n\nNote however that there may be cases where you really want to declare a different number of array items in each configuration (for example where the array represents available options, and those options differ for different layout orientations and so on), so use your own judgment to decide if this is really an error.\n\nYou can suppress this error type if it finds false errors in your project.",
+            Category.CORRECTNESS,
+            3,
+            Severity.WARNING,
+            new Implementation(ArraySizeDetector.class, EnumSet.of(Scope.RESOURCE_FILE))
+    );
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.VALUES;
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Arrays.asList(TAG_STRING_ARRAY, TAG_INTEGER_ARRAY, TAG_ARRAY);
+    }
+
+    @Override
+    public void beforeCheckProject(Context context) {
+        if (!context.getDriver().isAnalysisIncremental()) {
+            return;
+        }
+
+        Project project = context.getProject();
+        if (project == null) {
+            return;
+        }
+
+        List<File> resourceFolders = project.getResourceFolders();
+        if (resourceFolders == null) {
+            return;
+        }
+
+        for (File res : resourceFolders) {
+            File[] folders = res.listFiles();
+            if (folders == null) {
+                continue;
+            }
+            for (File folder : folders) {
+                String folderName = folder.getName();
+                if (!folderName.startsWith(FD_RES_VALUES)) {
+                    continue;
+                }
+                File[] files = folder.listFiles();
+                if (files == null) {
+                    continue;
+                }
+                for (File file : files) {
+                    if (!file.isFile() || !file.getName().endsWith(DOT_XML)) {
+                        continue;
+                    }
+                    preloadFile(file, folderName);
+                }
+            }
+        }
+    }
+
+    private void preloadFile(File file, String folderName) {
+        Document document;
+        try {
+            document = XmlUtils.parseDocument(file, true);
+        } catch (Exception e) {
+            // Ignore files that do not parse correctly.
+            return;
+        }
+
+        Element root = document.getDocumentElement();
+        if (root == null) {
+            return;
+        }
+
+        NodeList children = root.getChildNodes();
+        for (int i = 0, n = children.getLength(); i < n; i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+            Element element = (Element) child;
+            String tag = element.getTagName();
+            if (!TAG_STRING_ARRAY.equals(tag)
+                    && !TAG_INTEGER_ARRAY.equals(tag)
+                    && !TAG_ARRAY.equals(tag)) {
+                continue;
+            }
+
+            String name = element.getAttribute(ATTR_NAME);
+            if (name.isEmpty()) {
+                continue;
+            }
+
+            String key = tag + "/" + name;
+            int count = countItems(element);
+            addDeclaration(key, new ArrayDeclaration(name, folderName, count, Location.create(file)));
+        }
+
+        mPreloaded.add(file);
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        String name = element.getAttribute(ATTR_NAME);
+        if (name.isEmpty()) {
+            return;
+        }
+
+        String tag = element.getTagName();
+        String key = tag + "/" + name;
+
+        int count = countItems(element);
+        String folder = context.file.getParentFile().getName();
+
+        if (mPreloaded.contains(context.file)) {
+            for (List<ArrayDeclaration> list : mDeclarations.values()) {
+                for (Iterator<ArrayDeclaration> it = list.iterator(); it.hasNext(); ) {
+                    ArrayDeclaration declaration = it.next();
+                    if (declaration.location.getFile().equals(context.file)) {
+                        it.remove();
+                    }
+                }
+            }
+        }
+
+        addDeclaration(key, new ArrayDeclaration(name, folder, count, context.getLocation(element)));
+    }
+
+    @Override
+    public void afterCheckProject(Context context) {
+        for (List<ArrayDeclaration> declarations : mDeclarations.values()) {
+            int defaultCount = -1;
+            for (ArrayDeclaration declaration : declarations) {
+                if (DEFAULT_VALUES.equals(declaration.folder)) {
+                    defaultCount = declaration.count;
+                    break;
+                }
+            }
+
+            if (defaultCount == -1) {
+                continue;
+            }
+
+            for (ArrayDeclaration declaration : declarations) {
+                if (declaration.count != defaultCount) {
+                    String message = String.format(
+                            "Array \"%1$s\" has %2$d items in %3$s but %4$d items in the default configuration",
+                            declaration.name,
+                            declaration.count,
+                            declaration.folder,
+                            defaultCount
+                    );
+                    context.report(ISSUE, declaration.location, message);
+                }
+            }
+        }
+
+        mDeclarations.clear();
+        mPreloaded.clear();
+    }
+
+    private static int countItems(Element element) {
+        int count = 0;
+        NodeList childNodes = element.getChildNodes();
+        for (int i = 0, n = childNodes.getLength(); i < n; i++) {
+            Node child = childNodes.item(i);
+            if (child.getNodeType() == Node.ELEMENT_NODE && TAG_ITEM.equals(child.getNodeName())) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private void addDeclaration(String key, ArrayDeclaration declaration) {
+        List<ArrayDeclaration> list = mDeclarations.get(key);
+        if (list == null) {
+            list = new ArrayList<>();
+            mDeclarations.put(key, list);
+        }
+        list.add(declaration);
+    }
+
+    private static class ArrayDeclaration {
+        final String name;
+        final String folder;
+        final int count;
+        final Location location;
+
+        ArrayDeclaration(String name, String folder, int count, Location location) {
+            this.name = name;
+            this.folder = folder;
+            this.count = count;
+            this.location = location;
+        }
+    }
+}

@@ -1,0 +1,107 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.*
+import com.intellij.psi.PsiElementVisitor
+import org.jetbrains.uast.UCallExpression
+import org.jetbrains.uast.UExpression
+import org.jetbrains.uast.ULiteralExpression
+import org.jetbrains.uast.UQualifiedReferenceExpression
+
+class PictureInPictureDetector : Detector(), SourceCodeScanner {
+
+    override fun getApplicableConstructorTypes(): List<String> =
+        listOf("android.app.PictureInPictureParams.Builder")
+
+    override fun visitConstructor(
+        context: JavaContext,
+        node: UCallExpression,
+        visitor: PsiElementVisitor
+    ) {
+        val chain = node.findTopLevelChain()
+        val calls = chain.collectCalls()
+
+        val hasBuild = calls.any { it.methodName == "build" }
+        if (!hasBuild) return
+
+        var hasAutoEnterEnabled = false
+        var hasSourceRectHint = false
+
+        for (call in calls) {
+            when (call.methodName) {
+                "setAutoEnterEnabled" -> {
+                    val arg = call.valueArguments.firstOrNull()
+                    if (arg is ULiteralExpression && arg.value == true) {
+                        hasAutoEnterEnabled = true
+                    }
+                }
+                "setSourceRectHint" -> {
+                    if (call.valueArguments.isNotEmpty()) {
+                        hasSourceRectHint = true
+                    }
+                }
+            }
+        }
+
+        if (!hasAutoEnterEnabled || !hasSourceRectHint) {
+            context.report(
+                ISSUE,
+                node,
+                context.getLocation(node),
+                "For smooth picture-in-picture transitions on Android 12+, call " +
+                    "setAutoEnterEnabled(true) and setSourceRectHint(...) on the builder."
+            )
+        }
+    }
+
+    private fun UCallExpression.findTopLevelChain(): UExpression {
+        var current: UExpression = this
+        while (true) {
+            val parent = current.uastParent as? UQualifiedReferenceExpression ?: break
+            if (parent.receiver !== current) break
+            current = parent
+        }
+        return current
+    }
+
+    private fun UExpression.collectCalls(): List<UCallExpression> {
+        val result = mutableListOf<UCallExpression>()
+        var current: UExpression? = this
+        while (current != null) {
+            when (current) {
+                is UQualifiedReferenceExpression -> {
+                    val selector = current.selector
+                    if (selector is UCallExpression) {
+                        result.add(selector)
+                    }
+                    current = current.receiver
+                }
+                is UCallExpression -> {
+                    result.add(current)
+                    current = null
+                }
+                else -> current = null
+            }
+        }
+        return result
+    }
+
+    companion object {
+        @JvmField
+        val ISSUE: Issue = Issue.create(
+            id = "PictureInPictureIssue",
+            briefDescription = "Picture In Picture best practices not followed",
+            explanation = """
+                Starting in Android 12, the recommended approach for picture-in-picture uses
+                PictureInPictureParams.Builder#setAutoEnterEnabled(true) and
+                #setSourceRectHint(...) to produce high-quality transition animations.
+                """,
+            category = Category.PERFORMANCE,
+            priority = 5,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                PictureInPictureDetector::class.java,
+                Scope.JAVA_FILE_SCOPE
+            )
+        )
+    }
+}

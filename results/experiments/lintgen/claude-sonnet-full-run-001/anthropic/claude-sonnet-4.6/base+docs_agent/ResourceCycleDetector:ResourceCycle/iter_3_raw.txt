@@ -1,0 +1,398 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.ATTR_NAME
+import com.android.SdkConstants.ATTR_PARENT
+import com.android.SdkConstants.ATTR_TYPE
+import com.android.SdkConstants.TAG_ITEM
+import com.android.SdkConstants.TAG_STYLE
+import com.android.resources.ResourceType
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Location
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import org.w3c.dom.Document
+import org.w3c.dom.Element
+import org.w3c.dom.Node
+
+class ResourceCycleDetector : Detector(), XmlScanner {
+
+    companion object {
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "ResourceCycle",
+            briefDescription = "Cycle in resource definitions",
+            explanation = """
+                There should be no cycles in resource definitions as this can lead to \
+                runtime exceptions.
+                """,
+            category = Category.CORRECTNESS,
+            priority = 8,
+            severity = Severity.FATAL,
+            implementation = Implementation(
+                ResourceCycleDetector::class.java,
+                Scope.ALL_RESOURCES_SCOPE
+            )
+        )
+
+        private val RESOURCE_REFERENCE_PATTERN = Regex("^@\\+?(?:[^/]+:)?([^/]+)/(.+)$")
+    }
+
+    /**
+     * Map from resource type to a map of resource name -> list of referenced names.
+     */
+    private val graphs: MutableMap<ResourceType, MutableMap<String, MutableList<String>>> =
+        mutableMapOf()
+
+    /**
+     * Map from resource type+name to the location where it was defined (for error reporting).
+     */
+    private val locations: MutableMap<ResourceType, MutableMap<String, Location>> = mutableMapOf()
+
+    /**
+     * Map from resource type+name to list of (referenced name, location) for edge locations.
+     */
+    private val edgeLocations: MutableMap<ResourceType, MutableMap<String, MutableList<Pair<String, Location>>>> =
+        mutableMapOf()
+
+    override fun getApplicableElements(): Collection<String>? = null
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val file = context.file
+        val folderName = file.parentFile?.name ?: return
+        val resourceFolderType = getFolderResourceType(folderName)
+
+        when {
+            element.tagName == TAG_STYLE && isInValuesFile(folderName) -> {
+                handleStyle(context, element)
+            }
+            element.tagName == TAG_ITEM && isInValuesFile(folderName) -> {
+                handleValueItem(context, element)
+            }
+            resourceFolderType != null && element.parentNode is Document -> {
+                handleRootElement(context, element, resourceFolderType, file.nameWithoutExtension)
+            }
+            resourceFolderType != null -> {
+                handleChildElement(context, element, resourceFolderType, file.nameWithoutExtension, folderName)
+            }
+        }
+    }
+
+    private fun isInValuesFile(folderName: String): Boolean {
+        return folderName.startsWith("values")
+    }
+
+    private fun getFolderResourceType(folderName: String): ResourceType? {
+        val base = folderName.substringBefore('-')
+        return when (base) {
+            "drawable" -> ResourceType.DRAWABLE
+            "color" -> ResourceType.COLOR
+            "layout" -> ResourceType.LAYOUT
+            "anim" -> ResourceType.ANIM
+            "animator" -> ResourceType.ANIMATOR
+            "font" -> ResourceType.FONT
+            "mipmap" -> ResourceType.MIPMAP
+            "xml" -> ResourceType.XML
+            "menu" -> ResourceType.MENU
+            "raw" -> ResourceType.RAW
+            else -> null
+        }
+    }
+
+    private fun handleStyle(context: XmlContext, element: Element) {
+        val name = element.getAttribute(ATTR_NAME).takeIf { it.isNotEmpty() } ?: return
+        val parent = element.getAttribute(ATTR_PARENT)
+
+        val resolvedParent: String? = when {
+            parent.isNotEmpty() -> {
+                val stripped = stripResourcePrefix(parent, ResourceType.STYLE)
+                stripped ?: if (!parent.contains(':') && !parent.startsWith('@')) {
+                    parent.trim().takeIf { it.isNotEmpty() }
+                } else null
+            }
+            name.contains('.') -> {
+                name.substringBeforeLast('.')
+            }
+            else -> null
+        }
+
+        val location = context.getLocation(element)
+        recordResource(ResourceType.STYLE, name, resolvedParent, location, location)
+    }
+
+    private fun handleValueItem(context: XmlContext, element: Element) {
+        val typeName = element.getAttribute(ATTR_TYPE).takeIf { it.isNotEmpty() } ?: return
+        val name = element.getAttribute(ATTR_NAME).takeIf { it.isNotEmpty() } ?: return
+        val type = ResourceType.fromXmlValue(typeName) ?: return
+
+        val text = getTextContent(element)
+        val ref = stripResourcePrefix(text, type)
+        val location = context.getLocation(element)
+        recordResource(type, name, ref, location, location)
+    }
+
+    private fun handleRootElement(
+        context: XmlContext,
+        element: Element,
+        type: ResourceType,
+        resourceName: String
+    ) {
+        val location = context.getLocation(element)
+        ensureResourceExists(type, resourceName, location)
+        checkElementAttributes(context, element, type, resourceName)
+
+        if (type == ResourceType.LAYOUT && element.tagName == "include") {
+            val layout = element.getAttribute("layout").takeIf { it.isNotEmpty() }
+            if (layout != null) {
+                val ref = stripResourcePrefix(layout, ResourceType.LAYOUT)
+                if (ref != null) {
+                    recordResource(ResourceType.LAYOUT, resourceName, ref, location, context.getLocation(element))
+                }
+            }
+        }
+    }
+
+    private fun handleChildElement(
+        context: XmlContext,
+        element: Element,
+        type: ResourceType,
+        resourceName: String,
+        folderName: String
+    ) {
+        checkElementAttributes(context, element, type, resourceName)
+
+        if (type == ResourceType.LAYOUT && element.tagName == "include") {
+            val layout = element.getAttribute("layout").takeIf { it.isNotEmpty() }
+            if (layout != null) {
+                val ref = stripResourcePrefix(layout, ResourceType.LAYOUT)
+                if (ref != null) {
+                    val rootLocation = getRootLocation(context)
+                    recordResource(ResourceType.LAYOUT, resourceName, ref, rootLocation ?: context.getLocation(element), context.getLocation(element))
+                }
+            }
+        }
+
+        if (element.tagName == TAG_ITEM) {
+            val drawableAttr = element.getAttribute("android:drawable").takeIf { it.isNotEmpty() }
+            if (drawableAttr != null && type == ResourceType.DRAWABLE) {
+                val ref = stripResourcePrefix(drawableAttr, ResourceType.DRAWABLE)
+                if (ref != null) {
+                    val rootLocation = getRootLocation(context)
+                    recordResource(ResourceType.DRAWABLE, resourceName, ref, rootLocation ?: context.getLocation(element), context.getLocation(element))
+                }
+            }
+
+            val colorAttr = element.getAttribute("android:color").takeIf { it.isNotEmpty() }
+            if (colorAttr != null && type == ResourceType.COLOR) {
+                val ref = stripResourcePrefix(colorAttr, ResourceType.COLOR)
+                if (ref != null) {
+                    val rootLocation = getRootLocation(context)
+                    recordResource(ResourceType.COLOR, resourceName, ref, rootLocation ?: context.getLocation(element), context.getLocation(element))
+                }
+            }
+
+            val text = getTextContent(element)
+            if (text.isNotEmpty()) {
+                if (type == ResourceType.COLOR) {
+                    val ref = stripResourcePrefix(text, ResourceType.COLOR)
+                    if (ref != null) {
+                        val rootLocation = getRootLocation(context)
+                        recordResource(ResourceType.COLOR, resourceName, ref, rootLocation ?: context.getLocation(element), context.getLocation(element))
+                    }
+                } else if (type == ResourceType.DRAWABLE) {
+                    val ref = stripResourcePrefix(text, ResourceType.DRAWABLE)
+                    if (ref != null) {
+                        val rootLocation = getRootLocation(context)
+                        recordResource(ResourceType.DRAWABLE, resourceName, ref, rootLocation ?: context.getLocation(element), context.getLocation(element))
+                    }
+                }
+            }
+        }
+
+        if (element.tagName == "font" && type == ResourceType.FONT) {
+            val fontAttr = element.getAttribute("android:font").takeIf { it.isNotEmpty() }
+                ?: element.getAttribute("app:font").takeIf { it.isNotEmpty() }
+            if (fontAttr != null) {
+                val ref = stripResourcePrefix(fontAttr, ResourceType.FONT)
+                if (ref != null) {
+                    val rootLocation = getRootLocation(context)
+                    recordResource(ResourceType.FONT, resourceName, ref, rootLocation ?: context.getLocation(element), context.getLocation(element))
+                }
+            }
+        }
+    }
+
+    private fun getRootLocation(context: XmlContext): Location? {
+        return try {
+            val doc = context.document
+            val root = doc?.documentElement
+            if (root != null) context.getLocation(root) else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun checkElementAttributes(
+        context: XmlContext,
+        element: Element,
+        type: ResourceType,
+        resourceName: String
+    ) {
+        if (type == ResourceType.DRAWABLE || type == ResourceType.MIPMAP) {
+            val src = element.getAttribute("android:src").takeIf { it.isNotEmpty() }
+            if (src != null) {
+                val ref = stripResourcePrefix(src, type)
+                if (ref != null) {
+                    recordResource(type, resourceName, ref, context.getLocation(element), context.getLocation(element))
+                }
+            }
+            val drawable = element.getAttribute("android:drawable").takeIf { it.isNotEmpty() }
+            if (drawable != null) {
+                val ref = stripResourcePrefix(drawable, type)
+                if (ref != null) {
+                    recordResource(type, resourceName, ref, context.getLocation(element), context.getLocation(element))
+                }
+            }
+        }
+    }
+
+    private fun getTextContent(element: Element): String {
+        val sb = StringBuilder()
+        val children = element.childNodes
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            if (child.nodeType == Node.TEXT_NODE) {
+                sb.append(child.nodeValue)
+            }
+        }
+        return sb.toString().trim()
+    }
+
+    private fun stripResourcePrefix(text: String, type: ResourceType): String? {
+        if (text.isBlank()) return null
+        if (!text.startsWith("@")) return null
+
+        val match = RESOURCE_REFERENCE_PATTERN.matchEntire(text) ?: return null
+        val refType = match.groupValues[1]
+        val refName = match.groupValues[2].trim()
+
+        return if (refType == type.getName()) refName else null
+    }
+
+    private fun ensureResourceExists(type: ResourceType, name: String, location: Location) {
+        val graph = graphs.getOrPut(type) { mutableMapOf() }
+        graph.getOrPut(name) { mutableListOf() }
+        val locs = locations.getOrPut(type) { mutableMapOf() }
+        if (!locs.containsKey(name)) {
+            locs[name] = location
+        }
+    }
+
+    private fun recordResource(
+        type: ResourceType,
+        name: String,
+        reference: String?,
+        nodeLocation: Location,
+        edgeLocation: Location
+    ) {
+        val graph = graphs.getOrPut(type) { mutableMapOf() }
+        val refs = graph.getOrPut(name) { mutableListOf() }
+        if (reference != null && reference.isNotEmpty() && !refs.contains(reference)) {
+            refs.add(reference)
+            val edgeLocs = edgeLocations.getOrPut(type) { mutableMapOf() }
+            val edgeList = edgeLocs.getOrPut(name) { mutableListOf() }
+            edgeList.add(Pair(reference, edgeLocation))
+        }
+
+        val locs = locations.getOrPut(type) { mutableMapOf() }
+        if (!locs.containsKey(name)) {
+            locs[name] = nodeLocation
+        }
+    }
+
+    override fun afterCheckRootProject(context: Context) {
+        for ((type, graph) in graphs) {
+            val visited = mutableSetOf<String>()
+            val inStack = mutableSetOf<String>()
+            val reported = mutableSetOf<String>()
+
+            for (node in graph.keys) {
+                if (node !in visited) {
+                    detectCycle(context, type, graph, node, visited, inStack, mutableListOf(), reported)
+                }
+            }
+        }
+    }
+
+    private fun detectCycle(
+        context: Context,
+        type: ResourceType,
+        graph: Map<String, List<String>>,
+        node: String,
+        visited: MutableSet<String>,
+        inStack: MutableSet<String>,
+        path: MutableList<String>,
+        reported: MutableSet<String>
+    ) {
+        visited.add(node)
+        inStack.add(node)
+        path.add(node)
+
+        val neighbors = graph[node] ?: emptyList()
+        for (neighbor in neighbors) {
+            if (neighbor !in visited) {
+                detectCycle(context, type, graph, neighbor, visited, inStack, path, reported)
+            } else if (neighbor in inStack) {
+                val cycleKey = buildCycleKey(path, neighbor)
+                if (cycleKey !in reported) {
+                    reported.add(cycleKey)
+                    reportCycle(context, type, path, neighbor)
+                }
+            }
+        }
+
+        path.removeAt(path.size - 1)
+        inStack.remove(node)
+    }
+
+    private fun buildCycleKey(path: List<String>, cycleStart: String): String {
+        val cycleIndex = path.indexOf(cycleStart)
+        val cyclePath = if (cycleIndex >= 0) {
+            path.subList(cycleIndex, path.size)
+        } else {
+            path
+        }
+        return cyclePath.sorted().joinToString(",")
+    }
+
+    private fun reportCycle(
+        context: Context,
+        type: ResourceType,
+        path: List<String>,
+        cycleStart: String
+    ) {
+        val cycleIndex = path.indexOf(cycleStart)
+        val cyclePath = if (cycleIndex >= 0) {
+            path.subList(cycleIndex, path.size) + cycleStart
+        } else {
+            path + cycleStart
+        }
+
+        val typeName = type.getName()
+        val cycleDescription = cyclePath.joinToString(" => ") { "@$typeName/$it" }
+
+        val locs = locations[type]
+        val location = locs?.get(cycleStart) ?: locs?.get(path.lastOrNull()) ?: locs?.values?.firstOrNull()
+
+        val message = "Cycle detected: $cycleDescription"
+
+        if (location != null) {
+            context.report(ISSUE, location, message)
+        }
+    }
+}

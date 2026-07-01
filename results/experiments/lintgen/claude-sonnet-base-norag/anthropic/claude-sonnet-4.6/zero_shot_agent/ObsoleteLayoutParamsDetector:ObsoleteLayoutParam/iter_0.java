@@ -1,0 +1,374 @@
+/*
+ * Copyright (C) 2011 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.LayoutDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Checks for obsolete layout params (params that are defined for a layout that
+ * is not the parent of the element defining the params).
+ */
+public class ObsoleteLayoutParamsDetector extends LayoutDetector {
+
+    /** The main issue discovered by this detector */
+    public static final Issue ISSUE = Issue.create(
+            "ObsoleteLayoutParam",
+            "Obsolete layout params",
+            "The given layout_param is not defined for the given layout, meaning it has no " +
+            "effect. This usually happens when you change the parent layout or move view " +
+            "code around without updating the layout params. This will cause useless " +
+            "attribute processing at runtime, and is misleading for others reading the " +
+            "layout so the parameter should be removed.",
+            Category.PERFORMANCE,
+            6,
+            Severity.WARNING,
+            new Implementation(
+                    ObsoleteLayoutParamsDetector.class,
+                    Scope.RESOURCE_FILE_SCOPE));
+
+    // Layout params that are defined by specific parent layouts
+    // Maps from attribute local name to the set of layouts that define it
+
+    /** Params defined by AbsoluteLayout */
+    private static final Set<String> ABSOLUTE_LAYOUT_PARAMS = new HashSet<>(Arrays.asList(
+            "layout_x",
+            "layout_y"
+    ));
+
+    /** Params defined by LinearLayout */
+    private static final Set<String> LINEAR_LAYOUT_PARAMS = new HashSet<>(Arrays.asList(
+            "layout_weight",
+            "layout_gravity"
+    ));
+
+    /** Params defined by RelativeLayout */
+    private static final Set<String> RELATIVE_LAYOUT_PARAMS = new HashSet<>(Arrays.asList(
+            "layout_above",
+            "layout_below",
+            "layout_toLeftOf",
+            "layout_toRightOf",
+            "layout_toStartOf",
+            "layout_toEndOf",
+            "layout_alignTop",
+            "layout_alignBottom",
+            "layout_alignLeft",
+            "layout_alignRight",
+            "layout_alignStart",
+            "layout_alignEnd",
+            "layout_alignBaseline",
+            "layout_alignParentTop",
+            "layout_alignParentBottom",
+            "layout_alignParentLeft",
+            "layout_alignParentRight",
+            "layout_alignParentStart",
+            "layout_alignParentEnd",
+            "layout_centerInParent",
+            "layout_centerHorizontal",
+            "layout_centerVertical"
+    ));
+
+    /** Params defined by GridLayout */
+    private static final Set<String> GRID_LAYOUT_PARAMS = new HashSet<>(Arrays.asList(
+            "layout_row",
+            "layout_rowSpan",
+            "layout_rowWeight",
+            "layout_column",
+            "layout_columnSpan",
+            "layout_columnWeight",
+            "layout_gravity"
+    ));
+
+    /** Params defined by TableLayout / TableRow */
+    private static final Set<String> TABLE_LAYOUT_PARAMS = new HashSet<>(Arrays.asList(
+            "layout_column",
+            "layout_span"
+    ));
+
+    /** Params defined by ConstraintLayout */
+    private static final Set<String> CONSTRAINT_LAYOUT_PARAMS = new HashSet<>(Arrays.asList(
+            "layout_constraintLeft_toLeftOf",
+            "layout_constraintLeft_toRightOf",
+            "layout_constraintRight_toLeftOf",
+            "layout_constraintRight_toRightOf",
+            "layout_constraintTop_toTopOf",
+            "layout_constraintTop_toBottomOf",
+            "layout_constraintBottom_toTopOf",
+            "layout_constraintBottom_toBottomOf",
+            "layout_constraintBaseline_toBaselineOf",
+            "layout_constraintStart_toEndOf",
+            "layout_constraintStart_toStartOf",
+            "layout_constraintEnd_toStartOf",
+            "layout_constraintEnd_toEndOf",
+            "layout_constraintHorizontal_bias",
+            "layout_constraintVertical_bias",
+            "layout_constraintWidth_default",
+            "layout_constraintHeight_default",
+            "layout_constraintWidth_min",
+            "layout_constraintWidth_max",
+            "layout_constraintWidth_percent",
+            "layout_constraintHeight_min",
+            "layout_constraintHeight_max",
+            "layout_constraintHeight_percent",
+            "layout_constraintCircle",
+            "layout_constraintCircleRadius",
+            "layout_constraintCircleAngle",
+            "layout_constraintDimensionRatio",
+            "layout_constraintHorizontal_chainStyle",
+            "layout_constraintVertical_chainStyle",
+            "layout_constraintHorizontal_weight",
+            "layout_constraintVertical_weight",
+            "layout_editor_absoluteX",
+            "layout_editor_absoluteY",
+            "layout_goneMarginLeft",
+            "layout_goneMarginTop",
+            "layout_goneMarginRight",
+            "layout_goneMarginBottom",
+            "layout_goneMarginStart",
+            "layout_goneMarginEnd"
+    ));
+
+    /**
+     * Map from layout attribute name to the set of parent layout tags that
+     * define this attribute.
+     */
+    private static final Map<String, Set<String>> PARAM_TO_LAYOUTS;
+
+    static {
+        PARAM_TO_LAYOUTS = new HashMap<>();
+
+        // Register AbsoluteLayout params
+        for (String param : ABSOLUTE_LAYOUT_PARAMS) {
+            registerParam(param, "AbsoluteLayout");
+        }
+
+        // Register LinearLayout params
+        for (String param : LINEAR_LAYOUT_PARAMS) {
+            registerParam(param, "LinearLayout", "RadioGroup");
+        }
+
+        // Register RelativeLayout params
+        for (String param : RELATIVE_LAYOUT_PARAMS) {
+            registerParam(param, "RelativeLayout");
+        }
+
+        // Register GridLayout params
+        for (String param : GRID_LAYOUT_PARAMS) {
+            registerParam(param, "GridLayout", "android.support.v7.widget.GridLayout",
+                    "androidx.gridlayout.widget.GridLayout");
+        }
+
+        // Register TableLayout params
+        for (String param : TABLE_LAYOUT_PARAMS) {
+            registerParam(param, "TableLayout", "TableRow");
+        }
+
+        // Register ConstraintLayout params
+        for (String param : CONSTRAINT_LAYOUT_PARAMS) {
+            registerParam(param,
+                    "android.support.constraint.ConstraintLayout",
+                    "androidx.constraintlayout.widget.ConstraintLayout",
+                    "ConstraintLayout");
+        }
+    }
+
+    private static void registerParam(String param, String... layouts) {
+        Set<String> layoutSet = PARAM_TO_LAYOUTS.get(param);
+        if (layoutSet == null) {
+            layoutSet = new HashSet<>();
+            PARAM_TO_LAYOUTS.put(param, layoutSet);
+        }
+        for (String layout : layouts) {
+            layoutSet.add(layout);
+            // Also add the simple name (without package prefix)
+            int dotIndex = layout.lastIndexOf('.');
+            if (dotIndex >= 0) {
+                layoutSet.add(layout.substring(dotIndex + 1));
+            }
+        }
+    }
+
+    /** Constructs a new {@link ObsoleteLayoutParamsDetector} */
+    public ObsoleteLayoutParamsDetector() {
+    }
+
+    @Override
+    @Nullable
+    public Collection<String> getApplicableAttributes() {
+        return PARAM_TO_LAYOUTS.keySet();
+    }
+
+    @Override
+    public void visitAttribute(@NonNull XmlContext context, @NonNull Attr attribute) {
+        String name = attribute.getLocalName();
+        if (name == null) {
+            name = attribute.getName();
+            if (name == null) {
+                return;
+            }
+            // Strip namespace prefix if present
+            int colon = name.indexOf(':');
+            if (colon >= 0) {
+                name = name.substring(colon + 1);
+            }
+        }
+
+        Set<String> validParents = PARAM_TO_LAYOUTS.get(name);
+        if (validParents == null || validParents.isEmpty()) {
+            return;
+        }
+
+        // Get the element that owns this attribute
+        Element element = attribute.getOwnerElement();
+        if (element == null) {
+            return;
+        }
+
+        // Get the parent element (the layout container)
+        Node parentNode = element.getParentNode();
+        if (parentNode == null || parentNode.getNodeType() != Node.ELEMENT_NODE) {
+            // This is a root element; layout params on root elements are used
+            // by the parent that includes this layout, so we can't easily check.
+            return;
+        }
+
+        Element parentElement = (Element) parentNode;
+        String parentTag = parentElement.getTagName();
+        if (parentTag == null) {
+            return;
+        }
+
+        // Get the simple name of the parent tag
+        String parentSimpleName = parentTag;
+        int dotIndex = parentTag.lastIndexOf('.');
+        if (dotIndex >= 0) {
+            parentSimpleName = parentTag.substring(dotIndex + 1);
+        }
+
+        // Check if the parent is a valid container for this layout param
+        if (!isValidParent(parentTag, parentSimpleName, validParents)) {
+            // Also check for special cases: merge, include, fragment, etc.
+            if (isMergeOrInclude(parentTag)) {
+                // Can't determine the actual parent at static analysis time
+                return;
+            }
+
+            // Check if the parent is a ViewGroup that might be a custom layout
+            // extending one of the valid parents - we can't know for sure,
+            // so only flag known layouts
+            if (!isKnownLayout(parentTag)) {
+                return;
+            }
+
+            context.report(ISSUE, attribute, context.getLocation(attribute),
+                    String.format("Invalid layout param `%1$s` (not defined by parent layout `%2$s`)",
+                            name, parentTag));
+        }
+    }
+
+    /**
+     * Returns true if the given parent tag is a valid parent for the layout param
+     * that requires one of the given valid parents.
+     */
+    private static boolean isValidParent(
+            @NonNull String parentTag,
+            @NonNull String parentSimpleName,
+            @NonNull Set<String> validParents) {
+        if (validParents.contains(parentTag)) {
+            return true;
+        }
+        if (validParents.contains(parentSimpleName)) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Returns true if the tag is a merge, include, or fragment tag where
+     * we cannot statically determine the actual parent layout.
+     */
+    private static boolean isMergeOrInclude(@NonNull String tag) {
+        return tag.equals("merge") || tag.equals("include") || tag.equals("fragment")
+                || tag.equals("requestFocus") || tag.equals("tag");
+    }
+
+    /**
+     * Returns true if the given tag is a known Android layout container.
+     * We only report errors for known layouts to avoid false positives
+     * with custom views.
+     */
+    private static boolean isKnownLayout(@NonNull String tag) {
+        switch (tag) {
+            case "LinearLayout":
+            case "RelativeLayout":
+            case "FrameLayout":
+            case "TableLayout":
+            case "TableRow":
+            case "GridLayout":
+            case "AbsoluteLayout":
+            case "ScrollView":
+            case "HorizontalScrollView":
+            case "ListView":
+            case "GridView":
+            case "ExpandableListView":
+            case "ViewPager":
+            case "DrawerLayout":
+            case "CoordinatorLayout":
+            case "AppBarLayout":
+            case "CollapsingToolbarLayout":
+            case "ConstraintLayout":
+            case "RadioGroup":
+            case "SlidingDrawer":
+            case "ViewAnimator":
+            case "ViewFlipper":
+            case "ViewSwitcher":
+            case "TextSwitcher":
+            case "ImageSwitcher":
+            case "AdapterViewFlipper":
+            case "StackView":
+            case "android.support.constraint.ConstraintLayout":
+            case "androidx.constraintlayout.widget.ConstraintLayout":
+            case "android.support.v7.widget.GridLayout":
+            case "androidx.gridlayout.widget.GridLayout":
+            case "android.support.design.widget.CoordinatorLayout":
+            case "androidx.coordinatorlayout.widget.CoordinatorLayout":
+            case "android.support.v4.widget.DrawerLayout":
+            case "androidx.drawerlayout.widget.DrawerLayout":
+                return true;
+            default:
+                return false;
+        }
+    }
+}

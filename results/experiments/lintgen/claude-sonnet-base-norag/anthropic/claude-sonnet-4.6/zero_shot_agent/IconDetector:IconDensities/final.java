@@ -1,0 +1,292 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceContext;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Checks for icons that are missing density-specific versions.
+ */
+public class IconDetector extends com.android.tools.lint.detector.api.Detector
+        implements com.android.tools.lint.detector.api.Detector.ResourceFolderScanner {
+
+    private static final String ANDROID_LINT_INCLUDE_LDPI = "ANDROID_LINT_INCLUDE_LDPI";
+
+    /** The main issue discovered by this detector */
+    public static final Issue ICON_DENSITIES = Issue.create(
+            "IconDensities",
+            "Icon densities validation",
+            "Icons will look best if a custom version is provided for each of the " +
+            "major screen density classes (low, medium, high, extra high). " +
+            "This lint check identifies icons which do not have complete coverage " +
+            "across the densities.\n" +
+            "\n" +
+            "Low density is not really used much anymore, so this check ignores " +
+            "the ldpi density. To force lint to include it, set the environment " +
+            "variable `ANDROID_LINT_INCLUDE_LDPI=true`. For more information on " +
+            "current density usage, see " +
+            "https://developer.android.com/about/dashboards",
+            Category.ICONS,
+            4,
+            Severity.WARNING,
+            new Implementation(
+                    IconDetector.class,
+                    Scope.RESOURCE_FOLDER_SCOPE))
+            .addMoreInfo("https://developer.android.com/guide/practices/screens_support.html");
+
+    // Density folder names
+    private static final String DRAWABLE_LDPI    = "drawable-ldpi";
+    private static final String DRAWABLE_MDPI    = "drawable-mdpi";
+    private static final String DRAWABLE_HDPI    = "drawable-hdpi";
+    private static final String DRAWABLE_XHDPI   = "drawable-xhdpi";
+    private static final String DRAWABLE_XXHDPI  = "drawable-xxhdpi";
+    private static final String DRAWABLE_XXXHDPI = "drawable-xxxhdpi";
+
+    /** All density buckets we care about (excluding ldpi by default) */
+    private static final List<String> DENSITY_FOLDERS = Arrays.asList(
+            DRAWABLE_MDPI,
+            DRAWABLE_HDPI,
+            DRAWABLE_XHDPI,
+            DRAWABLE_XXHDPI
+    );
+
+    /** All density buckets including ldpi */
+    private static final List<String> DENSITY_FOLDERS_WITH_LDPI = Arrays.asList(
+            DRAWABLE_LDPI,
+            DRAWABLE_MDPI,
+            DRAWABLE_HDPI,
+            DRAWABLE_XHDPI,
+            DRAWABLE_XXHDPI
+    );
+
+    /**
+     * Map from density folder name to the set of icon names found in that folder.
+     */
+    private final Map<String, Set<String>> mFolderToIcons = new HashMap<>();
+
+    /** The res directory we are scanning */
+    private File mResDir;
+
+    /** Constructs a new {@link IconDetector} */
+    public IconDetector() {
+    }
+
+    @Override
+    public void beforeCheckRootProject(@NonNull Context context) {
+        mFolderToIcons.clear();
+        mResDir = null;
+    }
+
+    @Override
+    public boolean appliesTo(@NonNull ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.DRAWABLE;
+    }
+
+    @Override
+    public void checkFolder(@NonNull ResourceContext context, @NonNull String folderName) {
+        // Record the res directory
+        File folder = context.file;
+        if (mResDir == null) {
+            mResDir = folder.getParentFile();
+        }
+
+        // Only process density-specific drawable folders
+        if (!isDensityFolder(folderName)) {
+            return;
+        }
+
+        // Collect all icon file names in this folder
+        File[] files = folder.listFiles();
+        if (files != null) {
+            Set<String> icons = new HashSet<>();
+            for (File file : files) {
+                if (file.isFile()) {
+                    String name = file.getName();
+                    if (isIconFile(name)) {
+                        icons.add(name);
+                    }
+                }
+            }
+            if (!icons.isEmpty()) {
+                mFolderToIcons.put(folderName, icons);
+            }
+        }
+    }
+
+    @Override
+    public void afterCheckRootProject(@NonNull Context context) {
+        if (mFolderToIcons.isEmpty()) {
+            return;
+        }
+
+        boolean includeLdpi = includeLdpi();
+        List<String> densityFolders = includeLdpi ? DENSITY_FOLDERS_WITH_LDPI : DENSITY_FOLDERS;
+
+        // Collect all icon names across all density folders
+        Set<String> allIcons = new HashSet<>();
+        for (Map.Entry<String, Set<String>> entry : mFolderToIcons.entrySet()) {
+            String folder = entry.getKey();
+            if (densityFolders.contains(folder)) {
+                allIcons.addAll(entry.getValue());
+            }
+        }
+
+        if (allIcons.isEmpty()) {
+            return;
+        }
+
+        // For each icon, check which density folders are missing it
+        // Group icons by their missing density set to produce fewer, more useful messages
+        Map<String, List<String>> missingToIcons = new HashMap<>();
+
+        for (String icon : allIcons) {
+            List<String> missingFolders = new ArrayList<>();
+            for (String densityFolder : densityFolders) {
+                Set<String> iconsInFolder = mFolderToIcons.get(densityFolder);
+                if (iconsInFolder == null || !iconsInFolder.contains(icon)) {
+                    missingFolders.add(densityFolder);
+                }
+            }
+
+            if (!missingFolders.isEmpty()) {
+                String key = missingFolders.toString();
+                List<String> iconList = missingToIcons.get(key);
+                if (iconList == null) {
+                    iconList = new ArrayList<>();
+                    missingToIcons.put(key, iconList);
+                }
+                iconList.add(icon);
+            }
+        }
+
+        // Report issues
+        for (Map.Entry<String, List<String>> entry : missingToIcons.entrySet()) {
+            List<String> iconList = entry.getValue();
+            Collections.sort(iconList);
+
+            String firstIcon = iconList.get(0);
+            List<String> missingFolders = new ArrayList<>();
+            for (String densityFolder : densityFolders) {
+                Set<String> iconsInFolder = mFolderToIcons.get(densityFolder);
+                if (iconsInFolder == null || !iconsInFolder.contains(firstIcon)) {
+                    missingFolders.add(densityFolder);
+                }
+            }
+
+            // Find a location: use the first existing density folder that has this icon
+            Location location = null;
+            for (String densityFolder : densityFolders) {
+                Set<String> iconsInFolder = mFolderToIcons.get(densityFolder);
+                if (iconsInFolder != null && iconsInFolder.contains(firstIcon)) {
+                    if (mResDir != null) {
+                        File iconFile = new File(new File(mResDir, densityFolder), firstIcon);
+                        if (iconFile.exists()) {
+                            location = Location.create(iconFile);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (location == null) {
+                location = Location.create(context.file);
+            }
+
+            String message = formatMessage(iconList, missingFolders);
+            context.report(ICON_DENSITIES, location, message);
+        }
+    }
+
+    /**
+     * Formats the lint warning message.
+     */
+    private static String formatMessage(
+            @NonNull List<String> icons,
+            @NonNull List<String> missingFolders) {
+        StringBuilder sb = new StringBuilder();
+
+        if (icons.size() == 1) {
+            sb.append("The icon `").append(icons.get(0)).append("`");
+        } else {
+            sb.append("The following icons");
+        }
+
+        sb.append(" does not have a version for ");
+
+        if (missingFolders.size() == 1) {
+            sb.append("the `").append(missingFolders.get(0)).append("` density");
+        } else {
+            sb.append("the following densities: ");
+            for (int i = 0; i < missingFolders.size(); i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append("`").append(missingFolders.get(i)).append("`");
+            }
+        }
+
+        if (icons.size() > 1) {
+            sb.append(": ");
+            for (int i = 0; i < icons.size(); i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                sb.append("`").append(icons.get(i)).append("`");
+            }
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * Returns true if the given folder name is a density-specific drawable folder.
+     */
+    private static boolean isDensityFolder(@NonNull String folderName) {
+        return folderName.equals(DRAWABLE_LDPI)
+                || folderName.equals(DRAWABLE_MDPI)
+                || folderName.equals(DRAWABLE_HDPI)
+                || folderName.equals(DRAWABLE_XHDPI)
+                || folderName.equals(DRAWABLE_XXHDPI)
+                || folderName.equals(DRAWABLE_XXXHDPI);
+    }
+
+    /**
+     * Returns true if the given file name looks like an icon file.
+     */
+    private static boolean isIconFile(@NonNull String name) {
+        String lower = name.toLowerCase();
+        return lower.endsWith(".png")
+                || lower.endsWith(".jpg")
+                || lower.endsWith(".jpeg")
+                || lower.endsWith(".gif")
+                || lower.endsWith(".webp")
+                || lower.endsWith(".xml");
+    }
+
+    /**
+     * Returns true if ldpi should be included in the density check.
+     */
+    private static boolean includeLdpi() {
+        String env = System.getenv(ANDROID_LINT_INCLUDE_LDPI);
+        return "true".equals(env);
+    }
+}

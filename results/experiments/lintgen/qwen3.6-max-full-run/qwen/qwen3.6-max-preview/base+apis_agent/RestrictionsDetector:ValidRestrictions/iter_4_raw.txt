@@ -1,0 +1,197 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import org.w3c.dom.Element
+import org.w3c.dom.Node
+
+class RestrictionsDetector : Detector(), XmlScanner {
+
+    override fun appliesTo(folderType: ResourceFolderType): Boolean =
+        folderType == ResourceFolderType.XML
+
+    override fun getApplicableElements(): Collection<String>? = null
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val tag = element.tagName
+        if (tag == TAG_RESTRICTIONS) {
+            return
+        }
+        if (tag != TAG_RESTRICTION) {
+            context.report(ISSUE, context.getLocation(element), "Unexpected tag `$tag`")
+            return
+        }
+
+        val key = element.getAttributeNS(SdkConstants.ANDROID_URI, ATTR_KEY)
+        val title = element.getAttributeNS(SdkConstants.ANDROID_URI, ATTR_TITLE)
+        val type = element.getAttributeNS(SdkConstants.ANDROID_URI, ATTR_RESTRICTION_TYPE)
+        val defaultValue = element.getAttributeNS(SdkConstants.ANDROID_URI, ATTR_DEFAULT_VALUE)
+
+        if (key.isNullOrEmpty()) {
+            context.report(ISSUE, context.getLocation(element), "Missing required attribute `android:key`")
+        } else if (key.startsWith("@")) {
+            context.report(ISSUE, context.getLocation(element), "Keys should not be localized")
+        } else {
+            val parent = element.parentNode
+            if (parent != null && parent.nodeType == Node.ELEMENT_NODE) {
+                val siblings = parent.childNodes
+                var count = 0
+                for (i in 0 until siblings.length) {
+                    val node = siblings.item(i)
+                    if (node.nodeType == Node.ELEMENT_NODE &&
+                        (node as Element).tagName == TAG_RESTRICTION &&
+                        node.getAttributeNS(SdkConstants.ANDROID_URI, ATTR_KEY) == key) {
+                        count++
+                    }
+                }
+                if (count > 1) {
+                    var isFirst = true
+                    for (i in 0 until siblings.length) {
+                        val node = siblings.item(i)
+                        if (node === element) break
+                        if (node.nodeType == Node.ELEMENT_NODE &&
+                            (node as Element).tagName == TAG_RESTRICTION &&
+                            node.getAttributeNS(SdkConstants.ANDROID_URI, ATTR_KEY) == key) {
+                            isFirst = false
+                            break
+                        }
+                    }
+                    if (isFirst) {
+                        context.report(ISSUE, context.getLocation(element), "Duplicate key `$key`")
+                    }
+                }
+            }
+        }
+
+        if (type.isNullOrEmpty()) {
+            context.report(ISSUE, context.getLocation(element), "Missing required attribute `android:restrictionType`")
+            return
+        }
+
+        if (type !in VALID_TYPES) {
+            val attrNode = element.getAttributeNodeNS(SdkConstants.ANDROID_URI, ATTR_RESTRICTION_TYPE)
+            context.report(ISSUE, context.getLocation(attrNode ?: element), "Invalid restriction type `$type`; must be one of ${VALID_TYPES.joinToString()}")
+        }
+
+        if (title.isNullOrEmpty() && type != "hidden") {
+            context.report(ISSUE, context.getLocation(element), "Missing required attribute `android:title`")
+        }
+
+        if (!defaultValue.isNullOrEmpty()) {
+            when (type) {
+                TYPE_BUNDLE, TYPE_BUNDLE_ARRAY -> {
+                    context.report(ISSUE, context.getLocation(element), "Bundles should not specify a default value")
+                }
+                "bool" -> {
+                    if (defaultValue != "true" && defaultValue != "false") {
+                        context.report(ISSUE, context.getLocation(element), "Invalid default value for bool type")
+                    }
+                }
+                "integer" -> {
+                    if (defaultValue.toIntOrNull() == null) {
+                        context.report(ISSUE, context.getLocation(element), "Invalid default value for integer type")
+                    }
+                }
+            }
+        }
+
+        if (type == TYPE_CHOICE || type == TYPE_MULTI_SELECT) {
+            val entries = element.getAttributeNS(SdkConstants.ANDROID_URI, ATTR_ENTRIES)
+            val entryValues = element.getAttributeNS(SdkConstants.ANDROID_URI, ATTR_ENTRY_VALUES)
+            if (entries.isNullOrEmpty()) {
+                context.report(ISSUE, context.getLocation(element), "Missing required attribute `android:entries` for type `$type`")
+            }
+            if (entryValues.isNullOrEmpty()) {
+                context.report(ISSUE, context.getLocation(element), "Missing required attribute `android:entryValues` for type `$type`")
+            }
+        }
+
+        val children = element.childNodes
+        val childRestrictions = mutableListOf<Element>()
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            if (child.nodeType == Node.ELEMENT_NODE && (child as Element).tagName == TAG_RESTRICTION) {
+                childRestrictions.add(child)
+            }
+        }
+
+        if (type == TYPE_BUNDLE) {
+            if (childRestrictions.isEmpty()) {
+                context.report(ISSUE, context.getLocation(element), "Bundle must contain at least one child restriction")
+            } else {
+                if (childRestrictions.size > MAX_NUMBER_OF_NESTED_RESTRICTIONS) {
+                    context.report(ISSUE, context.getLocation(element), "Number of nested restrictions cannot exceed $MAX_NUMBER_OF_NESTED_RESTRICTIONS")
+                }
+                var depth = 0
+                var p = element.parentNode
+                while (p != null && p.nodeType == Node.ELEMENT_NODE) {
+                    if ((p as Element).tagName == TAG_RESTRICTION) depth++
+                    p = p.parentNode
+                }
+                if (depth >= MAX_NESTING_DEPTH) {
+                    context.report(ISSUE, context.getLocation(element), "Nesting depth cannot exceed $MAX_NESTING_DEPTH")
+                }
+            }
+        } else if (type == TYPE_BUNDLE_ARRAY) {
+            if (childRestrictions.isEmpty()) {
+                context.report(ISSUE, context.getLocation(element), "bundle_array must contain a child restriction")
+            } else if (childRestrictions.size > 1) {
+                context.report(ISSUE, context.getLocation(element), "bundle_array must contain exactly one child restriction")
+            }
+        } else {
+            if (childRestrictions.isNotEmpty()) {
+                context.report(ISSUE, context.getLocation(element), "Restrictions of type `$type` should not contain child restrictions")
+            }
+        }
+    }
+
+    companion object {
+        const val MAX_NESTING_DEPTH = 2
+        const val MAX_NUMBER_OF_NESTED_RESTRICTIONS = 100
+
+        private const val TAG_RESTRICTIONS = "restrictions"
+        private const val TAG_RESTRICTION = "restriction"
+        private const val ATTR_KEY = "key"
+        private const val ATTR_TITLE = "title"
+        private const val ATTR_RESTRICTION_TYPE = "restrictionType"
+        private const val ATTR_ENTRIES = "entries"
+        private const val ATTR_ENTRY_VALUES = "entryValues"
+        private const val ATTR_DEFAULT_VALUE = "defaultValue"
+
+        private const val TYPE_BUNDLE = "bundle"
+        private const val TYPE_BUNDLE_ARRAY = "bundle_array"
+        private const val TYPE_CHOICE = "choice"
+        private const val TYPE_MULTI_SELECT = "multi-select"
+
+        private val VALID_TYPES = setOf(
+            "bool", "string", "integer", TYPE_CHOICE, TYPE_MULTI_SELECT, TYPE_BUNDLE, TYPE_BUNDLE_ARRAY, "hidden"
+        )
+
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "ValidRestrictions",
+            briefDescription = "Invalid Restrictions Descriptor",
+            explanation = """
+                Ensures that an application's restrictions XML file is properly formed. \
+                The file must have a root `<restrictions>` tag, and each `<restriction>` \
+                child must define `android:key`, `android:title`, and `android:restrictionType`. \
+                The `restrictionType` must be one of the valid types defined by `RestrictionsManager`.
+            """.trimIndent(),
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                RestrictionsDetector::class.java,
+                Scope.RESOURCE_FILE_SCOPE
+            )
+        )
+    }
+}

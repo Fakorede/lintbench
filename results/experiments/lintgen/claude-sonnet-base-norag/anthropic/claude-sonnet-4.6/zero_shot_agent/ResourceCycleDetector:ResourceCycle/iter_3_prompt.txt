@@ -1,0 +1,480 @@
+=== SYSTEM ===
+You are an expert Android developer specialising in Android Lint custom checks.
+You write Lint Detector implementations in Kotlin that are correct, idiomatic,
+and compile cleanly against the Android Lint API.
+
+- Output ONLY the detector source file. No explanation, no markdown fences.
+- Use the exact package: com.android.tools.lint.checks
+- The class name must be: ResourceCycleDetector
+
+
+=== USER ===
+Implement an Android Lint Detector named ResourceCycleDetector in Kotlin for the following issue.
+
+Issue ID: ResourceCycle
+
+Specification:
+Cycle in resource definitions
+
+There should be no cycles in resource definitions as this can lead to  runtime exceptions.
+
+Generate the complete ResourceCycleDetector.kt source file now.
+
+---
+
+Your previous attempt failed. Here is the code you generated:
+
+```kt
+/*
+ * Copyright (C) 2024 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.ATTR_NAME
+import com.android.SdkConstants.ATTR_PARENT
+import com.android.SdkConstants.ATTR_TYPE
+import com.android.SdkConstants.TAG_ITEM
+import com.android.SdkConstants.TAG_STYLE
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Location
+import com.android.tools.lint.detector.api.ResourceXmlDetector
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import org.w3c.dom.Document
+import org.w3c.dom.Element
+import org.w3c.dom.Node
+
+/**
+ * Checks for cycles in resource definitions (e.g. a style that extends itself,
+ * or a color that references itself).
+ */
+class ResourceCycleDetector : ResourceXmlDetector() {
+
+    // Maps resource type -> (resource name -> list of referenced resource names of same type)
+    // We store lists to handle multiple references (e.g. drawable state lists)
+    private val graph = mutableMapOf<String, MutableMap<String, MutableList<String>>>()
+
+    // Location map for reporting: "type:name" -> Location
+    private val locationMap = mutableMapOf<String, Location>()
+
+    // Store XmlContext per location key for reporting
+    private val contextMap = mutableMapOf<String, XmlContext>()
+    private val elementMap = mutableMapOf<String, Element>()
+
+    companion object {
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "ResourceCycle",
+            briefDescription = "Cycle in resource definitions",
+            explanation = """
+                There should be no cycles in resource definitions as this can lead to \
+                runtime exceptions.
+                """,
+            category = Category.CORRECTNESS,
+            priority = 8,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                ResourceCycleDetector::class.java,
+                Scope.RESOURCE_FILE_SCOPE
+            )
+        )
+
+        private const val KEY_STYLE = "style"
+        private const val KEY_COLOR = "color"
+        private const val KEY_DRAWABLE = "drawable"
+        private const val KEY_LAYOUT = "layout"
+        private const val KEY_FONT = "font"
+        private const val KEY_STRING = "string"
+
+        private const val COLOR_PREFIX = "@color/"
+        private const val DRAWABLE_PREFIX = "@drawable/"
+        private const val LAYOUT_PREFIX = "@layout/"
+        private const val STYLE_PREFIX = "@style/"
+        private const val FONT_PREFIX = "@font/"
+        private const val STRING_PREFIX = "@string/"
+
+        private const val ANDROID_COLOR_PREFIX = "@android:color/"
+        private const val ANDROID_DRAWABLE_PREFIX = "@android:drawable/"
+        private const val ANDROID_STYLE_PREFIX = "@android:style/"
+        private const val ANDROID_FONT_PREFIX = "@android:font/"
+        private const val ANDROID_STRING_PREFIX = "@android:string/"
+    }
+
+    override fun appliesTo(folderType: ResourceFolderType): Boolean {
+        return folderType == ResourceFolderType.VALUES ||
+                folderType == ResourceFolderType.COLOR ||
+                folderType == ResourceFolderType.DRAWABLE ||
+                folderType == ResourceFolderType.LAYOUT ||
+                folderType == ResourceFolderType.FONT
+    }
+
+    private fun addEdge(type: String, from: String, to: String, context: XmlContext, element: Element) {
+        val typeGraph = graph.getOrPut(type) { mutableMapOf() }
+        typeGraph.getOrPut(from) { mutableListOf() }.add(to)
+        val key = "$type:$from"
+        if (!locationMap.containsKey(key)) {
+            locationMap[key] = context.getLocation(element)
+            contextMap[key] = context
+            elementMap[key] = element
+        }
+    }
+
+    override fun visitDocument(context: XmlContext, document: Document) {
+        val root = document.documentElement ?: return
+        val folderType = context.resourceFolderType ?: return
+
+        when (folderType) {
+            ResourceFolderType.VALUES -> visitValuesDocument(context, root)
+            ResourceFolderType.COLOR -> visitColorDocument(context, root)
+            ResourceFolderType.DRAWABLE -> visitDrawableDocument(context, root)
+            ResourceFolderType.LAYOUT -> visitLayoutDocument(context, root)
+            ResourceFolderType.FONT -> visitFontDocument(context, root)
+            else -> { /* not applicable */ }
+        }
+    }
+
+    private fun visitValuesDocument(context: XmlContext, root: Element) {
+        val children = root.childNodes
+        for (i in 0 until children.length) {
+            val node = children.item(i)
+            if (node !is Element) continue
+            when (node.tagName) {
+                TAG_STYLE -> handleStyleElement(context, node)
+                KEY_COLOR -> handleColorValueElement(context, node)
+                KEY_DRAWABLE -> handleDrawableValueElement(context, node)
+                KEY_STRING -> handleStringValueElement(context, node)
+                TAG_ITEM -> {
+                    val type = node.getAttribute(ATTR_TYPE)
+                    when (type) {
+                        KEY_STYLE -> handleStyleElement(context, node)
+                        KEY_COLOR -> handleColorValueElement(context, node)
+                        KEY_DRAWABLE -> handleDrawableValueElement(context, node)
+                        KEY_LAYOUT -> handleLayoutValueElement(context, node)
+                        KEY_FONT -> handleFontValueElement(context, node)
+                        KEY_STRING -> handleStringValueElement(context, node)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun handleStyleElement(context: XmlContext, element: Element) {
+        val name = element.getAttribute(ATTR_NAME).takeIf { it.isNotEmpty() } ?: return
+        val normalizedName = name.replace('.', '_')
+
+        var parent = element.getAttribute(ATTR_PARENT)
+        if (parent.isNotEmpty()) {
+            if (parent.startsWith(ANDROID_STYLE_PREFIX)) {
+                return
+            }
+            if (parent.startsWith(STYLE_PREFIX)) {
+                parent = parent.substring(STYLE_PREFIX.length)
+            }
+            // Strip @android:style/ prefix
+            if (parent.startsWith("@android:style/")) {
+                return
+            }
+            val normalizedParent = parent.replace('.', '_')
+            if (normalizedParent.isNotEmpty()) {
+                addEdge(KEY_STYLE, normalizedName, normalizedParent, context, element)
+            }
+        } else {
+            // Check for implicit parent via dot notation: "ParentStyle.ChildStyle"
+            val dotIndex = name.lastIndexOf('.')
+            if (dotIndex > 0) {
+                val implicitParent = name.substring(0, dotIndex).replace('.', '_')
+                addEdge(KEY_STYLE, normalizedName, implicitParent, context, element)
+            }
+        }
+    }
+
+    private fun handleColorValueElement(context: XmlContext, element: Element) {
+        val name = element.getAttribute(ATTR_NAME).takeIf { it.isNotEmpty() } ?: return
+        val text = element.textContent?.trim() ?: return
+        if (text.startsWith(COLOR_PREFIX) && !text.startsWith(ANDROID_COLOR_PREFIX)) {
+            val refName = text.substring(COLOR_PREFIX.length).trim()
+            if (refName.isNotEmpty()) {
+                addEdge(KEY_COLOR, name, refName, context, element)
+            }
+        }
+    }
+
+    private fun handleDrawableValueElement(context: XmlContext, element: Element) {
+        val name = element.getAttribute(ATTR_NAME).takeIf { it.isNotEmpty() } ?: return
+        val text = element.textContent?.trim() ?: return
+        if (text.startsWith(DRAWABLE_PREFIX) && !text.startsWith(ANDROID_DRAWABLE_PREFIX)) {
+            val refName = text.substring(DRAWABLE_PREFIX.length).trim()
+            if (refName.isNotEmpty()) {
+                addEdge(KEY_DRAWABLE, name, refName, context, element)
+            }
+        }
+    }
+
+    private fun handleLayoutValueElement(context: XmlContext, element: Element) {
+        val name = element.getAttribute(ATTR_NAME).takeIf { it.isNotEmpty() } ?: return
+        val text = element.textContent?.trim() ?: return
+        if (text.startsWith(LAYOUT_PREFIX)) {
+            val refName = text.substring(LAYOUT_PREFIX.length).trim()
+            if (refName.isNotEmpty()) {
+                addEdge(KEY_LAYOUT, name, refName, context, element)
+            }
+        }
+    }
+
+    private fun handleFontValueElement(context: XmlContext, element: Element) {
+        val name = element.getAttribute(ATTR_NAME).takeIf { it.isNotEmpty() } ?: return
+        val text = element.textContent?.trim() ?: return
+        if (text.startsWith(FONT_PREFIX) && !text.startsWith(ANDROID_FONT_PREFIX)) {
+            val refName = text.substring(FONT_PREFIX.length).trim()
+            if (refName.isNotEmpty()) {
+                addEdge(KEY_FONT, name, refName, context, element)
+            }
+        }
+    }
+
+    private fun handleStringValueElement(context: XmlContext, element: Element) {
+        val name = element.getAttribute(ATTR_NAME).takeIf { it.isNotEmpty() } ?: return
+        val text = element.textContent?.trim() ?: return
+        if (text.startsWith(STRING_PREFIX) && !text.startsWith(ANDROID_STRING_PREFIX)) {
+            val refName = text.substring(STRING_PREFIX.length).trim()
+            if (refName.isNotEmpty()) {
+                addEdge(KEY_STRING, name, refName, context, element)
+            }
+        }
+    }
+
+    private fun visitColorDocument(context: XmlContext, root: Element) {
+        val fileName = context.file.nameWithoutExtension
+        collectRefsFromElement(context, root, fileName, KEY_COLOR, COLOR_PREFIX, ANDROID_COLOR_PREFIX)
+    }
+
+    private fun visitDrawableDocument(context: XmlContext, root: Element) {
+        val fileName = context.file.nameWithoutExtension
+        collectRefsFromElementRecursive(context, root, fileName, KEY_DRAWABLE, DRAWABLE_PREFIX, ANDROID_DRAWABLE_PREFIX)
+    }
+
+    private fun visitLayoutDocument(context: XmlContext, root: Element) {
+        val fileName = context.file.nameWithoutExtension
+        collectLayoutRefsRecursive(context, root, fileName)
+    }
+
+    private fun visitFontDocument(context: XmlContext, root: Element) {
+        val fileName = context.file.nameWithoutExtension
+        collectRefsFromElementRecursive(context, root, fileName, KEY_FONT, FONT_PREFIX, ANDROID_FONT_PREFIX)
+    }
+
+    private fun collectRefsFromElement(
+        context: XmlContext,
+        element: Element,
+        fileName: String,
+        type: String,
+        prefix: String,
+        androidPrefix: String
+    ) {
+        // Check attributes
+        val attrs = element.attributes
+        if (attrs != null) {
+            for (i in 0 until attrs.length) {
+                val attr = attrs.item(i)
+                val value = attr.nodeValue ?: continue
+                if (value.startsWith(prefix) && !value.startsWith(androidPrefix)) {
+                    val refName = value.substring(prefix.length).trim()
+                    if (refName.isNotEmpty()) {
+                        addEdge(type, fileName, refName, context, element)
+                    }
+                }
+            }
+        }
+        // Check text content
+        val text = element.textContent?.trim()
+        if (text != null && text.startsWith(prefix) && !text.startsWith(androidPrefix)) {
+            val refName = text.substring(prefix.length).trim()
+            if (refName.isNotEmpty()) {
+                addEdge(type, fileName, refName, context, element)
+            }
+        }
+    }
+
+    private fun collectRefsFromElementRecursive(
+        context: XmlContext,
+        element: Element,
+        fileName: String,
+        type: String,
+        prefix: String,
+        androidPrefix: String
+    ) {
+        collectRefsFromElement(context, element, fileName, type, prefix, androidPrefix)
+        val children = element.childNodes
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            if (child is Element) {
+                collectRefsFromElementRecursive(context, child, fileName, type, prefix, androidPrefix)
+            }
+        }
+    }
+
+    private fun collectLayoutRefsRecursive(context: XmlContext, element: Element, fileName: String) {
+        val attrs = element.attributes
+        if (attrs != null) {
+            for (i in 0 until attrs.length) {
+                val attr = attrs.item(i)
+                val value = attr.nodeValue ?: continue
+                if (value.startsWith(LAYOUT_PREFIX)) {
+                    val refName = value.substring(LAYOUT_PREFIX.length).trim()
+                    if (refName.isNotEmpty()) {
+                        addEdge(KEY_LAYOUT, fileName, refName, context, element)
+                    }
+                }
+            }
+        }
+        val children = element.childNodes
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            if (child is Element) {
+                collectLayoutRefsRecursive(context, child, fileName)
+            }
+        }
+    }
+
+    override fun afterCheckRootProject(context: Context) {
+        for ((type, typeGraph) in graph) {
+            detectCycles(type, typeGraph, context)
+        }
+    }
+
+    private fun detectCycles(
+        resourceType: String,
+        typeGraph: Map<String, List<String>>,
+        context: Context
+    ) {
+        // Use DFS to detect cycles
+        // States: 0 = unvisited, 1 = in progress, 2 = done
+        val state = mutableMapOf<String, Int>()
+        val reported = mutableSetOf<String>()
+
+        fun dfs(node: String, path: MutableList<String>) {
+            state[node] = 1
+            path.add(node)
+
+            val neighbors = typeGraph[node] ?: emptyList()
+            for (neighbor in neighbors) {
+                val neighborState = state[neighbor] ?: 0
+                if (neighborState == 1) {
+                    // Found a cycle - neighbor is in current path
+                    val cycleStartIndex = path.indexOf(neighbor)
+                    if (cycleStartIndex >= 0) {
+                        val cycle = path.subList(cycleStartIndex, path.size)
+                        // Report on each node in the cycle that has a location
+                        for (nodeName in cycle) {
+                            if (nodeName !in reported) {
+                                reported.add(nodeName)
+                                val key = "$resourceType:$nodeName"
+                                val xmlContext = contextMap[key]
+                                val element = elementMap[key]
+                                if (xmlContext != null && element != null) {
+                                    val cycleDescription = buildCycleDescription(resourceType, cycle, nodeName)
+                                    xmlContext.report(
+                                        ISSUE,
+                                        element,
+                                        xmlContext.getLocation(element),
+                                        cycleDescription
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else if (neighborState == 0) {
+                    dfs(neighbor, path)
+                }
+            }
+
+            path.removeAt(path.size - 1)
+            state[node] = 2
+        }
+
+        for (node in typeGraph.keys) {
+            if ((state[node] ?: 0) == 0) {
+                dfs(node, mutableListOf())
+            }
+        }
+    }
+
+    private fun buildCycleDescription(
+        resourceType: String,
+        cycle: List<String>,
+        startNode: String
+    ): String {
+        val prefix = when (resourceType) {
+            KEY_STYLE -> "@style/"
+            KEY_COLOR -> "@color/"
+            KEY_DRAWABLE -> "@drawable/"
+            KEY_LAYOUT -> "@layout/"
+            KEY_FONT -> "@font/"
+            KEY_STRING -> "@string/"
+            else -> "@$resourceType/"
+        }
+
+        val sb = StringBuilder()
+        sb.append("Cycle detected: ")
+
+        val startIndex = cycle.indexOf(startNode)
+        val orderedCycle = if (startIndex >= 0) {
+            cycle.subList(startIndex, cycle.size) + cycle.subList(0, startIndex)
+        } else {
+            cycle
+        }
+
+        for (i in orderedCycle.indices) {
+            sb.append("$prefix${orderedCycle[i]}")
+            if (i < orderedCycle.size - 1) {
+                sb.append(" => ")
+            }
+        }
+        sb.append(" => $prefix${orderedCycle[0]}")
+
+        return sb.toString()
+    }
+}
+```
+
+The harness reported the following errors:
+
+Tests failed: testStylesInvalidParent, testAdaptiveIconCycle, testColorStateListCycle
+
+testStylesInvalidParent: java.lang.AssertionError: Not true that
+"[ResourceCycle]
+is found in lint output
+"No warnings.
+	at org.junit.Assert.fail(Assert.java:89)
+	at org.junit.Assert.assertTrue(Assert.java:42)
+	at com.android.tools.lint.checks.infrastructure.TestLintResult.expectContains(TestLintResult.kt:168)
+	at com.android.tools.lint.checks.infrastructure.TestLintResult.expectContains$default(TestLintResult.kt:142)
+	at com.android.tools.lint.checks.infrastructure.TestLintResult.expectContains(TestLintResult.kt)
+	at com.android.tools.lint.checks.ResourceCycleDetectorTest.testStylesInvalidParent(ResourceCycleDetectorTest.java:92)
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:77)
+	a
+testAdaptiveIconCycle: org.junit.ComparisonFailure: expected:<...rsive.xml:5: Error: [Drawable drawable_recursive should not reference itself [ResourceCycle]
+    <foreground android:drawable="@drawable/drawable_recursive" />
+                ]~~~~~~~~~~~~~~~~~~~~...> but was:<...rsive.xml:5: Error: [Cycle detected: @drawable/drawable_recursive => @drawable/drawable_recursi
+
+Fix the detector so that it compiles cleanly and all tests pass.
+Output ONLY the corrected source file — no explanation, no markdown fences.

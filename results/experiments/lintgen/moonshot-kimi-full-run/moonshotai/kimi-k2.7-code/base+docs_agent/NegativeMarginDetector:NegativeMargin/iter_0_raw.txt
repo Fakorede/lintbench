@@ -1,0 +1,128 @@
+package com.android.tools.lint.checks;
+
+import static com.android.SdkConstants.ANDROID_URI;
+import static com.android.SdkConstants.ATTR_NAME;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_BOTTOM;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_END;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_HORIZONTAL;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_LEFT;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_RIGHT;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_START;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_TOP;
+import static com.android.SdkConstants.ATTR_LAYOUT_MARGIN_VERTICAL;
+import static com.android.SdkConstants.PREFIX_ANDROID;
+import static com.android.SdkConstants.TAG_ITEM;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+
+public class NegativeMarginDetector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "NegativeMargin",
+            "Negative Margins",
+            "Margin values should be positive. Negative values are generally a sign that you are making assumptions about views surrounding the current one, or may be tempted to turn off child clipping to allow a view to escape its parent. Turning off child clipping to do this not only leads to poor graphical performance, it also results in wrong touch event handling since touch events are based strictly on a chain of parent-rect hit tests. Finally, making assumptions about the size of strings can lead to localization problems.",
+            Category.LAYOUT,
+            4,
+            Severity.WARNING,
+            new Implementation(NegativeMarginDetector.class, Scope.RESOURCE_FILE_SCOPE)
+    );
+
+    private static final Collection<String> MARGIN_ATTRS = Arrays.asList(
+            ATTR_LAYOUT_MARGIN,
+            ATTR_LAYOUT_MARGIN_LEFT,
+            ATTR_LAYOUT_MARGIN_TOP,
+            ATTR_LAYOUT_MARGIN_RIGHT,
+            ATTR_LAYOUT_MARGIN_BOTTOM,
+            ATTR_LAYOUT_MARGIN_START,
+            ATTR_LAYOUT_MARGIN_END,
+            ATTR_LAYOUT_MARGIN_HORIZONTAL,
+            ATTR_LAYOUT_MARGIN_VERTICAL
+    );
+
+    @Override
+    public Collection<String> getApplicableAttributes() {
+        return MARGIN_ATTRS;
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Collections.singletonList(TAG_ITEM);
+    }
+
+    @Override
+    public void visitAttribute(@NonNull XmlContext context, @NonNull Attr attribute) {
+        String namespace = attribute.getNamespaceURI();
+        if (namespace != null && !ANDROID_URI.equals(namespace)) {
+            return;
+        }
+        checkNegative(context, attribute, attribute.getValue());
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        String name = element.getAttribute(ATTR_NAME);
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+        String localName = name;
+        if (localName.startsWith(PREFIX_ANDROID)) {
+            localName = localName.substring(PREFIX_ANDROID.length());
+        }
+        if (!MARGIN_ATTRS.contains(localName)) {
+            return;
+        }
+        checkNegative(context, element, element.getTextContent());
+    }
+
+    private void checkNegative(@NonNull XmlContext context, @NonNull Attr attribute,
+            @Nullable String value) {
+        if (value != null && isNegative(value)) {
+            context.report(ISSUE, attribute, context.getValueLocation(attribute),
+                    "Margin values should not be negative");
+        }
+    }
+
+    private void checkNegative(@NonNull XmlContext context, @NonNull Element element,
+            @Nullable String value) {
+        if (value != null && isNegative(value.trim())) {
+            context.report(ISSUE, element, context.getElementLocation(element),
+                    "Margin values should not be negative");
+        }
+    }
+
+    private static boolean isNegative(@NonNull String value) {
+        if (value.isEmpty() || value.charAt(0) != '-') {
+            return false;
+        }
+        int i = 1;
+        int len = value.length();
+        while (i < len && (Character.isDigit(value.charAt(i)) || value.charAt(i) == '.')) {
+            i++;
+        }
+        if (i == 1) {
+            return false;
+        }
+        try {
+            return Double.parseDouble(value.substring(0, i)) < 0;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+}

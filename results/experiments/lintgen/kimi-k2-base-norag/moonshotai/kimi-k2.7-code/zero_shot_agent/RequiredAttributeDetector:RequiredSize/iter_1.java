@@ -1,0 +1,305 @@
+package com.android.tools.lint.checks;
+
+import static com.android.SdkConstants.ANDROID_URI;
+import static com.android.SdkConstants.ATTR_CLASS;
+import static com.android.SdkConstants.ATTR_LAYOUT_HEIGHT;
+import static com.android.SdkConstants.ATTR_LAYOUT_WIDTH;
+import static com.android.SdkConstants.ATTR_STYLE;
+
+import com.android.annotations.NonNull;
+import com.android.resources.ResourceFolderType;
+import com.android.resources.ResourceType;
+import com.android.resources.ResourceUrl;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Project;
+import com.android.tools.lint.detector.api.ResourceXmlDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScannerConstants;
+
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.io.File;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import javax.xml.parsers.DocumentBuilderFactory;
+
+public class RequiredAttributeDetector extends ResourceXmlDetector {
+
+    private static final String GRID_LAYOUT = "GridLayout";
+    private static final String VIEW_TAG = "view";
+    private static final String MERGE_TAG = "merge";
+    private static final String INCLUDE_TAG = "include";
+    private static final String FRAGMENT_TAG = "fragment";
+    private static final String REQUEST_FOCUS_TAG = "requestFocus";
+    private static final String SCRIPT_TAG = "script";
+    private static final String LAYOUT_TAG = "layout";
+
+    public static final Issue ISSUE = Issue.create(
+            "RequiredSize",
+            "Missing layout_width or layout_height attributes",
+            "All views must specify an explicit `layout_width` and `layout_height` attribute. "
+                    + "There is a runtime check for this, so if you fail to specify a size, an "
+                    + "exception is thrown at runtime. It is possible to specify these widths "
+                    + "via styles as well. GridLayout, as a special case, does not require you "
+                    + "to specify a size.",
+            Category.CORRECTNESS,
+            9,
+            Severity.FATAL,
+            new Implementation(
+                    RequiredAttributeDetector.class,
+                    Scope.RESOURCE_FILE_SCOPE));
+
+    private Map<String, StyleInfo> mStyleCache;
+
+    @Override
+    public void beforeCheckProject(@NonNull Context context) {
+        mStyleCache = new HashMap<>();
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return XmlScannerConstants.ALL;
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        if (context.getResourceFolderType() != ResourceFolderType.LAYOUT) {
+            return;
+        }
+
+        String tag = element.getTagName();
+        if (tag.equals(MERGE_TAG)
+                || tag.equals(INCLUDE_TAG)
+                || tag.equals(FRAGMENT_TAG)
+                || tag.equals(REQUEST_FOCUS_TAG)
+                || tag.equals(SCRIPT_TAG)
+                || tag.equals(LAYOUT_TAG)) {
+            return;
+        }
+
+        if (tag.equals(VIEW_TAG)) {
+            String className = element.getAttribute(ATTR_CLASS);
+            if (className != null && className.endsWith(GRID_LAYOUT)) {
+                return;
+            }
+        } else if (tag.endsWith(GRID_LAYOUT)) {
+            return;
+        }
+
+        boolean hasWidth = element.hasAttributeNS(ANDROID_URI, ATTR_LAYOUT_WIDTH);
+        boolean hasHeight = element.hasAttributeNS(ANDROID_URI, ATTR_LAYOUT_HEIGHT);
+        if (hasWidth && hasHeight) {
+            return;
+        }
+
+        String style = element.getAttribute(ATTR_STYLE);
+        if (!style.isEmpty()) {
+            if (!hasWidth && hasLayoutAttributeInStyle(context, style, ATTR_LAYOUT_WIDTH)) {
+                hasWidth = true;
+            }
+            if (!hasHeight && hasLayoutAttributeInStyle(context, style, ATTR_LAYOUT_HEIGHT)) {
+                hasHeight = true;
+            }
+        }
+
+        if (hasWidth && hasHeight) {
+            return;
+        }
+
+        if (!hasWidth && !hasHeight) {
+            context.report(ISSUE, element, context.getLocation(element),
+                    "Missing both `layout_width` and `layout_height` attributes");
+        } else if (!hasWidth) {
+            context.report(ISSUE, element, context.getLocation(element),
+                    "Missing `layout_width` attribute");
+        } else {
+            context.report(ISSUE, element, context.getLocation(element),
+                    "Missing `layout_height` attribute");
+        }
+    }
+
+    private boolean hasLayoutAttributeInStyle(
+            @NonNull XmlContext context,
+            @NonNull String styleReference,
+            @NonNull String attrName) {
+        return hasLayoutAttributeInStyle(context, styleReference, attrName, new HashSet<String>());
+    }
+
+    private boolean hasLayoutAttributeInStyle(
+            @NonNull XmlContext context,
+            @NonNull String styleReference,
+            @NonNull String attrName,
+            @NonNull Set<String> visited) {
+        if (!visited.add(styleReference)) {
+            return false;
+        }
+
+        if (isFrameworkReference(styleReference)) {
+            return false;
+        }
+
+        ResourceUrl url = ResourceUrl.parse(styleReference);
+        if ((url == null || url.type != ResourceType.STYLE) && !styleReference.contains("/")) {
+            url = ResourceUrl.parse("@style/" + styleReference);
+        }
+        if (url == null || url.type != ResourceType.STYLE || url.name == null) {
+            return false;
+        }
+
+        StyleInfo info = findStyle(context.getMainProject(), url.name);
+        if (info == null) {
+            return false;
+        }
+
+        if (info.hasItem(attrName)) {
+            return true;
+        }
+
+        String parent = info.parent;
+        if (parent == null || parent.isEmpty()) {
+            return false;
+        }
+
+        return hasLayoutAttributeInStyle(context, parent, attrName, visited);
+    }
+
+    private boolean isFrameworkReference(@NonNull String reference) {
+        return reference.startsWith("@android:") || reference.startsWith("@*android:");
+    }
+
+    private StyleInfo findStyle(@NonNull Project project, @NonNull String styleName) {
+        if (mStyleCache == null) {
+            mStyleCache = new HashMap<>();
+        }
+
+        if (mStyleCache.containsKey(styleName)) {
+            return mStyleCache.get(styleName);
+        }
+
+        StyleInfo result = null;
+        List<File> resourceFolders = project.getResourceFolders();
+        if (resourceFolders != null) {
+            for (File resDir : resourceFolders) {
+                if (resDir == null || !resDir.isDirectory()) {
+                    continue;
+                }
+
+                File[] children = resDir.listFiles();
+                if (children == null) {
+                    continue;
+                }
+
+                for (File child : children) {
+                    if (child.isDirectory() && child.getName().startsWith("values")) {
+                        File[] xmlFiles = child.listFiles();
+                        if (xmlFiles == null) {
+                            continue;
+                        }
+
+                        for (File file : xmlFiles) {
+                            if (file.isFile() && file.getName().endsWith(".xml")) {
+                                StyleInfo info = findStyleInFile(file, styleName);
+                                if (info != null) {
+                                    result = info;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (result != null) {
+                            break;
+                        }
+                    }
+                }
+
+                if (result != null) {
+                    break;
+                }
+            }
+        }
+
+        mStyleCache.put(styleName, result);
+        return result;
+    }
+
+    private StyleInfo findStyleInFile(@NonNull File file, @NonNull String styleName) {
+        Document document;
+        try {
+            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+            factory.setNamespaceAware(false);
+            document = factory.newDocumentBuilder().parse(file);
+        } catch (Exception e) {
+            return null;
+        }
+
+        NodeList styles = document.getElementsByTagName("style");
+        for (int i = 0; i < styles.getLength(); i++) {
+            Node node = styles.item(i);
+            if (node.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+
+            Element style = (Element) node;
+            String name = style.getAttribute("name");
+            if (name == null || !name.equals(styleName)) {
+                continue;
+            }
+
+            StyleInfo info = new StyleInfo();
+            String parent = style.getAttribute("parent");
+            if (parent != null && !parent.isEmpty()) {
+                info.parent = parent;
+            } else {
+                int dot = styleName.lastIndexOf('.');
+                if (dot > 0) {
+                    info.parent = "@style/" + styleName.substring(0, dot);
+                }
+            }
+
+            NodeList items = style.getElementsByTagName("item");
+            for (int j = 0; j < items.getLength(); j++) {
+                Node itemNode = items.item(j);
+                if (itemNode.getNodeType() != Node.ELEMENT_NODE) {
+                    continue;
+                }
+
+                Element item = (Element) itemNode;
+                String itemName = item.getAttribute("name");
+                if (itemName != null) {
+                    info.items.add(itemName);
+                }
+            }
+
+            return info;
+        }
+
+        return null;
+    }
+
+    private static class StyleInfo {
+        String parent;
+        final Set<String> items = new HashSet<>();
+
+        boolean hasItem(@NonNull String attrName) {
+            for (String itemName : items) {
+                if (itemName.equals(attrName) || itemName.endsWith(":" + attrName)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+}

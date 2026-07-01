@@ -1,0 +1,148 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.resources.Density;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceContext;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+
+import java.io.File;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+
+public class IconDetector extends Detector implements Detector.BinaryResourceScanner {
+    private static final String ISSUE_ID = "IconDensities";
+    private static final String INCLUDE_LDPI = "ANDROID_LINT_INCLUDE_LDPI";
+
+    public static final Issue ICON_DENSITIES = Issue.create(
+            ISSUE_ID,
+            "Icon densities validation",
+            "Icons will look best if a custom version is provided for each of the major "
+                    + "screen density classes (low, medium, high, extra high). This lint check "
+                    + "identifies icons which do not have complete coverage across the densities.\n\n"
+                    + "Low density is not really used much anymore, so this check ignores the ldpi "
+                    + "density. To force lint to include it, set the environment variable "
+                    + "`ANDROID_LINT_INCLUDE_LDPI=true`. For more information on current density "
+                    + "usage, see https://developer.android.com/about/dashboards",
+            Category.ICONS,
+            4,
+            Severity.WARNING,
+            new Implementation(IconDetector.class, Scope.BINARY_RESOURCE_FILE_SCOPE))
+            .addMoreInfo("https://developer.android.com/guide/practices/screens_support.html");
+
+    private final Map<String, Set<Density>> mNamesToDensities = new HashMap<>();
+    private final Map<String, File> mNamesToFiles = new HashMap<>();
+    private final Map<String, String> mNamesToDisplayNames = new HashMap<>();
+    private final Map<String, ResourceFolderType> mNamesToFolderTypes = new HashMap<>();
+
+    @Override
+    public void beforeCheckProject(@NonNull Context context) {
+        mNamesToDensities.clear();
+        mNamesToFiles.clear();
+        mNamesToDisplayNames.clear();
+        mNamesToFolderTypes.clear();
+    }
+
+    @Override
+    public void checkBinaryResource(@NonNull ResourceContext context) {
+        ResourceFolderType folderType = context.getResourceFolderType();
+        if (folderType != ResourceFolderType.DRAWABLE && folderType != ResourceFolderType.MIPMAP) {
+            return;
+        }
+
+        File file = context.getFile();
+        String fileName = file.getName();
+        if (fileName.startsWith(".") || !isImageFile(fileName)) {
+            return;
+        }
+
+        Density density = getDensity(file.getParentFile().getName());
+        if (density == null || density == Density.NODPI || density == Density.ANYDPI) {
+            return;
+        }
+
+        String baseName = getBaseName(fileName);
+        String key = folderType.getName() + "/" + baseName;
+
+        Set<Density> densities = mNamesToDensities.get(key);
+        if (densities == null) {
+            densities = EnumSet.noneOf(Density.class);
+            mNamesToDensities.put(key, densities);
+            mNamesToFiles.put(key, file);
+            mNamesToDisplayNames.put(key, baseName);
+            mNamesToFolderTypes.put(key, folderType);
+        }
+        densities.add(density);
+    }
+
+    @Override
+    public void afterCheckProject(@NonNull Context context) {
+        boolean includeLdpi = "true".equalsIgnoreCase(System.getenv(INCLUDE_LDPI));
+        Set<Density> expected = EnumSet.of(Density.MDPI, Density.HDPI, Density.XHDPI);
+        if (includeLdpi) {
+            expected.add(Density.LDPI);
+        }
+
+        for (Map.Entry<String, Set<Density>> entry : mNamesToDensities.entrySet()) {
+            Set<Density> found = entry.getValue();
+            if (found.contains(Density.NODPI) || found.contains(Density.ANYDPI)) {
+                continue;
+            }
+
+            Set<Density> missing = EnumSet.copyOf(expected);
+            missing.removeAll(found);
+            if (missing.isEmpty()) {
+                continue;
+            }
+
+            File file = mNamesToFiles.get(entry.getKey());
+            String displayName = mNamesToDisplayNames.get(entry.getKey());
+            ResourceFolderType folderType = mNamesToFolderTypes.get(entry.getKey());
+
+            String message = String.format(
+                    "Missing density variation: the icon `%1$s` is missing in the following "
+                            + "density folders: %2$s",
+                    displayName, formatMissingDensities(folderType, missing));
+            context.report(ICON_DENSITIES, Location.create(file), message);
+        }
+    }
+
+    private static boolean isImageFile(@NonNull String fileName) {
+        if (fileName.endsWith(".9.png")) {
+            return true;
+        }
+        int dot = fileName.lastIndexOf('.');
+        if (dot <= 0) {
+            return false;
+        }
+        String ext = fileName.substring(dot + 1).toLowerCase(Locale.US);
+        return ext.equals("png") || ext.equals("jpg") || ext.equals("jpeg")
+                || ext.equals("gif") || ext.equals("webp") || ext.equals("bmp");
+    }
+
+    private static String getBaseName(@NonNull String fileName) {
+        int dot = fileName.indexOf('.');
+        return dot == -1 ? fileName : fileName.substring(0, dot);
+    }
+
+    private static Density getDensity(@NonNull String folderName) {
+        String[] parts = folderName.split("-");
+        if (parts.length <= 1) {
+            return Density.MDPI;
+        }
+        for (int i = 1; i < parts.length; i++) {
+            Density density = getDensityByName(parts[i]);
+            if (density != null) {
+                return density;
+            }
+        }

@@ -1,0 +1,117 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.*
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.intellij.psi.PsiMethod
+import org.jetbrains.uast.UCallExpression
+import org.jetbrains.uast.UElement
+
+class SelectedPhotoAccessDetector : Detector(), SourceCodeScanner, XmlScanner {
+
+    companion object {
+
+        private const val READ_MEDIA_IMAGES = "android.permission.READ_MEDIA_IMAGES"
+        private const val READ_MEDIA_VIDEO = "android.permission.READ_MEDIA_VIDEO"
+        private const val READ_MEDIA_VISUAL_USER_SELECTED =
+            "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
+
+        private val PHOTO_PERMISSIONS = setOf(READ_MEDIA_IMAGES, READ_MEDIA_VIDEO)
+
+        val ISSUE: Issue = Issue.create(
+            id = "SelectedPhotoAccess",
+            briefDescription = "Behavior change when requesting photo library access",
+            explanation = """
+                Selected Photo Access is a new ability for users to share partial access to \
+                their photo library when apps request access to their device storage on Android 14+.
+
+                Instead of letting the system manage the selection lifecycle, we recommend you \
+                adapt your app to handle partial access to the photo library.
+
+                To handle partial access, you should also request the \
+                `READ_MEDIA_VISUAL_USER_SELECTED` permission alongside `READ_MEDIA_IMAGES` \
+                or `READ_MEDIA_VIDEO`.
+
+                Reference: https://developer.android.com/about/versions/14/changes/partial-photo-video-access
+            """,
+            category = Category.CORRECTNESS,
+            priority = 8,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                SelectedPhotoAccessDetector::class.java,
+                Scope.MANIFEST_SCOPE
+            ),
+            androidSpecific = true
+        )
+
+        private const val ATTR_NAME = "name"
+        private const val TAG_USES_PERMISSION = "uses-permission"
+        private const val ANDROID_NS = "http://schemas.android.com/apk/res/android"
+    }
+
+    // Track which permissions are declared in the manifest
+    private val declaredPermissions = mutableSetOf<String>()
+    // Track the XML elements for photo permissions so we can report on them
+    private val photoPermissionElements = mutableListOf<Pair<String, org.w3c.dom.Element>>()
+
+    override fun getApplicableElements(): Collection<String> {
+        return listOf(TAG_USES_PERMISSION)
+    }
+
+    override fun visitElement(context: XmlContext, element: org.w3c.dom.Element) {
+        val name = element.getAttributeNS(ANDROID_NS, ATTR_NAME) ?: return
+        declaredPermissions.add(name)
+
+        if (name in PHOTO_PERMISSIONS) {
+            photoPermissionElements.add(Pair(name, element))
+        }
+    }
+
+    override fun afterCheckFile(context: Context) {
+        if (context !is XmlContext) return
+
+        // Only process manifest files
+        if (photoPermissionElements.isEmpty()) {
+            return
+        }
+
+        val hasUserSelected = READ_MEDIA_VISUAL_USER_SELECTED in declaredPermissions
+
+        if (!hasUserSelected) {
+            for ((permissionName, element) in photoPermissionElements) {
+                val fix = fix()
+                    .name("Add READ_MEDIA_VISUAL_USER_SELECTED permission")
+                    .xml()
+                    .after(
+                        "<uses-permission android:name=\"$permissionName\""
+                    )
+                    .with(
+                        "\n    <uses-permission android:name=\"$READ_MEDIA_VISUAL_USER_SELECTED\" />"
+                    )
+                    .build()
+
+                context.report(
+                    issue = ISSUE,
+                    location = context.getElementLocation(element),
+                    message = "To handle partial access to the photo library on Android 14+, " +
+                        "you should also request `READ_MEDIA_VISUAL_USER_SELECTED` alongside " +
+                        "`$permissionName`.",
+                    quickfixData = fix
+                )
+            }
+        }
+
+        // Reset state for next file
+        declaredPermissions.clear()
+        photoPermissionElements.clear()
+    }
+
+    override fun beforeCheckFile(context: Context) {
+        declaredPermissions.clear()
+        photoPermissionElements.clear()
+    }
+}

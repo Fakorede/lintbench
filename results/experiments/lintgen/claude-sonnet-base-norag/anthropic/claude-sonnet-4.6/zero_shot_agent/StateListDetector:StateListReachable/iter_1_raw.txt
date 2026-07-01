@@ -1,0 +1,142 @@
+Looking at the test failure, `testStates3` expects a `StateListReachable` warning but gets "No warnings." This suggests the test has a selector where an item without state attributes appears before another item, but my current `isCatchAll` check might be too strict - it only checks for `state_` prefixed attributes, but perhaps I should also consider that items with only non-state attributes (like `android:drawable`) are catch-alls.
+
+The issue is that `isCatchAll` should return true when the element has no `state_` attributes, regardless of other attributes like `android:drawable`. My current implementation looks correct for that. Let me reconsider...
+
+The problem might be that `testStates3` uses a different XML structure. Perhaps the item has attributes in the `android` namespace, and the `state_` check needs to look at the local name properly. Or perhaps the test uses items that are not `<item>` elements but something else.
+
+Wait - looking more carefully, the issue might be that I need to check the namespace. State attributes are like `android:state_pressed`, so the local name would be `state_pressed` but the full name would be `android:state_pressed`. My check for `name.startsWith("state_")` on the local name should work.
+
+But wait - what if `getLocalName()` returns null for non-namespace-aware parsing? In that case I fall back to `attr.getName()` which would be `android:state_pressed`, which does NOT start with `state_`. Let me fix this to check both the local name and the full name.
+
+/*
+ * Copyright (C) 2011 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.ResourceXmlDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.util.Collection;
+import java.util.Collections;
+
+public class StateListDetector extends ResourceXmlDetector {
+
+    public static final Issue ISSUE = Issue.create(
+            "StateListReachable",
+            "Unreachable state in a `<selector>`",
+            "In a selector, only the last child in the state list should omit a state " +
+            "qualifier. If not, all subsequent items in the list will be ignored since " +
+            "the given item will match all.",
+            Category.CORRECTNESS,
+            5,
+            Severity.WARNING,
+            new Implementation(
+                    StateListDetector.class,
+                    Scope.RESOURCE_FILE_SCOPE));
+
+    public StateListDetector() {
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Collections.singletonList("selector");
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        NodeList childNodes = element.getChildNodes();
+        int childCount = childNodes.getLength();
+
+        Element catchAllElement = null;
+
+        for (int i = 0; i < childCount; i++) {
+            Node node = childNodes.item(i);
+            if (node.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+
+            Element child = (Element) node;
+
+            if (catchAllElement != null) {
+                context.report(
+                        ISSUE,
+                        child,
+                        context.getLocation(child),
+                        "This item is unreachable because a previous item (item #"
+                                + getChildIndex(catchAllElement)
+                                + ") is a more general match than this one");
+            } else if (isCatchAll(child)) {
+                catchAllElement = child;
+            }
+        }
+    }
+
+    private static boolean isCatchAll(@NonNull Element element) {
+        NamedNodeMap attributes = element.getAttributes();
+        if (attributes == null) {
+            return true;
+        }
+
+        for (int i = 0, n = attributes.getLength(); i < n; i++) {
+            Attr attr = (Attr) attributes.item(i);
+            // Check local name first (namespace-aware)
+            String localName = attr.getLocalName();
+            if (localName != null && localName.startsWith("state_")) {
+                return false;
+            }
+            // Also check full attribute name (e.g., "android:state_pressed")
+            String fullName = attr.getName();
+            if (fullName != null && (fullName.startsWith("state_") || fullName.contains(":state_"))) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static int getChildIndex(@NonNull Element element) {
+        Node parent = element.getParentNode();
+        if (parent == null) {
+            return 1;
+        }
+
+        NodeList siblings = parent.getChildNodes();
+        int index = 0;
+        for (int i = 0, n = siblings.getLength(); i < n; i++) {
+            Node sibling = siblings.item(i);
+            if (sibling.getNodeType() == Node.ELEMENT_NODE) {
+                index++;
+                if (sibling == element) {
+                    return index;
+                }
+            }
+        }
+
+        return index;
+    }
+}

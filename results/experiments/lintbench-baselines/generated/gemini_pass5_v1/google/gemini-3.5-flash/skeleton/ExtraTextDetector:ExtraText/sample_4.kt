@@ -1,0 +1,60 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.ResourceXmlDetector
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+
+class ExtraTextDetector : ResourceXmlDetector() {
+
+    companion object {
+        private val IMPLEMENTATION = Implementation(
+            ExtraTextDetector::class.java,
+            Scope.RESOURCE_FILE_SCOPE,
+        )
+
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "ExtraText",
+            briefDescription = "Extraneous text in resource files",
+            explanation = "Non-value resource files should only contain elements and attributes. " +
+                    "Any XML text content found in the file is likely accidental (and potentially " +
+                    "dangerous if the text resembles XML and the developer believes the text to " +
+                    "be functional).",
+            category = Category.CORRECTNESS,
+            priority = 3,
+            severity = Severity.ERROR,
+            implementation = IMPLEMENTATION,
+        )
+    }
+
+    override fun appliesTo(folderType: com.android.resources.ResourceFolderType): Boolean {
+        return folderType != com.android.resources.ResourceFolderType.VALUES
+    }
+
+    override fun visitDocument(context: XmlContext, document: org.w3c.dom.Document) {
+        checkNode(context, document)
+    }
+
+    private fun checkNode(context: XmlContext, node: org.w3c.dom.Node) {
+        val nodeType = node.nodeType
+        if (nodeType == org.w3c.dom.Node.TEXT_NODE || nodeType == org.w3c.dom.Node.CDATA_SECTION_NODE) {
+            val text = node.nodeValue
+            if (text != null && text.trim().isNotEmpty()) {
+                context.report(
+                    ISSUE,
+                    node,
+                    context.getLocation(node),
+                    "Extraneous text in resource files is not allowed outside of `values/` resources"
+                )
+            }
+        }
+        val childNodes = node.childNodes
+        for (i in 0 until childNodes.length) {
+            checkNode(context, childNodes.item(i))
+        }
+    }
+}
