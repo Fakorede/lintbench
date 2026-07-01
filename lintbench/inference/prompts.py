@@ -418,8 +418,6 @@ Scanner interfaces to implement: {scanner_interfaces}
 Specification:
 {nl_spec}
 
-Lint API methods to override:
-{methods_list}
 {more_info}
 Generate the complete {detector}.{ext} source file now.\
 """

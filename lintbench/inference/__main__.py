@@ -212,6 +212,10 @@ def run_generation(args: argparse.Namespace) -> None:
                     log_record["usage"]        = usage
                     if reasoning is not None:
                         log_record["reasoning_content"] = reasoning
+                        # Also dump to a readable file for per-sample inspection.
+                        (inst_dir / f"sample_{sample_id}_thinking.txt").write_text(
+                            reasoning, encoding="utf-8"
+                        )
                     cost = compute_cost(args.model, usage["input_tokens"], usage["output_tokens"])
                     if cost is not None:
                         log_record["cost_usd"] = round(cost, 6)

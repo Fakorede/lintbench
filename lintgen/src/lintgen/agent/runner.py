@@ -299,7 +299,8 @@ def run_agent(args: argparse.Namespace) -> None:
 
     # ── Output layout ─────────────────────────────────────────────────────────
     run_id   = getattr(args, "run_id", None) or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    out_root = Path(args.out) / run_id / args.model / f"{args.prompt}_agent"
+    model_slug = args.model.split(":")[0]  # strip :nitro/:free/:extended variants
+    out_root = Path(args.out) / run_id / model_slug / f"{args.prompt}_agent"
     out_root.mkdir(parents=True, exist_ok=True)
     run_log_path = out_root / "run_log.jsonl"
 
@@ -438,6 +439,10 @@ def run_agent(args: argparse.Namespace) -> None:
                     gen_record["usage"] = usage
                     if reasoning:
                         gen_record["reasoning_content"] = reasoning
+                        # Also dump to a readable file for per-iteration inspection.
+                        (inst_dir / f"iter_{iteration}_thinking.txt").write_text(
+                            reasoning, encoding="utf-8"
+                        )
                     cost = compute_cost(args.model, usage["input_tokens"], usage["output_tokens"])
                     if cost is not None:
                         gen_record["cost_usd"] = round(cost, 6)

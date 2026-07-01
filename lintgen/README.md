@@ -151,7 +151,17 @@ Generates a detector, compiles and tests it via the Docker build harness, then f
 lintgen agent \
     --model     anthropic/claude-sonnet-4.6 \
     --prompt    base+apis+docs \
-    --build-env lintbench/build_env/run.sh
+    --build-env lintbench/build_env/run.sh \
+    --run-id    claude-sonnet-full-run \
+    --max-iter  5
+
+lintgen agent \
+    --model     moonshotai/kimi-k2.7-code \
+    --prompt    base+apis+docs \
+    --build-env lintbench/build_env/run.sh \
+    --run-id    moonshot-kimi-full-run \
+    --max-iter  5
+
 
 # Interface signatures + API methods only (no guide docs)
 lintgen agent \

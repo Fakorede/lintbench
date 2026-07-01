@@ -62,7 +62,7 @@ def main() -> None:
     gen.add_argument("--thinking-budget", type=int, default=None,
                      help="Enable extended thinking (OpenRouter reasoning models). "
                           "Sets budget_tokens; forces temperature=1 for Anthropic models.")
-    gen.add_argument("--split",       choices=["easy", "hard"], default=None)
+    gen.add_argument("--split",       choices=["easy", "medium", "hard"], default=None)
     gen.add_argument("--limit",       type=int, default=None)
     gen.add_argument("--instance-id", action="append", dest="instance_ids")
     gen.add_argument("--delay",       type=float, default=0.5,
@@ -100,7 +100,7 @@ def main() -> None:
     ag.add_argument("--thinking-budget", type=int, default=None)
     ag.add_argument("--timeout",     type=int, default=180,
                     help="Per-iteration build timeout in seconds (default: 180)")
-    ag.add_argument("--split",       choices=["easy", "hard"], default=None)
+    ag.add_argument("--split",       choices=["easy", "medium", "hard"], default=None)
     ag.add_argument("--limit",       type=int, default=None)
     ag.add_argument("--instance-id", action="append", dest="instance_ids")
     ag.add_argument("--delay",       type=float, default=0.5)

@@ -1,13 +1,13 @@
-# LintBench & LintGen
+# LintBench
 
-This repository contains two complementary research contributions for the study of LLM-based Android Lint detector generation.
+This repository contains research contributions for the study of LLM-based Android Lint detector generation.
 
 | | [LintBench](#lintbench) | [LintGen](#lintgen) |
 |---|---|---|
 | **What** | Benchmark + evaluation harness | RAG-augmented generation pipeline |
 | **Input** | Natural language Lint issue spec | Same benchmark instances |
 | **Output** | pass@k, compile rate, failure modes | Generated detectors via retrieval-augmented prompting |
-| **Key artefact** | `data/dataset.jsonl` — 156 validated instances | `api_hint_rag` prompt variant with dynamic Lint API retrieval |
+| **Key artefact** | `data/dataset.jsonl` — 148 validated instances | `api_hint_rag` prompt variant with dynamic Lint API retrieval |
 
 ---
 
@@ -17,7 +17,7 @@ This repository contains two complementary research contributions for the study 
 
 A benchmark for evaluating LLMs on Android Lint detector generation. Each instance pairs a natural-language specification (extracted from `Issue.create()` in the AOSP source) with the corresponding detector implementation and its JUnit test suite for automated pass/fail evaluation.
 
-**156 validated instances** across easy / hard splits, evaluated inside a real Lint test harness running in Docker.
+**148 validated instances** across easy / medium / hard splits, evaluated inside a real Lint test harness running in Docker. A human-validated subset of **113 instances** (`data/dataset_verified.jsonl`) excludes 35 instances flagged as under-specified or subject to sibling-test burden (see `data/annotation-criteria.md`).
 
 ```bash
 # Quick start
@@ -71,7 +71,7 @@ lintgen eval --generated generated/ --out results/
 
 ```
 lintbench/                  Benchmark dataset, inference pipeline, eval harness
-  data/dataset.jsonl          156 validated instances
+  data/dataset.jsonl          148 validated instances (113 in dataset_verified.jsonl)
   inference/                  Prompt variants + LLM provider clients
     hpc/                      vLLM SLURM scripts + HPC inference runner
   eval/                       Compilation + test evaluation

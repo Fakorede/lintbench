@@ -35,9 +35,9 @@ _PRICING: dict[str, tuple[float, float]] = {
     "openai/o3":                            (0.00001,    0.00004),
     "openai/o4-mini":                       (0.0000011,  0.0000044),
     # Google
-    "google/gemini-3.5-flash":              (0.00000015, 0.0000006),
-    "google/gemini-2.5-flash":              (0.00000015, 0.0000006),
-    "google/gemini-2.5-pro":               (0.00000125, 0.00001),
+    "google/gemini-3.5-flash":              (0.0000015,  0.000009),
+    "google/gemini-2.5-flash":              (0.0000003,  0.0000025),
+    "google/gemini-2.5-pro":               (0.00000125, 0.00001),   # $1.25/$10 per 1M
     # DeepSeek
     "deepseek/deepseek-r1":                 (0.0000005,  0.00000215),
     "deepseek/deepseek-chat-v3-0324":       (0.00000027, 0.0000011),
@@ -45,12 +45,21 @@ _PRICING: dict[str, tuple[float, float]] = {
     "meta-llama/llama-3.3-70b-instruct":   (0.00000012, 0.0000003),
     # Qwen
     "qwen/qwen-2.5-coder-32b-instruct":    (0.00000006, 0.00000015),
+    "qwen/qwen3.6-27b":                    (0.0000002885, 0.00000317),  # $0.2885/$3.17 per 1M
+    "qwen/qwen3.6-max-preview":            (0.00000104, 0.00000624),    # $1.04/$6.24 per 1M
+    # Gemma
+    "google/gemma-4-31b-it":               (0.00000012, 0.00000035),   # $0.12/$0.35 per 1M
+    # Moonshot
+    "moonshotai/kimi-k2.7-code":            (0.00000075, 0.0000035),   # $0.75/$3.50 per 1M
+    "moonshotai/kimi-k2.7-code:nitro":      (0.00000075, 0.0000035),
 }
 
 
 def compute_cost(model: str, input_tokens: int, output_tokens: int) -> float | None:
     """Return estimated cost in USD, or None if model is not in the price table."""
-    prices = _PRICING.get(model)
+    # OpenRouter variant suffixes (e.g. :nitro, :free) don't affect pricing
+    base_model = model.split(":")[0]
+    prices = _PRICING.get(model) or _PRICING.get(base_model)
     if prices is None:
         import sys
         print(f"WARNING: no pricing entry for model {model!r} — cost_usd will be missing", file=sys.stderr)
@@ -247,7 +256,26 @@ def call_openrouter(
         if model.startswith("anthropic/"):
             kwargs["temperature"] = 1
 
-    resp = client.chat.completions.create(**kwargs)
+    # Retry logic: transient API errors and empty responses can be retried
+    max_retries = 3
+    last_exc: Exception | None = None
+    resp = None
+    for attempt in range(max_retries):
+        try:
+            resp = client.chat.completions.create(**kwargs)
+            finish = resp.choices[0].finish_reason
+            if finish == "error":
+                raise RuntimeError(f"OpenRouter returned finish_reason='error' for {model}")
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                import time as _time
+                _time.sleep(2 ** attempt)  # 1s, 2s backoff
+            else:
+                raise RuntimeError(
+                    f"OpenRouter call failed after {max_retries} attempts for {model}: {exc}"
+                ) from exc
 
     msg = resp.choices[0].message
     text = msg.content or ""
@@ -262,12 +290,16 @@ def call_openrouter(
         or None
     )
 
+    # Some reasoning models (e.g. Kimi K2) return content in reasoning_content
+    # with an empty content field when finish_reason='stop'. Fall back to reasoning.
+    if not text and reasoning:
+        text = reasoning
+        reasoning = None
+
     if not text:
         finish = resp.choices[0].finish_reason
-        raise RuntimeError(
-            f"Empty response from {model} (finish_reason={finish!r}). "
-            "Try increasing --max-tokens."
-        )
+        hint = "Try increasing --max-tokens." if finish == "length" else f"finish_reason={finish!r}"
+        raise RuntimeError(f"Empty response from {model} ({hint})")
 
     usage: dict = {
         "input_tokens":  resp.usage.prompt_tokens,

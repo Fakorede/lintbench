@@ -168,7 +168,7 @@ To update the Lint API version after re-running curation against a newer AOSP br
 Each container uses up to 2 CPU cores and 3 GB RAM. Gradle cold start adds
 ~10–20s overhead; test execution ranges from 10–90s per instance.
 
-Estimated wall time for the full 156-instance dataset at pass@1:
+Estimated wall time for the full 148-instance dataset at pass@1:
 
 | Workers | Estimated time |
 |---------|----------------|
