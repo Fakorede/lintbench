@@ -1,0 +1,173 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.resources.ResourceFolderType;
+import com.android.resources.ResourceType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceXmlDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+
+import java.util.Collection;
+import java.util.EnumSet;
+
+import static com.android.SdkConstants.ANDROID_NS_NAME_PREFIX;
+import static com.android.SdkConstants.ATTR_NAME;
+import static com.android.SdkConstants.DOT_XML;
+import static com.android.SdkConstants.TAG_ITEM;
+
+/**
+ * Checks that resources in Gradle projects conform to the specified resource prefix.
+ */
+public class ResourcePrefixDetector extends ResourceXmlDetector {
+
+    /** The main issue surfaced by this detector */
+    public static final Issue ISSUE = Issue.create(
+            "ResourceName",
+            "Resource with Wrong Prefix",
+            "In Gradle projects you can specify a resource prefix that all resources " +
+            "in the project must conform to. This makes it easier to ensure that you don't " +
+            "accidentally combine resources from different libraries, since they all end " +
+            "up in the same shared app namespace.",
+            Category.CORRECTNESS,
+            8,
+            Severity.FATAL,
+            new Implementation(
+                    ResourcePrefixDetector.class,
+                    EnumSet.of(Scope.RESOURCE_FILE, Scope.RESOURCE_FOLDER)
+            )
+    );
+
+    /** Constructs a new {@link ResourcePrefixDetector} */
+    public ResourcePrefixDetector() {
+    }
+
+    // ---- Implements XmlScanner ----
+
+    @Override
+    public boolean appliesTo(@NonNull ResourceFolderType folderType) {
+        return true;
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return ALL;
+    }
+
+    @Nullable
+    private String getResourcePrefix(@NonNull XmlContext context) {
+        return context.getProject().getResourcePrefix();
+    }
+
+    @Override
+    public void visitDocument(@NonNull XmlContext context, @NonNull Document document) {
+        String resourcePrefix = getResourcePrefix(context);
+        if (resourcePrefix == null || resourcePrefix.isEmpty()) {
+            return;
+        }
+
+        ResourceFolderType folderType = context.getResourceFolderType();
+        if (folderType == null) {
+            return;
+        }
+
+        // For file-based resources (layout, drawable, etc.), the file name IS the resource name
+        if (folderType != ResourceFolderType.VALUES) {
+            String fileName = context.file.getName();
+            if (fileName.endsWith(DOT_XML)) {
+                fileName = fileName.substring(0, fileName.length() - DOT_XML.length());
+            }
+            if (!fileName.startsWith(resourcePrefix)) {
+                String message = String.format(
+                        "Resource named '`%1$s`' does not start with the project's resource prefix '`%2$s`'; rename to '`%3$s`'",
+                        fileName, resourcePrefix, resourcePrefix + fileName);
+                Location location = Location.create(context.file);
+                Element root = document.getDocumentElement();
+                if (root != null) {
+                    context.report(ISSUE, root, location, message);
+                } else {
+                    context.report(ISSUE, location, message);
+                }
+            }
+        }
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        String resourcePrefix = getResourcePrefix(context);
+        if (resourcePrefix == null || resourcePrefix.isEmpty()) {
+            return;
+        }
+
+        ResourceFolderType folderType = context.getResourceFolderType();
+        if (folderType != ResourceFolderType.VALUES) {
+            // For non-value resources, we already checked the file name in visitDocument
+            return;
+        }
+
+        // For value resources, check the name attribute
+        String tag = element.getTagName();
+        if (tag == null) {
+            return;
+        }
+
+        // Determine the resource type from the tag
+        ResourceType resourceType = getResourceType(tag, element);
+        if (resourceType == null) {
+            return;
+        }
+
+        // Get the name attribute
+        String name = element.getAttribute(ATTR_NAME);
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+
+        // Skip names that start with android: prefix
+        if (name.startsWith(ANDROID_NS_NAME_PREFIX)) {
+            return;
+        }
+
+        // Check if the name starts with the required prefix
+        if (!name.startsWith(resourcePrefix)) {
+            String message = String.format(
+                    "Resource named '`%1$s`' does not start with the project's resource prefix '`%2$s`'; rename to '`%3$s`'",
+                    name, resourcePrefix, resourcePrefix + name);
+            Attr nameAttribute = element.getAttributeNode(ATTR_NAME);
+            Location location;
+            if (nameAttribute != null) {
+                location = context.getLocation(nameAttribute);
+            } else {
+                location = context.getLocation(element);
+            }
+            context.report(ISSUE, element, location, message);
+        }
+    }
+
+    /**
+     * Returns the resource type for the given XML tag name, or null if not a resource declaration.
+     */
+    @Nullable
+    private static ResourceType getResourceType(@NonNull String tag, @NonNull Element element) {
+        if (tag.equals(TAG_ITEM)) {
+            // <item type="..." name="...">
+            String typeAttr = element.getAttribute("type");
+            if (typeAttr != null && !typeAttr.isEmpty()) {
+                return ResourceType.fromXmlValue(typeAttr);
+            }
+            return null;
+        }
+
+        // Try to map the tag directly to a resource type
+        return ResourceType.fromXmlTagName(tag);
+    }
+}

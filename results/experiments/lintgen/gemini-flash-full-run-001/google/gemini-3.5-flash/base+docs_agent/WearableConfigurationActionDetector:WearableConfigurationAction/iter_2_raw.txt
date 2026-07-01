@@ -1,0 +1,160 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import org.w3c.dom.Element
+
+class WearableConfigurationActionDetector : Detector(), XmlScanner {
+
+    companion object {
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "WearableConfigurationAction",
+            briefDescription = "Wear configuration action metadata must match an activity",
+            explanation = """
+                When a watch face service defines the `wearableConfigurationAction` metadata \
+                with the value `WATCH_FACE_EDITOR`, there must be an activity in the same \
+                package that has an intent filter for `WATCH_FACE_EDITOR`. If the `minSdkVersion` \
+                is less than 30, this intent filter must also include the category \
+                `com.google.android.wearable.watchface.category.WEARABLE_CONFIGURATION`.
+            """,
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                WearableConfigurationActionDetector::class.java,
+                Scope.MANIFEST_SCOPE
+            )
+        )
+
+        private const val META_DATA_NAME = "com.google.android.wearable.watchface.wearableConfigurationAction"
+        private const val META_DATA_VALUE = "com.google.android.wearable.watchface.configuration.WATCH_FACE_EDITOR"
+        private const val ACTION_NAME = "com.google.android.wearable.watchface.configuration.WATCH_FACE_EDITOR"
+        private const val CATEGORY_NAME = "com.google.android.wearable.watchface.category.WEARABLE_CONFIGURATION"
+    }
+
+    override fun getApplicableElements(): Collection<String> {
+        return listOf(SdkConstants.TAG_MANIFEST)
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val minSdk = context.project.minSdkVersion.apiLevel
+        val needsCategory = minSdk < 30
+
+        val application = getChildrenByTagName(element, SdkConstants.TAG_APPLICATION).firstOrNull() ?: return
+        val services = getChildrenByTagName(application, SdkConstants.TAG_SERVICE)
+        val activities = getChildrenByTagName(application, SdkConstants.TAG_ACTIVITY)
+
+        val metadataElements = mutableListOf<Element>()
+        for (service in services) {
+            val metaDatas = getChildrenByTagName(service, SdkConstants.TAG_META_DATA)
+            for (metaData in metaDatas) {
+                val name = getAndroidAttribute(metaData, SdkConstants.ATTR_NAME)
+                val value = getAndroidAttribute(metaData, SdkConstants.ATTR_VALUE)
+                if (name == META_DATA_NAME && (value == META_DATA_VALUE || value == "WATCH_FACE_EDITOR")) {
+                    metadataElements.add(metaData)
+                }
+            }
+        }
+
+        class ActivityInfo(
+            val activity: Element,
+            val hasAction: Boolean,
+            val hasCategory: Boolean,
+            val intentFilter: Element
+        )
+
+        val activityInfos = mutableListOf<ActivityInfo>()
+        for (activity in activities) {
+            val intentFilters = getChildrenByTagName(activity, SdkConstants.TAG_INTENT_FILTER)
+            for (intentFilter in intentFilters) {
+                val actions = getChildrenByTagName(intentFilter, SdkConstants.TAG_ACTION)
+                var hasAction = false
+                for (action in actions) {
+                    val name = getAndroidAttribute(action, SdkConstants.ATTR_NAME)
+                    if (name == ACTION_NAME || name == "WATCH_FACE_EDITOR") {
+                        hasAction = true
+                        break
+                    }
+                }
+
+                if (hasAction) {
+                    val categories = getChildrenByTagName(intentFilter, SdkConstants.TAG_CATEGORY)
+                    var hasCategory = false
+                    for (category in categories) {
+                        val name = getAndroidAttribute(category, SdkConstants.ATTR_NAME)
+                        if (name == CATEGORY_NAME) {
+                            hasCategory = true
+                            break
+                        }
+                    }
+                    activityInfos.add(
+                        ActivityInfo(
+                            activity = activity,
+                            hasAction = true,
+                            hasCategory = hasCategory,
+                            intentFilter = intentFilter
+                        )
+                    )
+                }
+            }
+        }
+
+        val hasValidActivity = activityInfos.any { it.hasAction && (!needsCategory || it.hasCategory) }
+
+        if (metadataElements.isNotEmpty() && !hasValidActivity) {
+            for (metaData in metadataElements) {
+                val message = if (needsCategory) {
+                    "To use WATCH_FACE_EDITOR configuration, there must be an activity with an intent-filter for action `$ACTION_NAME` and category `$CATEGORY_NAME` (required for minSdkVersion < 30)."
+                } else {
+                    "To use WATCH_FACE_EDITOR configuration, there must be an activity with an intent-filter for action `$ACTION_NAME`."
+                }
+                context.report(
+                    ISSUE,
+                    metaData,
+                    context.getLocation(metaData),
+                    message
+                )
+            }
+        }
+
+        if (metadataElements.isEmpty() && activityInfos.isNotEmpty()) {
+            for (info in activityInfos) {
+                val message = "An activity with WATCH_FACE_EDITOR intent-filter requires the watch face service to define the wearableConfigurationAction metadata."
+                context.report(
+                    ISSUE,
+                    info.activity,
+                    context.getLocation(info.activity),
+                    message
+                )
+            }
+        }
+    }
+
+    private fun getChildrenByTagName(parent: Element, tagName: String): List<Element> {
+        val list = mutableListOf<Element>()
+        var child = parent.firstChild
+        while (child != null) {
+            if (child is Element && child.tagName == tagName) {
+                list.add(child)
+            }
+            child = child.nextSibling
+        }
+        return list
+    }
+
+    private fun getAndroidAttribute(element: Element, localName: String): String {
+        val attr = element.getAttributeNS(SdkConstants.ANDROID_URI, localName)
+        if (attr.isNotEmpty()) {
+            return attr
+        }
+        return element.getAttribute("android:$localName")
+    }
+}

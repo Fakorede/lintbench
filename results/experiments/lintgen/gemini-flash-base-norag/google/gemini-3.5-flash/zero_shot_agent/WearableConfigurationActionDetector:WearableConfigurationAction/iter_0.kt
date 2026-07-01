@@ -1,0 +1,113 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import org.w3c.dom.Document
+import org.w3c.dom.Element
+
+class WearableConfigurationActionDetector : Detector(), Detector.XmlScanner {
+
+    override fun visitDocument(context: XmlContext, document: Document) {
+        val services = document.getElementsByTagName("service")
+        for (i in 0 until services.length) {
+            val service = services.item(i) as Element
+            val metaDatas = service.getElementsByTagName("meta-data")
+            for (j in 0 until metaDatas.length) {
+                val metaData = metaDatas.item(j) as Element
+                if (metaData.parentNode != service) continue
+
+                val name = metaData.getAttributeNS(SdkConstants.ANDROID_URI, "name")
+                val value = metaData.getAttributeNS(SdkConstants.ANDROID_URI, "value")
+                if (name == "com.google.android.wearable.watchface.wearableConfigurationAction" &&
+                    value == "com.google.android.wearable.watchface.configuration.WATCH_FACE_EDITOR") {
+                    
+                    val minSdk = context.project.minSdkVersion.apiLevel
+                    if (!hasMatchingActivity(document, minSdk)) {
+                        val message = if (minSdk < 30) {
+                            "To support wearable configuration, there must be an activity with an intent filter for action `com.google.android.wearable.watchface.configuration.WATCH_FACE_EDITOR` and category `com.google.android.wearable.watchface.category.WEARABLE_CONFIGURATION`."
+                        } else {
+                            "To support wearable configuration, there must be an activity with an intent filter for action `com.google.android.wearable.watchface.configuration.WATCH_FACE_EDITOR`."
+                        }
+                        context.report(
+                            ISSUE,
+                            metaData,
+                            context.getLocation(metaData),
+                            message
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun hasMatchingActivity(document: Document, minSdk: Int): Boolean {
+        val activities = document.getElementsByTagName("activity")
+        for (i in 0 until activities.length) {
+            val activity = activities.item(i) as Element
+            val intentFilters = activity.getElementsByTagName("intent-filter")
+            for (j in 0 until intentFilters.length) {
+                val filter = intentFilters.item(j) as Element
+                if (filter.parentNode != activity) continue
+
+                val actions = filter.getElementsByTagName("action")
+                var hasAction = false
+                for (k in 0 until actions.length) {
+                    val action = actions.item(k) as Element
+                    if (action.parentNode != filter) continue
+                    if (action.getAttributeNS(SdkConstants.ANDROID_URI, "name") == "com.google.android.wearable.watchface.configuration.WATCH_FACE_EDITOR") {
+                        hasAction = true
+                        break
+                    }
+                }
+
+                if (hasAction) {
+                    if (minSdk >= 30) {
+                        return true
+                    } else {
+                        val categories = filter.getElementsByTagName("category")
+                        var hasCategory = false
+                        for (k in 0 until categories.length) {
+                            val category = categories.item(k) as Element
+                            if (category.parentNode != filter) continue
+                            if (category.getAttributeNS(SdkConstants.ANDROID_URI, "name") == "com.google.android.wearable.watchface.category.WEARABLE_CONFIGURATION") {
+                                hasCategory = true
+                                break
+                            }
+                        }
+                        if (hasCategory) {
+                            return true
+                        }
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    companion object {
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "WearableConfigurationAction",
+            briefDescription = "Wear configuration action metadata must match an activity",
+            explanation = """
+                When a watch face service defines `wearableConfigurationAction` metadata with the value \
+                `WATCH_FACE_EDITOR`, there must be an activity in the same package that has an intent filter \
+                for `WATCH_FACE_EDITOR` (and if `minSdkVersion` is less than 30, it must also include the \
+                `com.google.android.wearable.watchface.category.WEARABLE_CONFIGURATION` category).
+            """.trimIndent(),
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                WearableConfigurationActionDetector::class.java,
+                Scope.MANIFEST_SCOPE
+            )
+        )
+    }
+}

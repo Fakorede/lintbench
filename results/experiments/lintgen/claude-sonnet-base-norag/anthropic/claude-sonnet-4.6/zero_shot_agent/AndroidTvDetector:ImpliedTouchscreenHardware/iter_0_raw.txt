@@ -1,0 +1,163 @@
+package com.android.tools.lint.checks;
+
+import com.android.SdkConstants;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
+
+import java.util.Arrays;
+import java.util.Collection;
+
+/**
+ * Detector for the ImpliedTouchscreenHardware issue.
+ *
+ * <p>Apps require the {@code android.hardware.touchscreen} feature by default. If you want your
+ * app to be available on TV, you must also explicitly declare that a touchscreen is not required.
+ */
+public class AndroidTvDetector extends Detector implements XmlScanner {
+
+    private static final String USES_FEATURE = "uses-feature";
+    private static final String USES_CATEGORY = "uses-category";
+    private static final String ANDROID_LEANBACK_LAUNCHER =
+            "android.intent.category.LEANBACK_LAUNCHER";
+    private static final String HARDWARE_TOUCHSCREEN = "android.hardware.touchscreen";
+    private static final String ATTR_NAME = "name";
+    private static final String ATTR_REQUIRED = "required";
+
+    /** The main issue detected by this detector */
+    public static final Issue IMPLIED_TOUCHSCREEN_HARDWARE =
+            Issue.create(
+                    "ImpliedTouchscreenHardware",
+                    "Touchscreen not optional",
+                    "Apps require the `android.hardware.touchscreen` feature by default. If you want "
+                            + "your app to be available on TV, you must also explicitly declare that a "
+                            + "touchscreen is not required as follows:\n"
+                            + "`<uses-feature android:name=\"android.hardware.touchscreen\" "
+                            + "android:required=\"false\"/>`",
+                    Category.CORRECTNESS,
+                    5,
+                    Severity.ERROR,
+                    new Implementation(AndroidTvDetector.class, Scope.MANIFEST_SCOPE))
+                    .addMoreInfo(
+                            "https://developer.android.com/guide/topics/manifest/uses-feature-element.html");
+
+    /** Constructs a new {@link AndroidTvDetector} */
+    public AndroidTvDetector() {}
+
+    // ---- Implements XmlScanner ----
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Arrays.asList(SdkConstants.TAG_APPLICATION);
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        // Check if this app targets TV by looking for LEANBACK_LAUNCHER category
+        if (!isLeanbackApp(element)) {
+            return;
+        }
+
+        // Check if touchscreen is explicitly declared as not required
+        if (!isTouchscreenOptional(element)) {
+            context.report(
+                    IMPLIED_TOUCHSCREEN_HARDWARE,
+                    element,
+                    context.getLocation(element),
+                    "You must explicitly declare that the `android.hardware.touchscreen` feature "
+                            + "is not required for your app to be available on TV. "
+                            + "Add `<uses-feature android:name=\"android.hardware.touchscreen\" "
+                            + "android:required=\"false\"/>` to your manifest.");
+        }
+    }
+
+    /**
+     * Checks whether the manifest declares a LEANBACK_LAUNCHER intent category, indicating this
+     * app targets Android TV.
+     */
+    private static boolean isLeanbackApp(Element applicationElement) {
+        // Walk up to the manifest element to search all uses-category declarations
+        org.w3c.dom.Node parent = applicationElement.getParentNode();
+        if (!(parent instanceof Element)) {
+            return false;
+        }
+        Element manifestElement = (Element) parent;
+
+        // Search through all activity elements inside application for LEANBACK_LAUNCHER
+        NodeList activities = applicationElement.getElementsByTagName("activity");
+        for (int i = 0; i < activities.getLength(); i++) {
+            Element activity = (Element) activities.item(i);
+            NodeList intentFilters = activity.getElementsByTagName("intent-filter");
+            for (int j = 0; j < intentFilters.getLength(); j++) {
+                Element intentFilter = (Element) intentFilters.item(j);
+                NodeList categories = intentFilter.getElementsByTagName(USES_CATEGORY);
+                for (int k = 0; k < categories.getLength(); k++) {
+                    Element category = (Element) categories.item(k);
+                    String name = category.getAttributeNS(
+                            SdkConstants.ANDROID_URI, ATTR_NAME);
+                    if (ANDROID_LEANBACK_LAUNCHER.equals(name)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Also check activity-alias elements
+        NodeList activityAliases = applicationElement.getElementsByTagName("activity-alias");
+        for (int i = 0; i < activityAliases.getLength(); i++) {
+            Element activityAlias = (Element) activityAliases.item(i);
+            NodeList intentFilters = activityAlias.getElementsByTagName("intent-filter");
+            for (int j = 0; j < intentFilters.getLength(); j++) {
+                Element intentFilter = (Element) intentFilters.item(j);
+                NodeList categories = intentFilter.getElementsByTagName(USES_CATEGORY);
+                for (int k = 0; k < categories.getLength(); k++) {
+                    Element category = (Element) categories.item(k);
+                    String name = category.getAttributeNS(
+                            SdkConstants.ANDROID_URI, ATTR_NAME);
+                    if (ANDROID_LEANBACK_LAUNCHER.equals(name)) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Checks whether the manifest explicitly declares that the touchscreen hardware feature is not
+     * required (i.e., {@code android:required="false"} for {@code android.hardware.touchscreen}).
+     */
+    private static boolean isTouchscreenOptional(Element applicationElement) {
+        org.w3c.dom.Node parent = applicationElement.getParentNode();
+        if (!(parent instanceof Element)) {
+            return false;
+        }
+        Element manifestElement = (Element) parent;
+
+        NodeList usesFeatures = manifestElement.getElementsByTagName(USES_FEATURE);
+        for (int i = 0; i < usesFeatures.getLength(); i++) {
+            Element usesFeature = (Element) usesFeatures.item(i);
+            String name = usesFeature.getAttributeNS(SdkConstants.ANDROID_URI, ATTR_NAME);
+            if (HARDWARE_TOUCHSCREEN.equals(name)) {
+                String required = usesFeature.getAttributeNS(
+                        SdkConstants.ANDROID_URI, ATTR_REQUIRED);
+                // If required is explicitly set to "false", touchscreen is optional
+                if ("false".equals(required)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+}

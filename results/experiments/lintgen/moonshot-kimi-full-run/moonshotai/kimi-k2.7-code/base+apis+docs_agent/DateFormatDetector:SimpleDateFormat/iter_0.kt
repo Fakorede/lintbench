@@ -1,0 +1,70 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.JavaContext
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.SourceCodeScanner
+import com.intellij.psi.PsiMethod
+import org.jetbrains.uast.UCallExpression
+
+class DateFormatDetector : Detector(), SourceCodeScanner {
+
+    override fun getApplicableConstructorTypes(): List<String> =
+        listOf("java.text.SimpleDateFormat")
+
+    override fun visitConstructor(context: JavaContext, node: UCallExpression, constructor: PsiMethod) {
+        val params = constructor.parameterList.parameters
+        val argCount = params.size
+
+        val isStringOnly = argCount == 1 &&
+            params[0].type.canonicalText == "java.lang.String"
+
+        val isStringAndSymbols = argCount == 2 &&
+            params[0].type.canonicalText == "java.lang.String" &&
+            params[1].type.canonicalText == "java.text.DateFormatSymbols"
+
+        if (isStringOnly || isStringAndSymbols) {
+            context.report(
+                ISSUE,
+                node,
+                context.getLocation(node),
+                "To ensure consistent, locale-independent formatting, use the SimpleDateFormat " +
+                    "constructor that takes an explicit Locale, or use DateFormat.getDateInstance(), " +
+                    "DateFormat.getTimeInstance(), or DateFormat.getDateTimeInstance()."
+            )
+        }
+    }
+
+    companion object {
+        @JvmField
+        val ISSUE: Issue = Issue.create(
+            id = "SimpleDateFormat",
+            briefDescription = "Implied locale in date format",
+            explanation = """
+                Almost all callers should use `getDateInstance()`, `getDateTimeInstance()`, or \
+                `getTimeInstance()` to obtain a `SimpleDateFormat` instance appropriate for the \
+                user's locale.
+
+                The main reason to instantiate `SimpleDateFormat` directly is to format or parse \
+                a specific machine-readable format. In that case you should almost always pass \
+                an explicit locale such as `Locale.US` to guarantee ASCII digits and consistent \
+                formatting.
+
+                Either use the `SimpleDateFormat` constructor that accepts a `Locale`, use one of \
+                the `get*Instance()` factory methods, or suppress this warning if you are \
+                intentionally using the default locale.
+            """.trimIndent(),
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                DateFormatDetector::class.java,
+                Scope.JAVA_FILE_SCOPE
+            )
+        )
+    }
+}

@@ -1,0 +1,350 @@
+package com.android.tools.lint.checks;
+
+import com.android.SdkConstants;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+
+import java.io.File;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
+public class RtlDetector extends Detector implements Detector.XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "RtlCompat",
+            "Right-to-left text compatibility issues",
+            "API 17 adds a `textAlignment` attribute to specify text alignment. However, " +
+            "if you are supporting older versions than API 17, you must **also** specify a " +
+            "gravity or layout_gravity attribute, since older platforms will ignore the " +
+            "`textAlignment` attribute.",
+            Category.RTL,
+            6,
+            Severity.WARNING,
+            new Implementation(
+                    RtlDetector.class,
+                    Scope.RESOURCE_FILE_SCOPE
+            )
+    );
+
+    public static final String[] ATTRIBUTES = new String[] {
+            "layout_alignParentLeft",   "layout_alignParentStart",
+            "layout_alignParentRight",  "layout_alignParentEnd",
+            "layout_alignLeft",         "layout_alignStart",
+            "layout_alignRight",        "layout_alignEnd",
+            "layout_marginLeft",        "layout_marginStart",
+            "layout_marginRight",       "layout_marginEnd",
+            "layout_toLeftOf",          "layout_toStartOf",
+            "layout_toRightOf",         "layout_toEndOf",
+            "paddingLeft",              "paddingStart",
+            "paddingRight",             "paddingEnd",
+            "drawableLeft",             "drawableStart",
+            "drawableRight",            "drawableEnd",
+    };
+
+    private static final Map<String, String> OLD_TO_NEW = new HashMap<String, String>();
+    private static final Map<String, String> NEW_TO_OLD = new HashMap<String, String>();
+    private static final Map<String, String> OPPOSITE = new HashMap<String, String>();
+
+    static {
+        for (int i = 0; i < ATTRIBUTES.length; i += 2) {
+            String old = ATTRIBUTES[i];
+            String neu = ATTRIBUTES[i + 1];
+            OLD_TO_NEW.put(old, neu);
+            NEW_TO_OLD.put(neu, old);
+        }
+
+        for (int i = 0; i < ATTRIBUTES.length; i += 2) {
+            String leftAttr = ATTRIBUTES[i];
+            String startAttr = ATTRIBUTES[i + 1];
+            String rightAttr = leftAttr.replace("Left", "Right");
+            String endAttr = startAttr.replace("Start", "End");
+            OPPOSITE.put(leftAttr, rightAttr);
+            OPPOSITE.put(rightAttr, leftAttr);
+            OPPOSITE.put(startAttr, endAttr);
+            OPPOSITE.put(endAttr, startAttr);
+        }
+    }
+
+    public static boolean isRtlAttributeName(String name) {
+        String localName = name;
+        if (localName.startsWith("layout_")) {
+            localName = localName.substring("layout_".length());
+        }
+        return localName.endsWith("Start") || localName.endsWith("End");
+    }
+
+    public static String convertOldToNew(String attribute) {
+        String result = OLD_TO_NEW.get(attribute);
+        if (result != null) {
+            return result;
+        }
+        result = OLD_TO_NEW.get("layout_" + attribute);
+        if (result != null) {
+            if (result.startsWith("layout_")) {
+                return result.substring("layout_".length());
+            }
+            return result;
+        }
+        if (attribute.contains("Left")) {
+            return attribute.replace("Left", "Start");
+        }
+        if (attribute.contains("Right")) {
+            return attribute.replace("Right", "End");
+        }
+        return null;
+    }
+
+    public static String convertNewToOld(String attribute) {
+        String result = NEW_TO_OLD.get(attribute);
+        if (result != null) {
+            return result;
+        }
+        result = NEW_TO_OLD.get("layout_" + attribute);
+        if (result != null) {
+            if (result.startsWith("layout_")) {
+                return result.substring("layout_".length());
+            }
+            return result;
+        }
+        if (attribute.contains("Start")) {
+            return attribute.replace("Start", "Left");
+        }
+        if (attribute.contains("End")) {
+            return attribute.replace("End", "Right");
+        }
+        return null;
+    }
+
+    public static String convertToOppositeDirection(String attribute) {
+        String result = OPPOSITE.get(attribute);
+        if (result != null) {
+            return result;
+        }
+        result = OPPOSITE.get("layout_" + attribute);
+        if (result != null) {
+            if (result.startsWith("layout_")) {
+                return result.substring("layout_".length());
+            }
+            return result;
+        }
+        if (attribute.contains("Left")) {
+            return attribute.replace("Left", "Right");
+        }
+        if (attribute.contains("Right")) {
+            return attribute.replace("Right", "Left");
+        }
+        if (attribute.contains("Start")) {
+            return attribute.replace("Start", "End");
+        }
+        if (attribute.contains("End")) {
+            return attribute.replace("End", "Start");
+        }
+        return attribute;
+    }
+
+    public static int getFolderVersion(File folder) {
+        String name = folder.getName();
+        int index = name.indexOf("-v");
+        if (index == -1) {
+            File parent = folder.getParentFile();
+            if (parent != null) {
+                name = parent.getName();
+                index = name.indexOf("-v");
+            }
+        }
+        if (index != -1) {
+            String versionStr = name.substring(index + 2);
+            int end = versionStr.length();
+            for (int i = 0; i < versionStr.length(); i++) {
+                char c = versionStr.charAt(i);
+                if (!Character.isDigit(c)) {
+                    end = i;
+                    break;
+                }
+            }
+            if (end > 0) {
+                try {
+                    return Integer.parseInt(versionStr.substring(0, end));
+                } catch (NumberFormatException e) {
+                    // ignore
+                }
+            }
+        }
+        return -1;
+    }
+
+    private static final String ATTR_GRAVITY = "gravity";
+    private static final String ATTR_LAYOUT_GRAVITY = "layout_gravity";
+
+    // Set of all old (left/right) attribute names
+    private static final Set<String> OLD_ATTRS = new HashSet<String>(OLD_TO_NEW.keySet());
+    // Set of all new (start/end) attribute names
+    private static final Set<String> NEW_ATTRS = new HashSet<String>(NEW_TO_OLD.keySet());
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.LAYOUT;
+    }
+
+    @Override
+    public Collection<String> getApplicableAttributes() {
+        // We want to check textAlignment plus all old and new RTL attributes
+        Set<String> applicable = new HashSet<String>();
+        applicable.add(SdkConstants.ATTR_TEXT_ALIGNMENT);
+        applicable.addAll(OLD_ATTRS);
+        applicable.addAll(NEW_ATTRS);
+        return applicable;
+    }
+
+    @Override
+    public void visitAttribute(XmlContext context, Attr attribute) {
+        int minSdk = context.getMainProject().getMinSdk();
+
+        String name = attribute.getLocalName();
+        if (name == null) {
+            name = attribute.getName();
+            int colon = name.indexOf(':');
+            if (colon >= 0) {
+                name = name.substring(colon + 1);
+            }
+        }
+
+        if (SdkConstants.ATTR_TEXT_ALIGNMENT.equals(name)) {
+            // textAlignment requires API 17; if minSdk < 17, must also have gravity
+            if (minSdk >= 17) {
+                return;
+            }
+
+            Element element = attribute.getOwnerElement();
+            NamedNodeMap attributes = element.getAttributes();
+
+            boolean hasGravity = false;
+            for (int i = 0; i < attributes.getLength(); i++) {
+                Attr attr = (Attr) attributes.item(i);
+                String localName = attr.getLocalName();
+                if (localName == null) {
+                    localName = attr.getName();
+                    int colon = localName.indexOf(':');
+                    if (colon >= 0) {
+                        localName = localName.substring(colon + 1);
+                    }
+                }
+                if (ATTR_GRAVITY.equals(localName) || ATTR_LAYOUT_GRAVITY.equals(localName)) {
+                    hasGravity = true;
+                    break;
+                }
+            }
+
+            if (!hasGravity) {
+                context.report(
+                        ISSUE,
+                        attribute,
+                        context.getLocation(attribute),
+                        "To support older versions than API 17 (current min is " + minSdk + ") " +
+                        "you must also specify `gravity` or `layout_gravity` when specifying " +
+                        "`textAlignment`"
+                );
+            }
+        } else if (NEW_ATTRS.contains(name)) {
+            // Using a new start/end attribute: if minSdk < 17, should also have the old left/right
+            if (minSdk >= 17) {
+                return;
+            }
+
+            Element element = attribute.getOwnerElement();
+            String oldAttr = NEW_TO_OLD.get(name);
+            if (oldAttr != null) {
+                // Check if the element also has the old attribute
+                NamedNodeMap attributes = element.getAttributes();
+                boolean hasOld = false;
+                for (int i = 0; i < attributes.getLength(); i++) {
+                    Attr attr = (Attr) attributes.item(i);
+                    String localName = attr.getLocalName();
+                    if (localName == null) {
+                        localName = attr.getName();
+                        int colon = localName.indexOf(':');
+                        if (colon >= 0) {
+                            localName = localName.substring(colon + 1);
+                        }
+                    }
+                    if (oldAttr.equals(localName)) {
+                        hasOld = true;
+                        break;
+                    }
+                }
+                if (!hasOld) {
+                    context.report(
+                            ISSUE,
+                            attribute,
+                            context.getLocation(attribute),
+                            "To support older versions than API 17 (current min is " + minSdk + ") " +
+                            "you should also specify `" + oldAttr + "` since `" + name +
+                            "` is not understood on older versions"
+                    );
+                }
+            }
+        } else if (OLD_ATTRS.contains(name)) {
+            // Using an old left/right attribute: if targeting API 17+, should also have start/end
+            // Check the folder version or target SDK
+            int targetSdk = context.getMainProject().getTargetSdk();
+            int folderVersion = getFolderVersion(context.file);
+
+            // Only flag if the project targets API 17+ (meaning RTL support is desired)
+            // but the old attribute is used without the new equivalent
+            if (targetSdk < 17) {
+                return;
+            }
+
+            // If this is in a v17+ folder, no need to flag
+            if (folderVersion >= 17) {
+                return;
+            }
+
+            Element element = attribute.getOwnerElement();
+            String newAttr = OLD_TO_NEW.get(name);
+            if (newAttr != null) {
+                NamedNodeMap attributes = element.getAttributes();
+                boolean hasNew = false;
+                for (int i = 0; i < attributes.getLength(); i++) {
+                    Attr attr = (Attr) attributes.item(i);
+                    String localName = attr.getLocalName();
+                    if (localName == null) {
+                        localName = attr.getName();
+                        int colon = localName.indexOf(':');
+                        if (colon >= 0) {
+                            localName = localName.substring(colon + 1);
+                        }
+                    }
+                    if (newAttr.equals(localName)) {
+                        hasNew = true;
+                        break;
+                    }
+                }
+                if (!hasNew) {
+                    context.report(
+                            ISSUE,
+                            attribute,
+                            context.getLocation(attribute),
+                            "Consider adding `" + newAttr + "` to better support right-to-left layouts"
+                    );
+                }
+            }
+        }
+    }
+}

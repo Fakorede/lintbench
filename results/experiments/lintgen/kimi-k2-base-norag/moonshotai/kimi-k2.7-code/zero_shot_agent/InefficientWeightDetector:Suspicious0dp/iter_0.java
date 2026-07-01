@@ -1,0 +1,112 @@
+package com.android.tools.lint.checks;
+
+import static com.android.SdkConstants.ANDROID_URI;
+import static com.android.SdkConstants.ATTR_LAYOUT_HEIGHT;
+import static com.android.SdkConstants.ATTR_LAYOUT_WEIGHT;
+import static com.android.SdkConstants.ATTR_LAYOUT_WIDTH;
+import static com.android.SdkConstants.ATTR_ORIENTATION;
+import static com.android.SdkConstants.LINEAR_LAYOUT;
+import static com.android.SdkConstants.VALUE_0DP;
+import static com.android.SdkConstants.VALUE_0DIP;
+import static com.android.SdkConstants.VALUE_VERTICAL;
+
+import com.android.annotations.NonNull;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.LayoutDetector;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.util.Collection;
+import java.util.Collections;
+
+public class InefficientWeightDetector extends LayoutDetector {
+
+    public static final Issue SUSPICIOUS_0DP = Issue.create(
+            "Suspicious0dp",
+            "Suspicious 0dp dimension",
+            "Using 0dp as the width in a horizontal LinearLayout with weights is a useful trick "
+                    + "to ensure that only the weights (and not the intrinsic sizes) are used "
+                    + "when sizing the children.\n\n"
+                    + "However, if you use 0dp for the opposite dimension, the view will be "
+                    + "invisible. This can happen if you change the orientation of a layout "
+                    + "without also flipping the `0dp` dimension in all the children.",
+            Category.CORRECTNESS,
+            3,
+            Severity.WARNING,
+            new Implementation(InefficientWeightDetector.class, Scope.RESOURCE_FILE_SCOPE)
+    );
+
+    @Override
+    @NonNull
+    public Collection<String> getApplicableElements() {
+        return Collections.singletonList(LINEAR_LAYOUT);
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        String orientation = element.getAttributeNS(ANDROID_URI, ATTR_ORIENTATION);
+        boolean vertical = VALUE_VERTICAL.equals(orientation);
+
+        NodeList children = element.getChildNodes();
+        for (int i = 0, n = children.getLength(); i < n; i++) {
+            Node childNode = children.item(i);
+            if (childNode.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+
+            Element child = (Element) childNode;
+            String weight = child.getAttributeNS(ANDROID_URI, ATTR_LAYOUT_WEIGHT);
+            if (weight.isEmpty()) {
+                continue;
+            }
+
+            float weightValue;
+            try {
+                weightValue = Float.parseFloat(weight);
+            } catch (NumberFormatException e) {
+                continue;
+            }
+
+            if (weightValue <= 0) {
+                continue;
+            }
+
+            if (vertical) {
+                String width = child.getAttributeNS(ANDROID_URI, ATTR_LAYOUT_WIDTH);
+                if (isZeroDp(width)) {
+                    report(context, child, ATTR_LAYOUT_WIDTH,
+                            "Suspicious 0dp dimension: the layout_width should not be 0dp "
+                                    + "in a vertical LinearLayout");
+                }
+            } else {
+                String height = child.getAttributeNS(ANDROID_URI, ATTR_LAYOUT_HEIGHT);
+                if (isZeroDp(height)) {
+                    report(context, child, ATTR_LAYOUT_HEIGHT,
+                            "Suspicious 0dp dimension: the layout_height should not be 0dp "
+                                    + "in a horizontal LinearLayout");
+                }
+            }
+        }
+    }
+
+    private static void report(@NonNull XmlContext context, @NonNull Element element,
+            @NonNull String attributeName, @NonNull String message) {
+        Attr attr = element.getAttributeNodeNS(ANDROID_URI, attributeName);
+        Location location = attr != null ? context.getLocation(attr) : context.getLocation(element);
+        context.report(SUSPICIOUS_0DP, element, location, message);
+    }
+
+    private static boolean isZeroDp(@NonNull String value) {
+        String trimmed = value.trim();
+        return VALUE_0DP.equals(trimmed) || VALUE_0DIP.equals(trimmed);
+    }
+}

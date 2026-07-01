@@ -1,0 +1,118 @@
+Looking at the failing test, `testStates3` expects a warning but gets "No warnings." This suggests my `hasStateAttribute` check is too strict - it only looks for `state_*` attributes in the Android namespace. The test case likely has an item without any state attributes at all (not just without `state_*` attributes), or perhaps the item has other attributes like `android:drawable` but no state qualifiers.
+
+The issue is that an item is "unqualified" (matches everything) when it has no `state_*` attributes in the Android namespace. My logic seems correct for that. But wait - maybe the test has items where the unqualified item doesn't have any attributes at all, or has only non-state attributes.
+
+Let me reconsider: perhaps the problem is that I'm only checking for `state_*` attributes but an item could also be unqualified if it has no state attributes regardless of namespace. Or perhaps the test uses items without any attributes.
+
+Actually, looking more carefully - the issue might be that some items have attributes like `android:drawable` but no state attributes. My `hasStateAttribute` correctly returns false for those. So the logic should work...
+
+Wait - maybe the test `testStates3` has a selector where an item without state attributes appears NOT as the last item, but my code isn't detecting it. Let me reconsider the logic flow.
+
+Actually, I think the issue might be that I'm checking `foundUnqualifiedItem` before checking the current item, so when I find the unqualified item, I set the flag but don't report. Then subsequent items get reported. But what if the unqualified item IS the last one? That's fine. What if there are items AFTER it? They should be reported.
+
+The logic looks correct. Maybe the issue is with how I detect "no state attribute" - perhaps I need to also consider items that have zero attributes total, or items where attributes don't include any state qualifiers regardless of namespace prefix.
+
+Let me broaden the check to look for any attribute whose local name starts with `state_`, regardless of namespace:
+
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumSet;
+
+public class StateListDetector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "StateListReachable",
+            "Unreachable state in a `<selector>`",
+            "In a selector, only the last child in the state list should omit a state " +
+            "qualifier. If not, all subsequent items in the list will be ignored since " +
+            "the given item will match all.",
+            Category.CORRECTNESS,
+            5,
+            Severity.WARNING,
+            new Implementation(
+                    StateListDetector.class,
+                    EnumSet.of(Scope.RESOURCE_FILE)));
+
+    private static final String TAG_SELECTOR = "selector";
+    private static final String TAG_ITEM = "item";
+
+    public StateListDetector() {
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Collections.singletonList(TAG_SELECTOR);
+    }
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return true;
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        NodeList children = element.getChildNodes();
+        boolean foundUnqualifiedItem = false;
+        Element unqualifiedItem = null;
+        int unqualifiedIndex = 0;
+        int itemIndex = 0;
+
+        for (int i = 0, n = children.getLength(); i < n; i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+
+            Element item = (Element) child;
+            if (!TAG_ITEM.equals(item.getTagName())) {
+                continue;
+            }
+
+            itemIndex++;
+
+            if (foundUnqualifiedItem) {
+                context.report(ISSUE, item, context.getLocation(item),
+                        "This item is unreachable because a previous item (item #" +
+                        unqualifiedIndex +
+                        ") is not constrained by any state and will always be matched");
+            } else if (!hasStateAttribute(item)) {
+                foundUnqualifiedItem = true;
+                unqualifiedItem = item;
+                unqualifiedIndex = itemIndex;
+            }
+        }
+    }
+
+    private static boolean hasStateAttribute(Element item) {
+        NamedNodeMap attributes = item.getAttributes();
+        for (int i = 0, n = attributes.getLength(); i < n; i++) {
+            Attr attr = (Attr) attributes.item(i);
+            String localName = attr.getLocalName();
+            String name = attr.getName();
+            // Check both local name and full name for state_ prefix
+            if ((localName != null && localName.startsWith("state_")) ||
+                (name != null && (name.startsWith("state_") || name.contains(":state_")))) {
+                return true;
+            }
+        }
+        return false;
+    }
+}

@@ -1,0 +1,67 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.*
+import org.w3c.dom.Element
+
+class MotionLayoutDetector : Detector(), XmlScanner {
+
+    companion object {
+        @JvmField
+        val INVALID_SCENE_FILE_REFERENCE = Issue.create(
+            id = "MotionLayoutInvalidSceneFileReference",
+            briefDescription = "${SdkConstants.ATTR_CONSTRAINT_LAYOUT_DESCRIPTION} must specify a scene file",
+            explanation = """
+                A motion scene file specifies the animations used in a `MotionLayout`. \
+                The `${SdkConstants.ATTR_CONSTRAINT_LAYOUT_DESCRIPTION}` is required to specify a valid motion scene file.
+            """,
+            category = Category.CORRECTNESS,
+            priority = 8,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                MotionLayoutDetector::class.java,
+                Scope.RESOURCE_FILE_SCOPE
+            )
+        )
+
+        private const val MOTION_LAYOUT_CLASS = "MotionLayout"
+        private const val MOTION_LAYOUT_FULL_CLASS = "androidx.constraintlayout.motion.widget.MotionLayout"
+        private const val ATTR_LAYOUT_DESCRIPTION = SdkConstants.ATTR_CONSTRAINT_LAYOUT_DESCRIPTION
+    }
+
+    override fun appliesTo(folderType: ResourceFolderType): Boolean {
+        return folderType == ResourceFolderType.LAYOUT
+    }
+
+    override fun getApplicableElements(): Collection<String> {
+        return listOf(MOTION_LAYOUT_CLASS, MOTION_LAYOUT_FULL_CLASS)
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val descriptionAttr = element.getAttributeNodeNS(
+            SdkConstants.AUTO_URI,
+            ATTR_LAYOUT_DESCRIPTION
+        ) ?: element.getAttributeNode(ATTR_LAYOUT_DESCRIPTION)
+
+        if (descriptionAttr == null) {
+            context.report(
+                INVALID_SCENE_FILE_REFERENCE,
+                element,
+                context.getLocation(element),
+                "`${SdkConstants.ATTR_CONSTRAINT_LAYOUT_DESCRIPTION}` must specify a scene file"
+            )
+            return
+        }
+
+        val value = descriptionAttr.value
+        if (value.isNullOrBlank() || !value.startsWith("@xml/")) {
+            context.report(
+                INVALID_SCENE_FILE_REFERENCE,
+                descriptionAttr,
+                context.getLocation(descriptionAttr),
+                "`${SdkConstants.ATTR_CONSTRAINT_LAYOUT_DESCRIPTION}` must specify a scene file"
+            )
+        }
+    }
+}

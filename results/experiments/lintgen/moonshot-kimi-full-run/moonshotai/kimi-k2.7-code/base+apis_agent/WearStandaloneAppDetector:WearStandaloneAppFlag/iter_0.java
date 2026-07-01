@@ -1,0 +1,84 @@
+package com.android.tools.lint.checks;
+
+import static com.android.SdkConstants.ANDROID_URI;
+import static com.android.SdkConstants.ATTR_NAME;
+import static com.android.SdkConstants.ATTR_VALUE;
+import static com.android.SdkConstants.TAG_APPLICATION;
+import static com.android.SdkConstants.TAG_META_DATA;
+
+import com.android.annotations.NonNull;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import java.util.Collection;
+import java.util.Collections;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+
+public class WearStandaloneAppDetector extends Detector implements Detector.XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "WearStandaloneAppFlag",
+            "Invalid or missing Wear standalone app flag",
+            "Wearable apps should specify whether they can work standalone, without a phone app. "
+                    + "Add a valid `<meta-data>` entry for `com.google.android.wearable.standalone` "
+                    + "to the `<application>` element and set `android:value` to either `true` or `false`.",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(WearStandaloneAppDetector.class, Scope.MANIFEST_SCOPE)
+    );
+
+    private static final String STANDALONE_FLAG = "com.google.android.wearable.standalone";
+
+    @NonNull
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Collections.singletonList(TAG_APPLICATION);
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        if (!context.file.getName().equals("AndroidManifest.xml")) {
+            return;
+        }
+
+        Element standaloneMeta = null;
+        String value = null;
+
+        Node child = element.getFirstChild();
+        while (child != null) {
+            if (child.getNodeType() == Node.ELEMENT_NODE
+                    && TAG_META_DATA.equals(child.getNodeName())) {
+                Element meta = (Element) child;
+                String name = meta.getAttributeNS(ANDROID_URI, ATTR_NAME);
+                if (STANDALONE_FLAG.equals(name)) {
+                    standaloneMeta = meta;
+                    value = meta.getAttributeNS(ANDROID_URI, ATTR_VALUE);
+                    break;
+                }
+            }
+            child = child.getNextSibling();
+        }
+
+        if (standaloneMeta == null) {
+            context.report(
+                    ISSUE,
+                    element,
+                    context.getLocation(element),
+                    "Missing Wear standalone app flag: add `<meta-data android:name=\"com.google.android.wearable.standalone\" android:value=\"true|false\"/>` to `<application>`"
+            );
+        } else if (!"true".equals(value) && !"false".equals(value)) {
+            context.report(
+                    ISSUE,
+                    standaloneMeta,
+                    context.getLocation(standaloneMeta),
+                    "Invalid Wear standalone app flag value: `android:value` must be `true` or `false`"
+            );
+        }
+    }
+}

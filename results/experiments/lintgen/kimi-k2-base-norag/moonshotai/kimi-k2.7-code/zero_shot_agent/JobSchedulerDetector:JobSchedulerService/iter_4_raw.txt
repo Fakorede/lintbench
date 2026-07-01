@@ -1,0 +1,183 @@
+package com.android.tools.lint.checks;
+
+import static com.android.SdkConstants.ANDROID_URI;
+import static com.android.SdkConstants.ATTR_NAME;
+import static com.android.SdkConstants.ATTR_PERMISSION;
+import static com.android.SdkConstants.TAG_SERVICE;
+
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.ClassContext;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.Map;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.objectweb.asm.tree.ClassNode;
+import org.w3c.dom.Element;
+
+public class JobSchedulerDetector extends Detector implements Detector.ClassScanner, Detector.XmlScanner {
+
+    private static final String JOB_SERVICE = "android/app/job/JobService";
+    private static final String BIND_JOB_SERVICE = "android.permission.BIND_JOB_SERVICE";
+
+    public static final Issue ISSUE =
+            Issue.create(
+                    "JobSchedulerService",
+                    "JobScheduler problems",
+                    "This check looks for various common mistakes in using the JobScheduler API: "
+                            + "the service class must extend `JobService`, the service must be "
+                            + "registered in the manifest and the registration must require the "
+                            + "permission `android.permission.BIND_JOB_SERVICE`.",
+                    Category.CORRECTNESS,
+                    9,
+                    Severity.ERROR,
+                    new Implementation(
+                            JobSchedulerDetector.class,
+                            EnumSet.of(Scope.MANIFEST, Scope.ALL_CLASS_FILES)),
+                    "https://developer.android.com/topic/performance/scheduling.html");
+
+    private final Map<String, ClassInfo> mJobServices = new HashMap<>();
+    private final Map<String, ServiceInfo> mServices = new HashMap<>();
+
+    @Override
+    public void beforeCheckProject(@NotNull Context context) {
+        mJobServices.clear();
+        mServices.clear();
+    }
+
+    @Override
+    public void afterCheckProject(@NotNull Context context) {
+        for (ClassInfo classInfo : mJobServices.values()) {
+            ServiceInfo service = mServices.get(classInfo.name);
+            if (service == null) {
+                report(
+                        classInfo.context,
+                        classInfo.context.getLocation(classInfo.classNode),
+                        "The JobScheduler service "
+                                + classInfo.name.replace('/', '.')
+                                + " must be registered in the manifest");
+            } else if (!service.hasPermission) {
+                report(
+                        service.context,
+                        service.context.getLocation(service.element),
+                        "The JobScheduler service "
+                                + classInfo.name.replace('/', '.')
+                                + " must require the permission android.permission.BIND_JOB_SERVICE");
+            }
+        }
+
+        for (ServiceInfo service : mServices.values()) {
+            if (service.hasPermission && !mJobServices.containsKey(service.name)) {
+                report(
+                        service.context,
+                        service.context.getLocation(service.element),
+                        "The service "
+                                + service.name.replace('/', '.')
+                                + " must extend android.app.job.JobService");
+            }
+        }
+
+        mJobServices.clear();
+        mServices.clear();
+    }
+
+    @Override
+    public void checkClass(@NotNull ClassContext context, @NotNull ClassNode classNode) {
+        if (classNode.name == null || JOB_SERVICE.equals(classNode.name)) {
+            return;
+        }
+
+        if (JOB_SERVICE.equals(classNode.superName)) {
+            mJobServices.put(classNode.name, new ClassInfo(context, classNode));
+        }
+    }
+
+    @Override
+    @Nullable
+    public Collection<String> getApplicableElements() {
+        return Collections.singletonList(TAG_SERVICE);
+    }
+
+    @Override
+    public void visitElement(@NotNull XmlContext context, @NotNull Element element) {
+        String name = element.getAttributeNS(ANDROID_URI, ATTR_NAME);
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+
+        String pkg = context.getProject().getPackage();
+        String internalName = getInternalName(name, pkg);
+        if (internalName == null) {
+            return;
+        }
+
+        String permission = element.getAttributeNS(ANDROID_URI, ATTR_PERMISSION);
+        boolean hasPermission = BIND_JOB_SERVICE.equals(permission);
+
+        mServices.put(internalName, new ServiceInfo(context, element, internalName, hasPermission));
+    }
+
+    @Nullable
+    private static String getInternalName(@NotNull String name, @Nullable String pkg) {
+        String fqName;
+        if (name.startsWith(".")) {
+            if (pkg == null || pkg.isEmpty()) {
+                return null;
+            }
+            fqName = pkg + name;
+        } else if (name.indexOf('.') != -1) {
+            fqName = name;
+        } else {
+            if (pkg == null || pkg.isEmpty()) {
+                return null;
+            }
+            fqName = pkg + "." + name;
+        }
+        return fqName.replace('.', '/');
+    }
+
+    private static void report(
+            @NotNull Context context, @NotNull Location location, @NotNull String message) {
+        context.report(ISSUE, location, message);
+    }
+
+    private static class ClassInfo {
+        @NotNull final ClassContext context;
+        @NotNull final ClassNode classNode;
+        @NotNull final String name;
+
+        ClassInfo(@NotNull ClassContext context, @NotNull ClassNode classNode) {
+            this.context = context;
+            this.classNode = classNode;
+            this.name = classNode.name;
+        }
+    }
+
+    private static class ServiceInfo {
+        @NotNull final XmlContext context;
+        @NotNull final Element element;
+        @NotNull final String name;
+        final boolean hasPermission;
+
+        ServiceInfo(
+                @NotNull XmlContext context,
+                @NotNull Element element,
+                @NotNull String name,
+                boolean hasPermission) {
+            this.context = context;
+            this.element = element;
+            this.name = name;
+            this.hasPermission = hasPermission;
+        }
+    }
+}

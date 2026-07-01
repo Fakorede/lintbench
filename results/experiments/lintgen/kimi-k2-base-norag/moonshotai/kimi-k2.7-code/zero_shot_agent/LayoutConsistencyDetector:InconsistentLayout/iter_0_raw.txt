@@ -1,0 +1,160 @@
+package com.android.tools.lint.checks;
+
+import com.android.SdkConstants;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceXmlDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScannerConstants;
+
+import org.w3c.dom.Element;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+public class LayoutConsistencyDetector extends ResourceXmlDetector {
+
+    public static final Issue INCONSISTENT_LAYOUT = Issue.create(
+            "InconsistentLayout",
+            "Inconsistent Layouts",
+            "This check ensures that a layout resource which is defined in multiple resource "
+                    + "folders specifies the same set of widgets. This finds cases where you have "
+                    + "accidentally forgotten to add a widget to all variations of the layout, "
+                    + "which could result in a runtime crash for some resource configurations when "
+                    + "a `findViewById()` fails.\n"
+                    + "\n"
+                    + "There are cases where this is intentional. For example, you may have a "
+                    + "dedicated large tablet layout which adds some extra widgets that are not "
+                    + "present in the phone version of the layout. As long as the code accessing "
+                    + "the layout resource is careful to handle this properly, it is valid. In "
+                    + "that case, you can suppress this lint check for the given extra or missing "
+                    + "views, or the whole layout.",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(LayoutConsistencyDetector.class, EnumSet.of(Scope.RESOURCE_FILE_SCOPE))
+    );
+
+    private final Map<File, Set<String>> mIdsByFile = new HashMap<>();
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.LAYOUT;
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return XmlScannerConstants.ALL;
+    }
+
+    @Override
+    public void beforeCheckProject(Context context) {
+        mIdsByFile.clear();
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        String id = element.getAttributeNS(SdkConstants.ANDROID_URI, SdkConstants.ATTR_ID);
+        if (id == null || id.isEmpty()) {
+            return;
+        }
+
+        int slash = id.lastIndexOf('/');
+        if (slash == -1) {
+            return;
+        }
+
+        String name = id.substring(slash + 1);
+        if (name.isEmpty()) {
+            return;
+        }
+
+        Set<String> ids = mIdsByFile.get(context.file);
+        if (ids == null) {
+            ids = new HashSet<>();
+            mIdsByFile.put(context.file, ids);
+        }
+        ids.add(name);
+    }
+
+    @Override
+    public void afterCheckProject(Context context) {
+        Map<String, List<Variant>> variantsByName = new HashMap<>();
+
+        for (Map.Entry<File, Set<String>> entry : mIdsByFile.entrySet()) {
+            File file = entry.getKey();
+            String fileName = file.getName();
+            File parent = file.getParentFile();
+            String folderName = parent != null ? parent.getName() : "";
+
+            variantsByName.computeIfAbsent(fileName, k -> new ArrayList<>())
+                    .add(new Variant(file, folderName, entry.getValue()));
+        }
+
+        for (Map.Entry<String, List<Variant>> entry : variantsByName.entrySet()) {
+            String fileName = entry.getKey();
+            List<Variant> variants = entry.getValue();
+            if (variants.size() < 2) {
+                continue;
+            }
+
+            Set<String> union = new HashSet<>();
+            for (Variant variant : variants) {
+                union.addAll(variant.ids);
+            }
+
+            boolean consistent = true;
+            for (Variant variant : variants) {
+                if (!variant.ids.containsAll(union)) {
+                    consistent = false;
+                    break;
+                }
+            }
+
+            if (consistent) {
+                continue;
+            }
+
+            StringBuilder message = new StringBuilder();
+            message.append("The layout '").append(fileName)
+                    .append("' has inconsistent view IDs across configurations:");
+
+            for (Variant variant : variants) {
+                Set<String> missing = new HashSet<>(union);
+                missing.removeAll(variant.ids);
+                if (!missing.isEmpty()) {
+                    message.append("\n• ").append(variant.folderName)
+                            .append(" is missing: ").append(missing);
+                }
+            }
+
+            Location location = Location.create(variants.get(0).file);
+            context.report(INCONSISTENT_LAYOUT, location, message.toString());
+        }
+    }
+
+    private static class Variant {
+        final File file;
+        final String folderName;
+        final Set<String> ids;
+
+        Variant(File file, String folderName, Set<String> ids) {
+            this.file = file;
+            this.folderName = folderName;
+            this.ids = ids;
+        }
+    }
+}

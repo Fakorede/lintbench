@@ -1,0 +1,151 @@
+package com.android.tools.lint.checks;
+
+import com.android.SdkConstants;
+import com.android.annotations.NonNull;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.util.Arrays;
+import java.util.Collection;
+
+public class AndroidTvDetector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "MissingLeanbackLauncher",
+            "Missing Leanback Launcher intent filter",
+            "An application intended to run on TV devices must declare a launcher activity "
+                    + "for TV in its manifest using an `android.intent.category.LEANBACK_LAUNCHER` "
+                    + "intent filter. Refer to the Android TV documentation for details.",
+            Category.CORRECTNESS,
+            9,
+            Severity.WARNING,
+            new Implementation(AndroidTvDetector.class, Scope.MANIFEST_SCOPE)
+    );
+
+    private static final String TV_HARDWARE_FEATURE = "android.hardware.type.television";
+    private static final String LEANBACK_SOFTWARE_FEATURE = "android.software.leanback";
+    private static final String ACTION_MAIN = "android.intent.action.MAIN";
+    private static final String CATEGORY_LEANBACK_LAUNCHER =
+            "android.intent.category.LEANBACK_LAUNCHER";
+
+    private boolean mIsTvRequired;
+    private boolean mHasLeanbackLauncher;
+    private Element mManifestElement;
+    private Element mApplicationElement;
+
+    @Override
+    public void beforeCheckFile(@NonNull Context context) {
+        mIsTvRequired = false;
+        mHasLeanbackLauncher = false;
+        mManifestElement = null;
+        mApplicationElement = null;
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Arrays.asList(
+                SdkConstants.TAG_MANIFEST,
+                SdkConstants.TAG_APPLICATION,
+                SdkConstants.TAG_ACTIVITY,
+                SdkConstants.TAG_ACTIVITY_ALIAS,
+                SdkConstants.TAG_USES_FEATURE
+        );
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        String tag = element.getTagName();
+
+        if (SdkConstants.TAG_MANIFEST.equals(tag)) {
+            mManifestElement = element;
+        } else if (SdkConstants.TAG_APPLICATION.equals(tag)) {
+            mApplicationElement = element;
+        } else if (SdkConstants.TAG_USES_FEATURE.equals(tag)) {
+            String name = element.getAttributeNS(SdkConstants.ANDROID_URI, SdkConstants.ATTR_NAME);
+            if (TV_HARDWARE_FEATURE.equals(name) || LEANBACK_SOFTWARE_FEATURE.equals(name)) {
+                String required = element.getAttributeNS(
+                        SdkConstants.ANDROID_URI, SdkConstants.ATTR_REQUIRED);
+                if (required == null || required.isEmpty()
+                        || SdkConstants.VALUE_TRUE.equals(required)) {
+                    mIsTvRequired = true;
+                }
+            }
+        } else if (SdkConstants.TAG_ACTIVITY.equals(tag)
+                || SdkConstants.TAG_ACTIVITY_ALIAS.equals(tag)) {
+            if (hasLeanbackLauncherIntentFilter(element)) {
+                mHasLeanbackLauncher = true;
+            }
+        }
+    }
+
+    @Override
+    public void afterCheckFile(@NonNull Context context) {
+        if (!mIsTvRequired || mHasLeanbackLauncher) {
+            return;
+        }
+
+        Element reportElement = mApplicationElement != null ? mApplicationElement : mManifestElement;
+        if (reportElement != null) {
+            XmlContext xmlContext = (XmlContext) context;
+            xmlContext.report(
+                    ISSUE,
+                    reportElement,
+                    xmlContext.getLocation(reportElement),
+                    "TV app is missing a Leanback Launcher intent filter. Add an activity "
+                            + "with action MAIN and category LEANBACK_LAUNCHER."
+            );
+        }
+    }
+
+    private static boolean hasLeanbackLauncherIntentFilter(@NonNull Element activity) {
+        NodeList children = activity.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node node = children.item(i);
+            if (node.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+            Element child = (Element) node;
+            if (!SdkConstants.TAG_INTENT_FILTER.equals(child.getTagName())) {
+                continue;
+            }
+
+            boolean hasMain = false;
+            boolean hasLeanback = false;
+
+            NodeList filterChildren = child.getChildNodes();
+            for (int j = 0; j < filterChildren.getLength(); j++) {
+                Node filterNode = filterChildren.item(j);
+                if (filterNode.getNodeType() != Node.ELEMENT_NODE) {
+                    continue;
+                }
+                Element filterChild = (Element) filterNode;
+                String filterTag = filterChild.getTagName();
+                String name = filterChild.getAttributeNS(
+                        SdkConstants.ANDROID_URI, SdkConstants.ATTR_NAME);
+
+                if (SdkConstants.TAG_ACTION.equals(filterTag) && ACTION_MAIN.equals(name)) {
+                    hasMain = true;
+                } else if (SdkConstants.TAG_CATEGORY.equals(filterTag)
+                        && CATEGORY_LEANBACK_LAUNCHER.equals(name)) {
+                    hasLeanback = true;
+                }
+            }
+
+            if (hasMain && hasLeanback) {
+                return true;
+            }
+        }
+        return false;
+    }
+}

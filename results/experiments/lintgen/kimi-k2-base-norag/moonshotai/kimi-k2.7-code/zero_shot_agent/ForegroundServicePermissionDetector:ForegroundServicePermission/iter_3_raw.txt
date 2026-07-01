@@ -1,0 +1,186 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.ANDROID_URI
+import com.android.SdkConstants.ATTR_FOREGROUND_SERVICE_TYPE
+import com.android.SdkConstants.ATTR_NAME
+import com.android.SdkConstants.ATTR_TARGET_SDK_VERSION
+import com.android.SdkConstants.TAG_SERVICE
+import com.android.SdkConstants.TAG_USES_PERMISSION
+import com.android.SdkConstants.TAG_USES_SDK
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import org.w3c.dom.Attr
+import org.w3c.dom.Element
+
+class ForegroundServicePermissionDetector : Detector(), Detector.XmlScanner {
+
+    override fun getApplicableElements(): Collection<String> = listOf(TAG_SERVICE)
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        if (getTargetSdk(context) < TARGET_SDK_THRESHOLD) {
+            return
+        }
+
+        val attr = element.getAttributeNodeNS(ANDROID_URI, ATTR_FOREGROUND_SERVICE_TYPE)
+            ?: return
+        val value = attr.value ?: return
+        if (value.isBlank() || value == "0") {
+            return
+        }
+
+        val declaredPermissions = getDeclaredPermissions(context)
+        val types = value.split('|').map { it.trim() }.filter { it.isNotBlank() }
+
+        for (type in types) {
+            val requirement = PERMISSION_REQUIREMENTS[type] ?: continue
+
+            val missingMandatory = requirement.mandatory.filter { it !in declaredPermissions }
+            val hasAlternative = requirement.anyOf.isEmpty() ||
+                requirement.anyOf.any { it in declaredPermissions }
+
+            if (missingMandatory.isNotEmpty() || !hasAlternative) {
+                val missing = missingMandatory.toMutableList()
+                if (!hasAlternative && requirement.anyOf.isNotEmpty()) {
+                    missing.add("one of ${requirement.anyOf.joinToString(", ")}")
+                }
+
+                val message = buildString {
+                    append("Missing permissions required by foregroundServiceType '$type'")
+                    if (missing.isNotEmpty()) {
+                        append(": ${missing.joinToString(", ")}")
+                    }
+                }
+
+                context.report(ISSUE_PERMISSION, context.getValueLocation(attr), message)
+            }
+        }
+    }
+
+    private fun getTargetSdk(context: XmlContext): Int {
+        val projectTarget = context.project?.targetSdkVersion?.featureLevel
+        if (projectTarget != null && projectTarget > 0) {
+            return projectTarget
+        }
+
+        val root = context.document.documentElement ?: return -1
+        val usesSdk = root.getElementsByTagName(TAG_USES_SDK).item(0) as? Element ?: return -1
+        return usesSdk.getAttributeNS(ANDROID_URI, ATTR_TARGET_SDK_VERSION)
+            .ifEmpty { usesSdk.getAttribute(ATTR_TARGET_SDK_VERSION) }
+            .toIntOrNull() ?: -1
+    }
+
+    private fun getDeclaredPermissions(context: XmlContext): Set<String> {
+        val permissions = mutableSetOf<String>()
+        val root = context.document.documentElement ?: return permissions
+        val nodes = root.getElementsByTagName(TAG_USES_PERMISSION)
+        for (i in 0 until nodes.length) {
+            val element = nodes.item(i) as? Element ?: continue
+            val name = element.getAttributeNS(ANDROID_URI, ATTR_NAME)
+                .ifEmpty { element.getAttribute(ATTR_NAME) }
+            if (name.isNotBlank()) {
+                permissions.add(name)
+            }
+        }
+        return permissions
+    }
+
+    private data class PermissionRequirement(
+        val mandatory: List<String> = emptyList(),
+        val anyOf: List<String> = emptyList()
+    )
+
+    companion object {
+        private const val TARGET_SDK_THRESHOLD = 34
+        private const val P = "android.permission."
+
+        private val PERMISSION_REQUIREMENTS = mapOf(
+            "camera" to PermissionRequirement(
+                mandatory = listOf("${P}CAMERA", "${P}FOREGROUND_SERVICE_CAMERA")
+            ),
+            "connectedDevice" to PermissionRequirement(
+                mandatory = listOf("${P}FOREGROUND_SERVICE_CONNECTED_DEVICE"),
+                anyOf = listOf(
+                    "${P}BLUETOOTH_CONNECT",
+                    "${P}BLUETOOTH_SCAN",
+                    "${P}BLUETOOTH_ADVERTISE",
+                    "${P}UWB_RANGING"
+                )
+            ),
+            "dataSync" to PermissionRequirement(
+                mandatory = listOf("${P}FOREGROUND_SERVICE_DATA_SYNC")
+            ),
+            "fileManagement" to PermissionRequirement(
+                mandatory = listOf(
+                    "${P}FOREGROUND_SERVICE_FILE_MANAGEMENT",
+                    "${P}MANAGE_EXTERNAL_STORAGE"
+                )
+            ),
+            "health" to PermissionRequirement(
+                mandatory = listOf("${P}FOREGROUND_SERVICE_HEALTH"),
+                anyOf = listOf("${P}ACTIVITY_RECOGNITION", "${P}BODY_SENSORS")
+            ),
+            "location" to PermissionRequirement(
+                mandatory = listOf("${P}FOREGROUND_SERVICE_LOCATION"),
+                anyOf = listOf("${P}ACCESS_FINE_LOCATION", "${P}ACCESS_COARSE_LOCATION")
+            ),
+            "mediaPlayback" to PermissionRequirement(
+                mandatory = listOf("${P}FOREGROUND_SERVICE_MEDIA_PLAYBACK")
+            ),
+            "mediaProcessing" to PermissionRequirement(
+                mandatory = listOf("${P}FOREGROUND_SERVICE_MEDIA_PROCESSING")
+            ),
+            "mediaProjection" to PermissionRequirement(
+                mandatory = listOf("${P}FOREGROUND_SERVICE_MEDIA_PROJECTION")
+            ),
+            "microphone" to PermissionRequirement(
+                mandatory = listOf("${P}RECORD_AUDIO", "${P}FOREGROUND_SERVICE_MICROPHONE")
+            ),
+            "phoneCall" to PermissionRequirement(
+                mandatory = listOf("${P}FOREGROUND_SERVICE_PHONE_CALL"),
+                anyOf = listOf("${P}CALL_PHONE", "${P}MANAGE_OWN_CALLS")
+            ),
+            "remoteMessaging" to PermissionRequirement(
+                mandatory = listOf("${P}FOREGROUND_SERVICE_REMOTE_MESSAGING"),
+                anyOf = listOf(
+                    "${P}SEND_SMS",
+                    "${P}RECEIVE_SMS",
+                    "${P}READ_SMS",
+                    "${P}RECEIVE_WAP_PUSH",
+                    "${P}RECEIVE_MMS"
+                )
+            ),
+            "shortService" to PermissionRequirement(
+                mandatory = listOf("${P}FOREGROUND_SERVICE_SHORT_SERVICE")
+            ),
+            "specialUse" to PermissionRequirement(
+                mandatory = listOf("${P}FOREGROUND_SERVICE_SPECIAL_USE")
+            ),
+            "systemExempted" to PermissionRequirement(
+                mandatory = listOf("${P}FOREGROUND_SERVICE_SYSTEM_EXEMPTED")
+            )
+        )
+
+        val ISSUE_PERMISSION = Issue.create(
+            id = "ForegroundServicePermission",
+            briefDescription = "Missing permissions required by foregroundServiceType",
+            explanation = """
+                For targetSdkVersion >= 34, each foregroundServiceType listed in a <service>
+                element requires specific permissions to be declared in the manifest. If those
+                permissions are missing, a SecurityException is thrown when the service is
+                started with that type.
+            """.trimIndent(),
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                ForegroundServicePermissionDetector::class.java,
+                Scope.MANIFEST_SCOPE
+            )
+        )
+    }
+}

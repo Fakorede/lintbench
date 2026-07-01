@@ -1,0 +1,114 @@
+package com.android.tools.lint.checks;
+
+import com.android.SdkConstants;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.ResourceXmlDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+
+public class TextFieldDetector extends ResourceXmlDetector {
+
+    public static final Issue ISSUE = Issue.create(
+            "TextFields",
+            "Missing `inputType`",
+            "Providing an `inputType` attribute on a text field improves usability " +
+            "because depending on the data to be input, optimized keyboards can be shown " +
+            "to the user (such as just digits and parentheses for a phone number).\n\n" +
+            "The lint detector also looks at the `id` of the view, and if the id offers a " +
+            "hint of the purpose of the field (for example, the `id` contains the phrase " +
+            "`phone` or `email`), then lint will also ensure that the `inputType` contains " +
+            "the corresponding type attributes.\n\n" +
+            "If you really want to keep the text field generic, you can suppress this warning " +
+            "by setting `inputType=\"text\"`.",
+            Category.USABILITY,
+            5,
+            Severity.WARNING,
+            new Implementation(TextFieldDetector.class, Scope.RESOURCE_FILE_SCOPE)
+    );
+
+    private static final Map<String, String> ID_HINTS = new HashMap<>();
+    static {
+        ID_HINTS.put("phone", "phone");
+        ID_HINTS.put("email", "textEmailAddress");
+        ID_HINTS.put("password", "textPassword");
+        ID_HINTS.put("number", "number");
+        ID_HINTS.put("date", "date");
+        ID_HINTS.put("time", "time");
+        ID_HINTS.put("url", "textUri");
+        ID_HINTS.put("postal", "textPostalAddress");
+        ID_HINTS.put("address", "textPostalAddress");
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return ALL;
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        String tag = element.getTagName();
+        if (!tag.equals(SdkConstants.EDIT_TEXT) && !tag.endsWith(SdkConstants.EDIT_TEXT)) {
+            return;
+        }
+
+        Attr inputTypeAttr = element.getAttributeNodeNS(SdkConstants.ANDROID_URI, SdkConstants.ATTR_INPUT_TYPE);
+        Attr idAttr = element.getAttributeNodeNS(SdkConstants.ANDROID_URI, SdkConstants.ATTR_ID);
+
+        if (inputTypeAttr == null) {
+            String message = "This text field does not specify an `inputType`";
+            context.report(ISSUE, element, context.getLocation(element), message);
+            return;
+        }
+
+        String inputTypeValue = inputTypeAttr.getValue();
+        if (inputTypeValue.startsWith("@")) {
+            return;
+        }
+
+        if ("text".equals(inputTypeValue)) {
+            return;
+        }
+
+        if (idAttr != null) {
+            String id = idAttr.getValue();
+            int slash = id.lastIndexOf('/');
+            if (slash != -1) {
+                id = id.substring(slash + 1);
+            }
+            String lowerId = id.toLowerCase(Locale.US);
+
+            for (Map.Entry<String, String> entry : ID_HINTS.entrySet()) {
+                if (lowerId.contains(entry.getKey())) {
+                    String expectedType = entry.getValue();
+                    if (!hasInputType(inputTypeValue, expectedType)) {
+                        String message = String.format(
+                                "The id suggests this is a %s field, but the inputType is missing `%s`",
+                                entry.getKey(), expectedType);
+                        context.report(ISSUE, inputTypeAttr, context.getLocation(inputTypeAttr), message);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    private static boolean hasInputType(String inputTypeValue, String expectedType) {
+        String[] types = inputTypeValue.split("\\|");
+        for (String type : types) {
+            if (type.trim().equals(expectedType)) {
+                return true;
+            }
+        }
+        return false;
+    }
+}

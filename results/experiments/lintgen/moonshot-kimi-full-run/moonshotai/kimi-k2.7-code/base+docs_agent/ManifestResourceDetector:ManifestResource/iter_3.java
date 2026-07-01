@@ -1,0 +1,375 @@
+package com.android.tools.lint.checks;
+
+import static com.android.SdkConstants.ANDROID_MANIFEST_XML;
+import static com.android.SdkConstants.ATTR_ICON;
+import static com.android.SdkConstants.ATTR_LABEL;
+import static com.android.SdkConstants.ATTR_ROUND_ICON;
+import static com.android.SdkConstants.EXT_XML;
+import static com.android.SdkConstants.PREFIX_RESOURCE_REF;
+import static com.android.SdkConstants.TAG_RESOURCES;
+
+import com.android.annotations.NonNull;
+import com.android.ide.common.resources.configuration.FolderConfiguration;
+import com.android.ide.common.resources.configuration.ResourceQualifier;
+import com.android.ide.common.resources.configuration.VersionQualifier;
+import com.android.resources.ResourceFolderType;
+import com.android.resources.ResourceType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceContext;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScannerConstants;
+import com.android.utils.XmlUtils;
+import java.io.File;
+import java.io.IOException;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+public class ManifestResourceDetector extends Detector
+        implements Detector.XmlScanner, Detector.ResourceFolderScanner {
+
+    private static final String ISSUE_ID = "ManifestResource";
+    private static final String ISSUE_SUMMARY = "Manifest resource references";
+    private static final String ISSUE_EXPLANATION =
+            "Elements in the manifest can reference resources, but those resources cannot "
+                    + "vary across configurations (except as a special case, by version, and "
+                    + "except for a few specific package attributes such as the application "
+                    + "title and icon).";
+
+    public static final Issue ISSUE = Issue.create(
+            ISSUE_ID,
+            ISSUE_SUMMARY,
+            ISSUE_EXPLANATION,
+            Category.CORRECTNESS,
+            6,
+            Severity.ERROR,
+            new Implementation(
+                    ManifestResourceDetector.class,
+                    Scope.MANIFEST_SCOPE,
+                    Scope.RESOURCE_FOLDER_SCOPE
+            )
+    );
+
+    private final Map<ResourceType, Map<String, Set<Variant>>> mResourceConfigurations =
+            new HashMap<>();
+
+    private static final class Variant {
+        final FolderConfiguration config;
+        final String folderName;
+
+        Variant(FolderConfiguration config, String folderName) {
+            this.config = config;
+            this.folderName = folderName;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Variant)) {
+                return false;
+            }
+            Variant other = (Variant) o;
+            if (config == null) {
+                return other.config == null;
+            }
+            return config.equals(other.config);
+        }
+
+        @Override
+        public int hashCode() {
+            return config == null ? 0 : config.hashCode();
+        }
+    }
+
+    @Override
+    public void beforeCheckRootProject(@NonNull Context context) {
+        mResourceConfigurations.clear();
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return null;
+    }
+
+    @Override
+    public Collection<String> getApplicableAttributes() {
+        return XmlScannerConstants.ALL;
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+    }
+
+    @Override
+    public void visitAttribute(@NonNull XmlContext context, @NonNull Attr attr) {
+        if (!ANDROID_MANIFEST_XML.equals(context.file.getName())) {
+            return;
+        }
+
+        String value = attr.getValue();
+        if (value.length() < 2 || value.charAt(0) != PREFIX_RESOURCE_REF.charAt(0)) {
+            return;
+        }
+        if ("@null".equals(value)) {
+            return;
+        }
+
+        ResourceRef ref = parseResourceRef(value);
+        if (ref == null || ref.type == null) {
+            return;
+        }
+
+        if (isApplicationTitleOrIcon(attr)) {
+            return;
+        }
+
+        if (ref.packageName != null
+                && !ref.packageName.equals(context.getMainProject().getPackage())) {
+            return;
+        }
+
+        Set<Variant> variants = getVariants(ref.type, ref.name);
+        if (variants == null || variants.isEmpty()) {
+            return;
+        }
+
+        if (hasOnlyVersionVariation(variants)) {
+            return;
+        }
+
+        String message =
+                "The "
+                        + attr.getName()
+                        + " attribute must not reference a resource that varies across "
+                        + "configurations (except by version); `"
+                        + value
+                        + "` is defined in: "
+                        + describe(variants);
+
+        Location location = context.getValueLocation(attr);
+        context.report(ISSUE, attr, location, message);
+    }
+
+    public void checkFolder(@NonNull Context context, @NonNull File folder) {
+        if (context instanceof ResourceContext) {
+            collectFolder((ResourceContext) context, folder);
+        }
+    }
+
+    public void checkFolder(@NonNull ResourceContext context, @NonNull File folder) {
+        collectFolder(context, folder);
+    }
+
+    public void checkFolder(
+            @NonNull ResourceContext context, @NonNull File folder, @NonNull File[] files) {
+        collectFolder(context, folder);
+    }
+
+    public void checkFolder(
+            @NonNull Context context, @NonNull File folder, @NonNull File[] files) {
+        if (context instanceof ResourceContext) {
+            collectFolder((ResourceContext) context, folder);
+        }
+    }
+
+    private void collectFolder(@NonNull ResourceContext context, @NonNull File folder) {
+        ResourceFolderType folderType = context.getResourceFolderType();
+        if (folderType == null) {
+            return;
+        }
+
+        FolderConfiguration config = context.getFolderConfiguration();
+        String folderName = folder.getName();
+
+        File[] files = context.getFiles();
+        if (files == null) {
+            files = folder.listFiles();
+        }
+        if (files == null) {
+            return;
+        }
+
+        if (folderType == ResourceFolderType.VALUES) {
+            for (File file : files) {
+                if (!file.isFile() || !file.getName().endsWith(EXT_XML)) {
+                    continue;
+                }
+                parseValuesFile(file, config, folderName);
+            }
+        } else {
+            ResourceType resourceType = folderType.getResourceType();
+            if (resourceType == null) {
+                return;
+            }
+            for (File file : files) {
+                if (!file.isFile()) {
+                    continue;
+                }
+                String name = file.getName();
+                int dot = name.lastIndexOf('.');
+                String resourceName = dot > 0 ? name.substring(0, dot) : name;
+                addVariant(resourceType, resourceName, config, folderName);
+            }
+        }
+    }
+
+    private void parseValuesFile(
+            @NonNull File file, FolderConfiguration config, @NonNull String folderName) {
+        Document document;
+        try {
+            document = XmlUtils.parseUtfXmlFile(file, true);
+        } catch (IOException e) {
+            return;
+        }
+
+        Element root = document.getDocumentElement();
+        if (root == null || !TAG_RESOURCES.equals(root.getTagName())) {
+            return;
+        }
+
+        NodeList children = root.getChildNodes();
+        for (int i = 0, n = children.getLength(); i < n; i++) {
+            Node node = children.item(i);
+            if (node.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+            Element child = (Element) node;
+            String tag = child.getTagName();
+            String typeName;
+            if ("item".equals(tag)) {
+                typeName = child.getAttribute("type");
+            } else {
+                typeName = tag;
+            }
+            ResourceType type = ResourceType.fromXmlTag(typeName);
+            if (type == null) {
+                type = ResourceType.getEnum(typeName.toUpperCase(Locale.US));
+            }
+            if (type == null) {
+                continue;
+            }
+            String name = child.getAttribute("name");
+            if (name.isEmpty()) {
+                continue;
+            }
+            addVariant(type, name, config, folderName);
+        }
+    }
+
+    private void addVariant(
+            @NonNull ResourceType type,
+            @NonNull String name,
+            FolderConfiguration config,
+            @NonNull String folderName) {
+        Map<String, Set<Variant>> byName = mResourceConfigurations.get(type);
+        if (byName == null) {
+            byName = new HashMap<>();
+            mResourceConfigurations.put(type, byName);
+        }
+        Set<Variant> variants = byName.get(name);
+        if (variants == null) {
+            variants = new HashSet<>();
+            byName.put(name, variants);
+        }
+        variants.add(new Variant(config, folderName));
+    }
+
+    private Set<Variant> getVariants(@NonNull ResourceType type, @NonNull String name) {
+        Map<String, Set<Variant>> map = mResourceConfigurations.get(type);
+        return map == null ? null : map.get(name);
+    }
+
+    private static boolean isApplicationTitleOrIcon(@NonNull Attr attr) {
+        Element owner = attr.getOwnerElement();
+        if (owner == null) {
+            return false;
+        }
+        String element = owner.getLocalName();
+        if (!"application".equals(element)) {
+            return false;
+        }
+        String localName = attr.getLocalName();
+        return ATTR_LABEL.equals(localName)
+                || ATTR_ICON.equals(localName)
+                || ATTR_ROUND_ICON.equals(localName);
+    }
+
+    private static boolean hasOnlyVersionVariation(@NonNull Set<Variant> variants) {
+        if (variants.size() <= 1) {
+            return true;
+        }
+        for (Variant variant : variants) {
+            FolderConfiguration config = variant.config;
+            if (config == null) {
+                continue;
+            }
+            for (ResourceQualifier qualifier : config.getQualifiers()) {
+                if (qualifier != null && !(qualifier instanceof VersionQualifier)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private static String describe(@NonNull Set<Variant> variants) {
+        StringBuilder sb = new StringBuilder();
+        for (Variant variant : variants) {
+            if (sb.length() > 0) {
+                sb.append(", ");
+            }
+            sb.append(variant.folderName);
+        }
+        return sb.toString();
+    }
+
+    private static ResourceRef parseResourceRef(@NonNull String value) {
+        int start = 1;
+        if (value.length() > start && value.charAt(start) == '*') {
+            start++;
+        }
+        String s = value.substring(start);
+        String packageName = null;
+        int colon = s.indexOf(':');
+        if (colon != -1) {
+            packageName = s.substring(0, colon);
+            s = s.substring(colon + 1);
+        }
+        int slash = s.indexOf('/');
+        if (slash <= 0 || slash == s.length() - 1) {
+            return null;
+        }
+        String typeName = s.substring(0, slash);
+        String name = s.substring(slash + 1);
+        return new ResourceRef(packageName, typeName, name);
+    }
+
+    private static final class ResourceRef {
+        final String packageName;
+        final ResourceType type;
+        final String name;
+
+        ResourceRef(String packageName, String typeName, String name) {
+            this.packageName = packageName;
+            this.type = ResourceType.getEnum(typeName.toUpperCase(Locale.US));
+            this.name = name;
+        }
+    }
+}

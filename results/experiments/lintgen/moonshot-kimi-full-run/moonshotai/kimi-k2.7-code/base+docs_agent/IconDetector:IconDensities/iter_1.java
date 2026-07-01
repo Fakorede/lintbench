@@ -1,0 +1,217 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Detector.ResourceFolderScanner;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Project;
+import com.android.tools.lint.detector.api.ResourceContext;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+
+import java.io.File;
+import java.util.Arrays;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
+
+public class IconDetector extends Detector implements ResourceFolderScanner {
+
+    private static final String INCLUDE_LDPI = "ANDROID_LINT_INCLUDE_LDPI";
+
+    private static final Set<String> REQUIRED_DENSITIES =
+            new HashSet<>(Arrays.asList("mdpi", "hdpi", "xhdpi"));
+
+    private static final Set<String> DENSITY_NAMES =
+            new HashSet<>(Arrays.asList(
+                    "ldpi", "mdpi", "hdpi", "xhdpi",
+                    "xxhdpi", "xxxhdpi", "tvdpi", "nodpi", "anydpi"
+            ));
+
+    private static final Set<String> IMAGE_EXTENSIONS =
+            new HashSet<>(Arrays.asList("png", "gif", "jpg", "jpeg", "webp", "bmp"));
+
+    public static final Issue ICON_DENSITIES = Issue.create(
+            "IconDensities",
+            "Icon densities validation",
+            "Icons will look best if a custom version is provided for each of the major "
+                    + "screen density classes (low, medium, high, extra high). This check "
+                    + "identifies icons which do not have complete coverage across the "
+                    + "densities.\n\nLow density is not really used much anymore, so this "
+                    + "check ignores the ldpi density. To force lint to include it, set the "
+                    + "environment variable `ANDROID_LINT_INCLUDE_LDPI=true`. For more "
+                    + "information, see "
+                    + "https://developer.android.com/guide/practices/screens_support.html.",
+            Category.ICONS,
+            4,
+            Severity.WARNING,
+            new Implementation(IconDetector.class, Scope.RESOURCE_FOLDER_SCOPE)
+    );
+
+    private Map<Project, Map<ResourceFolderType, Map<String, IconEntry>>> mIcons;
+
+    @Override
+    @Nullable
+    public EnumSet<ResourceFolderType> getApplicableFolders() {
+        return EnumSet.of(ResourceFolderType.DRAWABLE, ResourceFolderType.MIPMAP);
+    }
+
+    @Override
+    public void beforeCheckProject(@NonNull Context context) {
+        mIcons = new HashMap<>();
+    }
+
+    @Override
+    public void checkFolder(@NonNull ResourceContext context, @NonNull File folder) {
+        ResourceFolderType folderType = context.getResourceFolderType();
+        if (folderType != ResourceFolderType.DRAWABLE
+                && folderType != ResourceFolderType.MIPMAP) {
+            return;
+        }
+
+        String density = getDensity(folder);
+        if (density == null || "anydpi".equals(density) || "nodpi".equals(density)) {
+            return;
+        }
+
+        Project project = context.getProject();
+        File[] files = folder.listFiles();
+        if (files == null) {
+            return;
+        }
+
+        for (File file : files) {
+            if (!file.isFile() || !isImageFile(file)) {
+                continue;
+            }
+
+            String baseName = getBaseName(file.getName());
+
+            Map<ResourceFolderType, Map<String, IconEntry>> projectMap = mIcons.get(project);
+            if (projectMap == null) {
+                projectMap = new HashMap<>();
+                mIcons.put(project, projectMap);
+            }
+
+            Map<String, IconEntry> typeMap = projectMap.get(folderType);
+            if (typeMap == null) {
+                typeMap = new HashMap<>();
+                projectMap.put(folderType, typeMap);
+            }
+
+            IconEntry entry = typeMap.get(baseName);
+            if (entry == null) {
+                entry = new IconEntry();
+                typeMap.put(baseName, entry);
+            }
+
+            entry.densities.add(density);
+            if (entry.location == null) {
+                entry.location = Location.create(file);
+            }
+        }
+    }
+
+    @Override
+    public void afterCheckProject(@NonNull Context context) {
+        Project project = context.getProject();
+        Map<ResourceFolderType, Map<String, IconEntry>> projectMap = mIcons.get(project);
+        if (projectMap == null) {
+            return;
+        }
+
+        Set<String> required = new HashSet<>(REQUIRED_DENSITIES);
+        if (isIncludeLdpi()) {
+            required.add("ldpi");
+        }
+
+        for (Map.Entry<ResourceFolderType, Map<String, IconEntry>> typeEntry
+                : projectMap.entrySet()) {
+            for (Map.Entry<String, IconEntry> iconEntry : typeEntry.getValue().entrySet()) {
+                IconEntry entry = iconEntry.getValue();
+                Set<String> missing = new TreeSet<>(required);
+                missing.removeAll(entry.densities);
+                if (!missing.isEmpty()) {
+                    String message = String.format(Locale.US,
+                            "The icon `%1$s` is missing the following density versions: %2$s",
+                            iconEntry.getKey(), join(missing));
+                    context.report(ICON_DENSITIES, entry.location, message);
+                }
+            }
+        }
+
+        mIcons.remove(project);
+    }
+
+    @Nullable
+    private static String getDensity(@NonNull File folder) {
+        String[] parts = folder.getName().split("-");
+        for (int i = 1; i < parts.length; i++) {
+            if (DENSITY_NAMES.contains(parts[i])) {
+                return parts[i];
+            }
+        }
+        return null;
+    }
+
+    private static boolean isImageFile(@NonNull File file) {
+        String name = file.getName().toLowerCase(Locale.US);
+        if (name.endsWith(".9.png")) {
+            return true;
+        }
+        int lastDot = name.lastIndexOf('.');
+        if (lastDot == -1 || lastDot == name.length() - 1) {
+            return false;
+        }
+        String ext = name.substring(lastDot + 1);
+        return IMAGE_EXTENSIONS.contains(ext);
+    }
+
+    @NonNull
+    private static String getBaseName(@NonNull String fileName) {
+        if (fileName.endsWith(".9.png")) {
+            return fileName.substring(0, fileName.length() - ".9.png".length());
+        }
+        int lastDot = fileName.lastIndexOf('.');
+        if (lastDot != -1) {
+            return fileName.substring(0, lastDot);
+        }
+        return fileName;
+    }
+
+    private static boolean isIncludeLdpi() {
+        String property = System.getProperty(INCLUDE_LDPI);
+        if (property != null && Boolean.parseBoolean(property)) {
+            return true;
+        }
+        String env = System.getenv(INCLUDE_LDPI);
+        return env != null && Boolean.parseBoolean(env);
+    }
+
+    @NonNull
+    private static String join(@NonNull Set<String> set) {
+        StringBuilder sb = new StringBuilder();
+        for (String s : set) {
+            if (sb.length() > 0) {
+                sb.append(", ");
+            }
+            sb.append(s);
+        }
+        return sb.toString();
+    }
+
+    private static class IconEntry {
+        final Set<String> densities = new HashSet<>();
+        Location location;
+    }
+}

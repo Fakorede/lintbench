@@ -1,0 +1,164 @@
+package com.android.tools.lint.checks;
+
+import com.android.SdkConstants;
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.resources.ResourceFolderType;
+import com.android.resources.ResourceType;
+import com.android.tools.lint.client.api.UElementHandler;
+import com.android.tools.lint.detector.api.AnnotationInfo;
+import com.android.tools.lint.detector.api.AnnotationUsageInfo;
+import com.android.tools.lint.detector.api.AnnotationUsageType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.SourceCodeScanner;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+import com.android.tools.lint.detector.api.interprocedural.CallGraphResult;
+import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiMethod;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import org.jetbrains.uast.UCallExpression;
+import org.jetbrains.uast.UClass;
+import org.jetbrains.uast.UElement;
+import org.jetbrains.uast.ULambdaExpression;
+import org.jetbrains.uast.UReferenceExpression;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+
+public class RegistrationDetector extends Detector implements XmlScanner, SourceCodeScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "Registered",
+            "Class is not registered in the manifest",
+            "Activities, services and content providers should be registered in the " +
+            "`AndroidManifest.xml` file using `<activity>`, `<service>` and `<provider>` tags.\n\n" +
+            "If your activity is simply a parent class intended to be subclassed by other " +
+            "\"real\" activities, make it an abstract class.",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(
+                    RegistrationDetector.class,
+                    EnumSet.of(Scope.MANIFEST, Scope.JAVA_FILE)
+            )
+    );
+
+    private final Set<String> mRegistered = new HashSet<>();
+
+    @Override
+    public void beforeCheckEachProject(@NonNull Context context) {
+        mRegistered.clear();
+    }
+
+    // XmlScanner implementation
+
+    @Nullable
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Arrays.asList("activity", "service", "provider", "receiver", "activity-alias");
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        String name = element.getAttributeNS(SdkConstants.ANDROID_URI, SdkConstants.ATTR_NAME);
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+
+        Document document = element.getOwnerDocument();
+        Element root = document != null ? document.getDocumentElement() : null;
+        String pkg = null;
+        if (root != null && "manifest".equals(root.getTagName())) {
+            pkg = root.getAttribute("package");
+        }
+        if (pkg == null || pkg.isEmpty()) {
+            pkg = context.getProject().getPackage();
+        }
+        if (pkg == null) {
+            pkg = "";
+        }
+
+        String fqcn = resolveClassName(pkg, name);
+        mRegistered.add(fqcn);
+        mRegistered.add(fqcn.replace('$', '.'));
+        mRegistered.add(name);
+        mRegistered.add(name.replace('$', '.'));
+    }
+
+    private static String resolveClassName(@NonNull String pkg, @NonNull String className) {
+        if (className.startsWith(".")) {
+            return pkg + className;
+        } else if (!className.contains(".")) {
+            return pkg.isEmpty() ? className : pkg + "." + className;
+        } else {
+            return className;
+        }
+    }
+
+    // SourceCodeScanner implementation
+
+    @Nullable
+    @Override
+    public List<String> applicableSuperClasses() {
+        return Arrays.asList(
+                "android.app.Activity",
+                "android.app.Service",
+                "android.content.ContentProvider",
+                "android.content.BroadcastReceiver"
+        );
+    }
+
+    @Override
+    public void visitClass(@NonNull JavaContext context, @NonNull UClass declaration) {
+        if (context.getEvaluator().isAbstract(declaration)) {
+            return;
+        }
+
+        String fqcn = declaration.getQualifiedName();
+        if (fqcn == null) {
+            return;
+        }
+
+        // Skip non-static inner classes
+        if (declaration.getContainingClass() != null && !context.getEvaluator().isStatic(declaration)) {
+            return;
+        }
+
+        if (!mRegistered.contains(fqcn)) {
+            String tag = getTag(context, declaration);
+            context.report(
+                    ISSUE,
+                    declaration,
+                    context.getNameLocation(declaration),
+                    "The " + tag + " `" + fqcn + "` is not registered in the manifest"
+            );
+        }
+    }
+
+    private String getTag(@NonNull JavaContext context, @NonNull UClass declaration) {
+        if (context.getEvaluator().inheritsFrom(declaration, "android.app.Activity", false)) {
+            return "<activity>";
+        } else if (context.getEvaluator().inheritsFrom(declaration, "android.app.Service", false)) {
+            return "<service>";
+        } else if (context.getEvaluator().inheritsFrom(declaration, "android.content.ContentProvider", false)) {
+            return "<provider>";
+        } else if (context.getEvaluator().inheritsFrom(declaration, "android.content.BroadcastReceiver", false)) {
+            return "<receiver>";
+        }
+        return "class";
+    }
+}

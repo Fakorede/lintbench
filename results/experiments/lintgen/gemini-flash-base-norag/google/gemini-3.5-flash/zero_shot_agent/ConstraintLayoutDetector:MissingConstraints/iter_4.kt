@@ -1,0 +1,150 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.LayoutDetector
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import org.w3c.dom.Element
+
+class ConstraintLayoutDetector : LayoutDetector() {
+
+    companion object {
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "MissingConstraints",
+            briefDescription = "Missing Constraints in ConstraintLayout",
+            explanation = """
+                The layout editor allows you to place widgets anywhere on the canvas, and it records \
+                the current position with designtime attributes (such as `layout_editor_absoluteX`). \
+                These attributes are **not** applied at runtime, so if you push your layout on a \
+                device, the widgets may appear in a different location than shown in the editor. \
+                To fix this, make sure a widget has both horizontal and vertical constraints by \
+                dragging from the edge connections.
+            """,
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                ConstraintLayoutDetector::class.java,
+                Scope.RESOURCE_FILE_SCOPE
+            )
+        )
+
+        private val HORIZONTAL_CONSTRAINTS = setOf(
+            "layout_constraintLeft_toLeftOf",
+            "layout_constraintLeft_toRightOf",
+            "layout_constraintRight_toLeftOf",
+            "layout_constraintRight_toRightOf",
+            "layout_constraintStart_toStartOf",
+            "layout_constraintStart_toEndOf",
+            "layout_constraintEnd_toStartOf",
+            "layout_constraintEnd_toEndOf"
+        )
+
+        private val VERTICAL_CONSTRAINTS = setOf(
+            "layout_constraintTop_toTopOf",
+            "layout_constraintTop_toBottomOf",
+            "layout_constraintBottom_toTopOf",
+            "layout_constraintBottom_toBottomOf",
+            "layout_constraintBaseline_toBaselineOf"
+        )
+    }
+
+    override fun appliesTo(folderType: ResourceFolderType): Boolean {
+        return folderType == ResourceFolderType.LAYOUT
+    }
+
+    override fun getApplicableElements(): Collection<String> {
+        return listOf(
+            "androidx.constraintlayout.widget.ConstraintLayout",
+            "android.support.constraint.ConstraintLayout",
+            "merge"
+        )
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val isMerge = element.tagName == "merge"
+        if (isMerge) {
+            val parentTag = element.getAttributeNS(SdkConstants.TOOLS_URI, "parentTag")
+            if (parentTag != "androidx.constraintlayout.widget.ConstraintLayout" &&
+                parentTag != "android.support.constraint.ConstraintLayout") {
+                return
+            }
+        }
+
+        val childNodes = element.childNodes
+        for (i in 0 until childNodes.length) {
+            val child = childNodes.item(i)
+            if (child is Element) {
+                checkChild(context, child)
+            }
+        }
+    }
+
+    private fun checkChild(context: XmlContext, element: Element) {
+        val tag = element.tagName
+        if (tag == "requestFocus" || tag == "tag") {
+            return
+        }
+
+        if (tag == "Guideline" || tag.endsWith(".Guideline") ||
+            tag == "Barrier" || tag.endsWith(".Barrier") ||
+            tag == "Group" || tag.endsWith(".Group") ||
+            tag == "Placeholder" || tag.endsWith(".Placeholder") ||
+            tag == "ConstraintHelper" || tag.endsWith(".ConstraintHelper") ||
+            tag == "Flow" || tag.endsWith(".Flow") ||
+            tag == "Layer" || tag.endsWith(".Layer") ||
+            tag == "MotionHelper" || tag.endsWith(".MotionHelper") ||
+            tag == "Constraints" || tag.endsWith(".Constraints")
+        ) {
+            return
+        }
+
+        var hasHorizontal = false
+        var hasVertical = false
+        var hasCircle = false
+
+        val attributes = element.attributes
+        for (i in 0 until attributes.length) {
+            val attr = attributes.item(i)
+            val namespace = attr.namespaceURI
+            if (namespace == SdkConstants.AUTO_URI) {
+                val localName = attr.localName ?: attr.nodeName.substringAfter(':')
+                if (HORIZONTAL_CONSTRAINTS.contains(localName)) {
+                    hasHorizontal = true
+                } else if (VERTICAL_CONSTRAINTS.contains(localName)) {
+                    hasVertical = true
+                } else if (localName == "layout_constraintCircle") {
+                    hasCircle = true
+                }
+            }
+        }
+
+        if (hasCircle) {
+            hasHorizontal = true
+            hasVertical = true
+        }
+
+        val message = when {
+            !hasHorizontal && !hasVertical ->
+                "This view is not constrained. It only has designtime positions, so it will jump to (0,0) at runtime unless you add the constraints"
+            !hasHorizontal ->
+                "This view is not constrained horizontally: at runtime it will jump to the left unless you add a horizontal constraint"
+            !hasVertical ->
+                "This view is not constrained vertically: at runtime it will jump to the top unless you add a vertical constraint"
+            else -> return
+        }
+
+        context.report(
+            ISSUE,
+            element,
+            context.getNameLocation(element),
+            message
+        )
+    }
+}

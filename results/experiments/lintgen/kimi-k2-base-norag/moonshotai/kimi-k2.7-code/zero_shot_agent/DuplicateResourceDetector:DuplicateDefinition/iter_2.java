@@ -1,0 +1,160 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.resources.ResourceType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceXmlDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScannerConstants;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+
+import java.io.File;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
+
+public class DuplicateResourceDetector extends ResourceXmlDetector {
+    public static final Issue ISSUE = Issue.create(
+            "DuplicateDefinition",
+            "Duplicate definitions of resources",
+            "You can define a resource multiple times in different resource folders; that's how "
+                    + "string translations are done, for example. However, defining the same resource "
+                    + "more than once in the same resource folder is likely an error, for example "
+                    + "attempting to add a new resource without realizing that the name is already used, "
+                    + "and so on.",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(DuplicateResourceDetector.class, Scope.RESOURCE_FILE_SCOPE));
+
+    private final Map<Key, Location> mLocations = new HashMap<>();
+
+    @Override
+    public void beforeCheckProject(Context context) {
+        mLocations.clear();
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return XmlScannerConstants.ALL;
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        ResourceFolderType folderType = context.getResourceFolderType();
+        if (folderType == null) {
+            return;
+        }
+
+        Node parent = element.getParentNode();
+        if (parent == null) {
+            return;
+        }
+
+        // File-based resource: the root element of a non-values XML resource file.
+        if (folderType != ResourceFolderType.VALUES
+                && parent.getNodeType() == Node.DOCUMENT_NODE) {
+            File file = context.getFile();
+            File folder = file.getParentFile();
+            if (folder == null) {
+                return;
+            }
+
+            String name = file.getName();
+            int dot = name.lastIndexOf('.');
+            if (dot > 0) {
+                name = name.substring(0, dot);
+            }
+
+            String type = folderType.name().toLowerCase(Locale.US);
+            add(context, folder.getPath(), type, name, context.getLocation(element));
+            return;
+        }
+
+        if (folderType != ResourceFolderType.VALUES) {
+            return;
+        }
+
+        // Value resource: must be a direct child of <resources>.
+        if (!"resources".equals(parent.getNodeName())) {
+            return;
+        }
+
+        ResourceType type = ResourceType.fromXmlTag(element.getTagName());
+        if (type == null) {
+            String itemType = element.getAttribute("type");
+            if (!itemType.isEmpty()) {
+                type = ResourceType.fromXmlTag(itemType);
+            }
+        }
+        if (type == null) {
+            return;
+        }
+
+        String name = element.getAttribute("name");
+        if (name.isEmpty()) {
+            return;
+        }
+
+        File folder = context.getFile().getParentFile();
+        if (folder == null) {
+            return;
+        }
+
+        add(context, folder.getPath(), type.getName(), name, context.getLocation(element));
+    }
+
+    private void add(XmlContext context, String folder, String type, String name,
+            Location location) {
+        Key key = new Key(folder, type, name);
+        Location existing = mLocations.get(key);
+        if (existing == null) {
+            mLocations.put(key, location);
+        } else {
+            context.report(ISSUE, location,
+                    "Duplicate definition of " + type + "/" + name);
+        }
+    }
+
+    private static class Key {
+        private final String folder;
+        private final String type;
+        private final String name;
+
+        Key(String folder, String type, String name) {
+            this.folder = folder;
+            this.type = type;
+            this.name = name;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof Key)) {
+                return false;
+            }
+            Key other = (Key) o;
+            return folder.equals(other.folder)
+                    && type.equals(other.type)
+                    && name.equals(other.name);
+        }
+
+        @Override
+        public int hashCode() {
+            int result = folder.hashCode();
+            result = 31 * result + type.hashCode();
+            result = 31 * result + name.hashCode();
+            return result;
+        }
+    }
+}

@@ -1,0 +1,152 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.JavaContext
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.SourceCodeScanner
+import com.intellij.psi.PsiAnnotation
+import com.intellij.psi.PsiField
+import org.jetbrains.uast.UCallExpression
+import org.jetbrains.uast.UElement
+import org.jetbrains.uast.UExpression
+import org.jetbrains.uast.ULiteralExpression
+import org.jetbrains.uast.UVariable
+
+class SecretDetector : Detector(), SourceCodeScanner {
+
+    companion object {
+        // Patterns for variable names that suggest secrets
+        private val VARIABLE_NAME_PATTERN = Regex(
+            "(?i)(api[_\\-]?key|secret|password|passwd|pwd|token|auth[_\\-]?token|" +
+                "access[_\\-]?key|private[_\\-]?key|credential|api[_\\-]?secret|" +
+                "client[_\\-]?secret|api_token|apitoken|apikey|authkey|auth_key)"
+        )
+
+        // Patterns that look like actual secret values (not placeholders)
+        private val GOOGLE_API_KEY_PATTERN = Regex("AIza[0-9A-Za-z\\-_]{35}")
+        private val AWS_KEY_PATTERN = Regex("AKIA[0-9A-Z]{16}")
+        private val HEX_SECRET_PATTERN = Regex("[0-9a-fA-F]{32,}")
+        private val LONG_ALPHANUMERIC_PATTERN = Regex("[A-Za-z0-9_\\-]{20,}")
+        private val BASE64_PATTERN = Regex("[0-9A-Za-z+/]{40,}={0,2}")
+
+        private val INNOCUOUS_VALUES = setOf(
+            "", "null", "true", "false", "0", "1", "-1",
+            "your_api_key", "your-api-key", "YOUR_API_KEY", "YOUR-API-KEY",
+            "api_key", "API_KEY", "secret", "SECRET", "password", "PASSWORD",
+            "token", "TOKEN", "placeholder", "PLACEHOLDER", "example", "EXAMPLE",
+            "changeme", "CHANGEME", "todo", "TODO", "fixme", "FIXME",
+            "insert_your_api_key_here", "INSERT_YOUR_API_KEY_HERE",
+            "your_secret_here", "YOUR_SECRET_HERE",
+        )
+
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "SecretInSource",
+            briefDescription = "Secret in source code",
+            explanation = """
+                Including secrets, such as API keys, in source code is a security risk. \
+                It is generally best practice to not include API keys in source code, \
+                and instead use something like the Secrets Gradle Plugin for Android.
+            """,
+            category = Category.SECURITY,
+            priority = 9,
+            severity = Severity.WARNING,
+            moreInfo = "https://developers.google.com/maps/documentation/android-sdk/secrets-gradle-plugin",
+            implementation = Implementation(
+                SecretDetector::class.java,
+                Scope.JAVA_FILE_SCOPE
+            )
+        )
+
+        private fun looksLikeSecretVariableName(name: String): Boolean {
+            return VARIABLE_NAME_PATTERN.containsMatchIn(name)
+        }
+
+        private fun isPlaceholderValue(value: String): Boolean {
+            val trimmed = value.trim().lowercase()
+            if (INNOCUOUS_VALUES.contains(value.trim())) return true
+            if (INNOCUOUS_VALUES.contains(trimmed)) return true
+            // Check for placeholder-like patterns
+            if (trimmed.contains("your") || trimmed.contains("placeholder") ||
+                trimmed.contains("example") || trimmed.contains("changeme") ||
+                trimmed.contains("insert") || trimmed.contains("replace") ||
+                trimmed.contains("todo") || trimmed.contains("fixme") ||
+                trimmed.contains("here") || trimmed.contains("xxx")
+            ) {
+                return true
+            }
+            return false
+        }
+
+        private fun looksLikeSecretValue(value: String): Boolean {
+            if (value.length < 8) return false
+            if (isPlaceholderValue(value)) return false
+            // Too many spaces suggests it's a sentence/description, not a secret
+            if (value.contains(" ") && value.split(" ").size > 3) return false
+
+            return GOOGLE_API_KEY_PATTERN.containsMatchIn(value) ||
+                AWS_KEY_PATTERN.containsMatchIn(value) ||
+                HEX_SECRET_PATTERN.containsMatchIn(value) ||
+                BASE64_PATTERN.containsMatchIn(value) ||
+                LONG_ALPHANUMERIC_PATTERN.containsMatchIn(value)
+        }
+
+        private fun getStringLiteralValue(expression: UExpression?): String? {
+            if (expression is ULiteralExpression) {
+                val value = expression.value
+                if (value is String && value.isNotBlank()) {
+                    return value
+                }
+            }
+            return null
+        }
+    }
+
+    override fun getApplicableUastTypes(): List<Class<out UElement>> {
+        return listOf(UVariable::class.java)
+    }
+
+    override fun createUastHandler(context: JavaContext): com.android.tools.lint.client.api.UElementHandler {
+        return object : com.android.tools.lint.client.api.UElementHandler() {
+            override fun visitVariable(node: UVariable) {
+                val name = node.name ?: return
+                val initializer = node.uastInitializer ?: return
+
+                val stringValue = getStringLiteralValue(initializer) ?: return
+
+                if (isPlaceholderValue(stringValue)) return
+
+                val nameMatchesSecret = looksLikeSecretVariableName(name)
+
+                // Also check if the value itself looks like a known secret format
+                // even if the variable name doesn't match
+                val valueIsKnownSecretFormat = GOOGLE_API_KEY_PATTERN.containsMatchIn(stringValue) ||
+                    AWS_KEY_PATTERN.containsMatchIn(stringValue)
+
+                if (nameMatchesSecret || valueIsKnownSecretFormat) {
+                    if (looksLikeSecretValue(stringValue)) {
+                        context.report(
+                            ISSUE,
+                            initializer,
+                            context.getLocation(initializer),
+                            "Possible secret found in source code: `$name` is assigned a hardcoded string that looks like a secret. " +
+                                "Consider using the Secrets Gradle Plugin for Android instead."
+                        )
+                    } else if (nameMatchesSecret && stringValue.length >= 8) {
+                        context.report(
+                            ISSUE,
+                            initializer,
+                            context.getLocation(initializer),
+                            "Possible secret found in source code: `$name` appears to be a secret or credential hardcoded in source. " +
+                                "Consider using the Secrets Gradle Plugin for Android instead."
+                        )
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,230 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+public class ArraySizeDetector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "InconsistentArrays",
+            "Inconsistencies in array element counts",
+            "When an array is translated in a different locale, it should normally have "
+                    + "the same number of elements as the original array. When adding or "
+                    + "removing elements to an array, it is easy to forget to update all the "
+                    + "locales, and this lint warning finds inconsistencies like these.\n\n"
+                    + "Note however that there may be cases where you really want to declare a "
+                    + "different number of array items in each configuration (for example where "
+                    + "the array represents available options, and those options differ for "
+                    + "different layout orientations and so on), so use your own judgment to "
+                    + "decide if this is really an error.\n\n"
+                    + "You can suppress this error type if it finds false errors in your project.",
+            Category.MESSAGES,
+            7,
+            Severity.WARNING,
+            new Implementation(ArraySizeDetector.class, Scope.ALL_RESOURCES_SCOPE)
+    );
+
+    private final Map<String, List<ArrayDeclaration>> mArrays = new HashMap<>();
+
+    @Override
+    public void beforeCheckProject(Context context) {
+        if (context.getProject() == context.getMainProject()) {
+            mArrays.clear();
+        }
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Arrays.asList("string-array", "integer-array", "array");
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        if (context.getResourceFolderType() != ResourceFolderType.VALUES) {
+            return;
+        }
+
+        String name = element.getAttribute("name");
+        if (name.isEmpty()) {
+            return;
+        }
+
+        int childCount = 0;
+        NodeList children = element.getChildNodes();
+        for (int i = 0; i < children.getLength(); i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() == Node.ELEMENT_NODE) {
+                childCount++;
+            }
+        }
+
+        File parentFile = context.file.getParentFile();
+        String folderName = parentFile != null ? parentFile.getName() : "values";
+        Location location = context.getLocation(element);
+
+        List<ArrayDeclaration> list = mArrays.computeIfAbsent(name, k -> new ArrayList<>());
+        boolean exists = false;
+        for (ArrayDeclaration decl : list) {
+            if (decl.folderName.equals(folderName)) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            list.add(new ArrayDeclaration(folderName, childCount, location));
+        }
+    }
+
+    @Override
+    public void afterCheckProject(Context context) {
+        if (context.getProject() == context.getMainProject()) {
+            collectArraysFromProject(context);
+            checkArrays(context);
+        }
+    }
+
+    private void collectArraysFromProject(Context context) {
+        List<File> resourceFolders = context.getProject().getResourceFolders();
+        for (File resFolder : resourceFolders) {
+            File[] subdirs = resFolder.listFiles();
+            if (subdirs == null) continue;
+            for (File subdir : subdirs) {
+                String name = subdir.getName();
+                if (name.startsWith("values")) {
+                    File[] xmlFiles = subdir.listFiles();
+                    if (xmlFiles == null) continue;
+                    for (File xmlFile : xmlFiles) {
+                        if (xmlFile.getName().endsWith(".xml")) {
+                            parseValueFile(xmlFile, name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void parseValueFile(File file, String folderName) {
+        try {
+            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+            DocumentBuilder builder = factory.newDocumentBuilder();
+            Document doc = builder.parse(file);
+            Element root = doc.getDocumentElement();
+            if (root == null) return;
+            NodeList children = root.getChildNodes();
+            for (int i = 0; i < children.getLength(); i++) {
+                Node child = children.item(i);
+                if (child.getNodeType() == Node.ELEMENT_NODE) {
+                    Element element = (Element) child;
+                    String tagName = element.getTagName();
+                    if ("string-array".equals(tagName) || "integer-array".equals(tagName) || "array".equals(tagName)) {
+                        String arrayName = element.getAttribute("name");
+                        if (!arrayName.isEmpty()) {
+                            int childCount = 0;
+                            NodeList arrayChildren = element.getChildNodes();
+                            for (int j = 0; j < arrayChildren.getLength(); j++) {
+                                Node arrayChild = arrayChildren.item(j);
+                                if (arrayChild.getNodeType() == Node.ELEMENT_NODE) {
+                                    childCount++;
+                                }
+                            }
+
+                            List<ArrayDeclaration> list = mArrays.computeIfAbsent(arrayName, k -> new ArrayList<>());
+                            boolean exists = false;
+                            for (ArrayDeclaration decl : list) {
+                                if (decl.folderName.equals(folderName)) {
+                                    exists = true;
+                                    break;
+                                }
+                            }
+                            if (!exists) {
+                                Location location = Location.create(file);
+                                list.add(new ArrayDeclaration(folderName, childCount, location));
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Ignore parsing errors for other files
+        }
+    }
+
+    private void checkArrays(Context context) {
+        for (Map.Entry<String, List<ArrayDeclaration>> entry : mArrays.entrySet()) {
+            String arrayName = entry.getKey();
+            List<ArrayDeclaration> decls = entry.getValue();
+            if (decls.size() <= 1) {
+                continue;
+            }
+
+            ArrayDeclaration defaultDecl = null;
+            for (ArrayDeclaration decl : decls) {
+                if ("values".equals(decl.folderName)) {
+                    defaultDecl = decl;
+                    break;
+                }
+            }
+
+            if (defaultDecl == null) {
+                defaultDecl = decls.get(0);
+            }
+
+            int templateSize = defaultDecl.size;
+            for (ArrayDeclaration decl : decls) {
+                if (decl.size != templateSize) {
+                    String message = String.format(
+                            "Array `%1$s` has an inconsistent number of items (%2$d in `%3$s`, but %4$d in `%5$s`)",
+                            arrayName,
+                            decl.size,
+                            decl.folderName,
+                            templateSize,
+                            defaultDecl.folderName
+                    );
+                    Location location = decl.location;
+                    if (location != null) {
+                        if (defaultDecl.location != null && decl != defaultDecl) {
+                            Location secondary = defaultDecl.location;
+                            secondary.setMessage(String.format("Declaration in `%1$s` with %2$d items", defaultDecl.folderName, defaultDecl.size));
+                            location.setSecondary(secondary);
+                        }
+                        context.report(ISSUE, location, message);
+                    }
+                }
+            }
+        }
+    }
+
+    private static class ArrayDeclaration {
+        final String folderName;
+        final int size;
+        final Location location;
+
+        ArrayDeclaration(String folderName, int size, Location location) {
+            this.folderName = folderName;
+            this.size = size;
+            this.location = location;
+        }
+    }
+}

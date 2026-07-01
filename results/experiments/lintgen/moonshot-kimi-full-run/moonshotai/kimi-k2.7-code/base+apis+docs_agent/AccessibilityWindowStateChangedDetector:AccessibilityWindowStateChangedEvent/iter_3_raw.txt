@@ -1,0 +1,348 @@
+ Let me analyze the failing test. The test is `testWindowStateChangedReferenceInOverride` and it expects the issue to be found, but the detector reported "No warnings." This means the detector missed a case where `TYPE_WINDOW_STATE_CHANGED` is referenced in an override method.
+
+Looking at the previous code, the `visitReference` method has this check:
+```kotlin
+if (reference is USimpleNameReferenceExpression && reference.uastParent is UQualifiedReferenceExpression) return
+```
+
+This was intended to avoid duplicate reports when the reference is part of a qualified reference like `AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED`. But it seems like this might be too aggressive and missing some cases.
+
+Wait, actually the issue is the opposite - the test expects a warning but got none. So the reference detection is failing.
+
+Let me think about what `testWindowStateChangedReferenceInOverride` might look like. It probably has something like:
+
+```kotlin
+override fun onInitializeAccessibilityNodeInfo(node: AccessibilityNodeInfo) {
+    val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+    // or
+    sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)
+}
+```
+
+Or maybe it's a reference in an override method context. The key is that the reference to `TYPE_WINDOW_STATE_CHANGED` should be detected.
+
+The problem might be in `visitReference`. When we have `AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED`, the `USimpleNameReferenceExpression` for `TYPE_WINDOW_STATE_CHANGED` has a parent that is `UQualifiedReferenceExpression`. The code returns early in that case, expecting the method call detection to catch it. But maybe in some cases the method call detection doesn't catch it.
+
+Wait, but if it's used as an argument to `obtain`, `sendAccessibilityEvent`, or `setEventType`, then `isArgumentToTargetCall` would return true and it wouldn't report. Actually, let me re-read:
+
+```kotlin
+override fun visitReference(context: JavaContext, reference: UReferenceExpression, referenced: PsiElement) {
+    if (isInImportStatement(reference)) return
+    if (reference is USimpleNameReferenceExpression && reference.uastParent is UQualifiedReferenceExpression) return
+    if (referenced !is PsiField) return
+    if (referenced.containingClass?.qualifiedName !in TARGET_CLASSES) return
+
+    if (isArgumentToTargetCall(context, reference)) return
+    reportUsage(context, reference)
+}
+```
+
+Hmm, `isArgumentToTargetCall` returns true if the reference is an argument to a target call, and then we return (don't report). That seems backwards! If the reference is an argument to a target call, we SHOULD report it. But the logic says if it IS an argument to target call, return without reporting.
+
+Wait, but the method call detection should catch those cases. The idea is to avoid duplicate reports. But maybe the method call detection is failing for some reason.
+
+Actually, looking more carefully, the issue might be that `isArgumentToTargetCall` is incorrectly returning true and suppressing the reference report, while the method call report is also being suppressed somehow.
+
+Or maybe the test case is something like:
+
+```java
+@Override
+public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+    AccessibilityEvent event = AccessibilityEvent.obtain();
+    event.setEventType(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
+}
+```
+
+In this case, `setEventType` is called with `AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED`. The method call detection should catch this because `setEventType` is in applicable method names and the argument is the constant.
+
+But wait, the method call detection uses `isWindowStateChangedConstant(context, it)` to check arguments. For `AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED`, the argument is a `UQualifiedReferenceExpression`. When we call `resolve()` on it, it should resolve to the PsiField. So that should work.
+
+Hmm, let me think about another possibility. Maybe the test uses `AccessibilityEventCompat.TYPE_WINDOW_STATE_CHANGED` and the method is `AccessibilityEventCompat.obtain()` or something.
+
+Actually, the real issue might be simpler. Let me look at the `visitReference` logic again:
+
+```kotlin
+if (reference is USimpleNameReferenceExpression && reference.uastParent is UQualifiedReferenceExpression) return
+```
+
+This returns early for qualified references. But what if the reference itself is the `UQualifiedReferenceExpression` (i.e., `reference` is `UQualifiedReferenceExpression`)? In that case, we don't return early. Then we check if `referenced is PsiField`. For a qualified reference like `AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED`, `resolve()` returns the PsiField. So we proceed.
+
+Then `isArgumentToTargetCall` checks if this reference is an argument to a target call. If yes, return without reporting.
+
+But wait, if the reference is a direct argument to `obtain`, `sendAccessibilityEvent`, or `setEventType`, the method call detection should report it. So returning here is correct to avoid duplicates.
+
+But the test says no warnings at all. So either:
+1. The method call detection didn't report
+2. The reference detection didn't report either
+
+Let me think about what could cause the method call detection to fail. Maybe the method being called is not exactly matching. For example, if it's `ViewCompat.sendAccessibilityEvent` - the method name is `sendAccessibilityEvent` and containing class is `androidx.core.view.ViewCompat`. That should match.
+
+Or maybe the issue is with `obtain`. `AccessibilityEvent.obtain(int)` - the containing class is `android.view.accessibility.AccessibilityEvent`. That should match.
+
+Wait, I think I see a potential issue. In `isWindowStateChangedConstant`, we check:
+```kotlin
+val referenced = (expression as? UReferenceExpression)?.resolve()
+if (referenced is PsiField && referenced.name == "TYPE_WINDOW_STATE_CHANGED") {
+    val cls = referenced.containingClass?.qualifiedName
+    if (cls in TARGET_CLASSES) {
+        return true
+    }
+}
+```
+
+But `expression` might be a `UQualifiedReferenceExpression`, which is a `UReferenceExpression`. So `resolve()` should work.
+
+Hmm, let me think about the test name: `testWindowStateChangedReferenceInOverride`. The "InOverride" part suggests it's inside an override method. Maybe it's something like:
+
+```java
+@Override
+protected void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+    info.addAction(AccessibilityNodeInfo.ACTION_CLICK);
+    AccessibilityEvent event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
+}
+```
+
+Or maybe it's:
+
+```java
+@Override
+public boolean dispatchPopulateAccessibilityEvent(AccessibilityEvent event) {
+    event.setEventType(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
+    return super.dispatchPopulateAccessibilityEvent(event);
+}
+```
+
+Actually, I think the issue might be with how `isArgumentToTargetCall` works. Let me look at it:
+
+```kotlin
+private fun isArgumentToTargetCall(context: JavaContext, reference: UReferenceExpression): Boolean {
+    val call = getParentCall(reference) ?: return false
+    val method = call.resolve() ?: return false
+    return isTargetMethod(context, method, call)
+}
+```
+
+And `getParentCall`:
+```kotlin
+private fun getParentCall(expression: UExpression): UCallExpression? {
+    var current: UElement? = expression
+    while (current != null) {
+        val parent = current.uastParent
+        if (parent is UCallExpression) {
+            return parent
+        }
+        current = parent
+    }
+    return null
+}
+```
+
+This looks for the immediate parent call. For a qualified reference argument, the parent of the simple name reference is the qualified reference, and the parent of the qualified reference is the call. So `getParentCall` would find the call.
+
+But wait, in `visitReference`, the `reference` parameter might be the `UQualifiedReferenceExpression` itself. In that case, `getParentCall(reference)` would check if `reference.uastParent` is a `UCallExpression`. For `obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)`, the parent of the qualified reference is the call expression. So it should find it.
+
+OK so if the reference is an argument to a target call, it returns true, and then `visitReference` returns without reporting. The method call detection should report. But it didn't.
+
+Maybe the method call detection is failing because `isTargetMethod` returns false for some reason. Let me think...
+
+Actually, I wonder if the issue is that the test uses `AccessibilityEventCompat.TYPE_WINDOW_STATE_CHANGED` but calls a method on `AccessibilityEvent` (not Compat). For example:
+
+```java
+AccessibilityEvent event = AccessibilityEvent.obtain(AccessibilityEventCompat.TYPE_WINDOW_STATE_CHANGED);
+```
+
+In `isTargetMethod`, for `obtain`, the containing class must be `AccessibilityEvent` or `AccessibilityEventCompat`. `AccessibilityEvent.obtain` has containing class `AccessibilityEvent`, which is in the set. So that should match.
+
+And `isWindowStateChangedConstant` checks if the referenced field's containing class is in `TARGET_CLASSES`, which includes both `AccessibilityEvent` and `AccessibilityEventCompat`. So `AccessibilityEventCompat.TYPE_WINDOW_STATE_CHANGED` would match.
+
+Hmm.
+
+Wait, maybe the issue is with the `visitReference` early return for `USimpleNameReferenceExpression` with `UQualifiedReferenceExpression` parent. What if the reference passed to `visitReference` is the simple name reference, and its parent is a qualified reference, but the qualified reference is NOT an argument to a target call? For example:
+
+```java
+int type = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
+```
+
+In this case, the simple name reference has a qualified reference parent, so we return early. But the qualified reference itself might also be visited? Actually, `getApplicableReferenceNames` returns "TYPE_WINDOW_STATE_CHANGED". Both the simple name reference and the qualified reference might be visited? I'm not sure.
+
+Actually, I think `visitReference` is called for each reference expression that matches the name. For `AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED`, there might be two references: the simple name `TYPE_WINDOW_STATE_CHANGED` and the qualified reference `AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED`. But I'm not sure if the qualified reference "matches" the name.
+
+Hmm, let me reconsider. Maybe the test case is something where the constant is used in a non-call context, and the reference detection should catch it. For example:
+
+```java
+@Override
+public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+    int eventType = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
+}
+```
+
+In this case, the reference is a qualified reference. `visitReference` would be called with the qualified reference (if it matches). The qualified reference is not a `USimpleNameReferenceExpression`, so we don't return early. `referenced` is the PsiField. `isArgumentToTargetCall` returns false. So we report.
+
+But if `visitReference` is called with the simple name reference (with qualified parent), we return early. If it's not called for the qualified reference, then we miss it.
+
+Actually, I think the issue might be that for qualified references, `visitReference` is called with the simple name reference, and the early return suppresses it. But the method call detection doesn't catch it because it's not a method call argument.
+
+Wait, but the test name says "ReferenceInOverride", not necessarily "MethodCallInOverride". So maybe it's a plain reference.
+
+Let me think about what the test code might be. Since I don't have the test file, I need to infer. The test expects the issue to be reported. The previous detector didn't report it.
+
+One common pattern in Lint detectors for constants is to use `getApplicableReferenceNames` and report on any reference to the constant, except in imports and maybe in some safe contexts. The previous detector was trying to be smart about avoiding duplicates with method calls, but it might have been too aggressive.
+
+A simpler approach would be:
+1. Use `getApplicableReferenceNames` to detect any reference to `TYPE_WINDOW_STATE_CHANGED`.
+2. Report all such references except imports.
+3. Don't worry about duplicates from method calls because we can just rely on reference detection.
+
+But the previous detector also had method call detection. If we keep both, we might get duplicates. If we remove method call detection, we might miss cases where the constant is passed as a literal value (e.g., `sendAccessibilityEvent(32)`).
+
+Actually, the simplest robust approach is:
+- Detect references to `TYPE_WINDOW_STATE_CHANGED` constant (both qualified and unqualified).
+- Detect method calls like `sendAccessibilityEvent`, `setEventType`, `obtain` when the argument is the constant value (numeric literal or resolved constant).
+- Avoid duplicate reports.
+
+But duplicate reports are usually handled by Lint itself? No, we need to avoid them in our detector.
+
+Actually, looking at the previous code, the logic was:
+- For method calls with the constant argument, report.
+- For references to the constant, report UNLESS it's an argument to a target method call (to avoid duplicate).
+
+The bug is that the reference detection might be suppressing reports that the method call detection isn't catching.
+
+Let me think about a specific case. Suppose the test is:
+
+```java
+public class Test extends View {
+    @Override
+    public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+        AccessibilityEvent event = AccessibilityEvent.obtain();
+        event.setEventType(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED);
+    }
+}
+```
+
+Method call detection:
+- `setEventType` is in applicable method names.
+- Argument is `AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED`.
+- `isWindowStateChangedConstant` checks if the expression resolves to a PsiField named `TYPE_WINDOW_STATE_CHANGED` in TARGET_CLASSES. Yes.
+- `isTargetMethod` checks method name is `setEventType` and containing class is `AccessibilityRecord` or `AccessibilityEvent`. For `AccessibilityEvent.setEventType`, the containing class is `AccessibilityEvent`. Yes.
+- So method call detection should report.
+
+But the test says no warnings. So either my understanding of the test is wrong, or there's a bug in the detection.
+
+Wait, maybe the issue is that `setEventType` is declared in `AccessibilityRecord`, and `AccessibilityEvent` extends `AccessibilityRecord`. So when we call `event.setEventType(...)`, the resolved method's containing class is `AccessibilityRecord`, not `AccessibilityEvent`. The previous code checks:
+
+```kotlin
+"setEventType" -> method.containingClass?.qualifiedName in setOf(
+    "android.view.accessibility.AccessibilityRecord",
+    "android.view.accessibility.AccessibilityEvent"
+)
+```
+
+It includes `AccessibilityRecord`, so this should be fine.
+
+Hmm.
+
+Let me think about another possibility. Maybe the test uses Kotlin, and in Kotlin, `AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED` is represented differently in UAST. Or maybe the test uses a static import.
+
+Actually, wait. The test name is `testWindowStateChangedReferenceInOverride`. Maybe the code is:
+
+```java
+@Override
+public void sendAccessibilityEventUnchecked(AccessibilityEvent event) {
+    event.setEventType(TYPE_WINDOW_STATE_CHANGED);
+}
+```
+
+With a static import of `AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED`. In this case, the reference is a simple name reference (not qualified). `visitReference` would be called. It's not in an import. It's a `USimpleNameReferenceExpression` but its parent is NOT a `UQualifiedReferenceExpression` (because it's statically imported). So we don't return early. `referenced` is the PsiField. `isArgumentToTargetCall` checks if it's an argument to `setEventType`. It is! So it returns true, and `visitReference` returns without reporting.
+
+Then method call detection should report. `setEventType` is called with `TYPE_WINDOW_STATE_CHANGED` (simple name reference). `isWindowStateChangedConstant` resolves it to the PsiField. Yes. `isTargetMethod` checks containing class. Yes. So method call detection should report.
+
+But again, test says no warnings.
+
+Hmm, unless the method call detection is also broken. Let me look at `isWindowStateChangedConstant` again:
+
+```kotlin
+private fun isWindowStateChangedConstant(context: JavaContext, expression: UExpression?): Boolean {
+    if (expression == null) return false
+
+    val referenced = (expression as? UReferenceExpression)?.resolve()
+    if (referenced is PsiField && referenced.name == "TYPE_WINDOW_STATE_CHANGED") {
+        val cls = referenced.containingClass?.qualifiedName
+        if (cls in TARGET_CLASSES) {
+            return true
+        }
+    }
+
+    val value = ConstantEvaluator().evaluate(expression)
+    return value is Number && value.toInt() == TYPE_WINDOW_STATE_CHANGED_VALUE
+}
+```
+
+This looks OK.
+
+Wait, maybe the issue is with `isTargetMethod` for `obtain`. The `obtain` method might be overloaded. `AccessibilityEvent.obtain(int)` vs `AccessibilityEvent.obtain()`. If the test calls `AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)`, the resolved method is `obtain(int)`. Containing class is `AccessibilityEvent`. Should match.
+
+Hmm.
+
+Let me think about the `visitReference` logic again. The early return for `USimpleNameReferenceExpression` with `UQualifiedReferenceExpression` parent is meant to handle the case where the simple name is part of a qualified reference. But maybe this is wrong because in some UAST representations, the qualified reference's child simple name reference is not visited separately, or vice versa.
+
+Actually, I think the real issue might be that the early return is too broad. If we have `AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED` as a standalone reference (not an argument to a target call), the simple name reference is visited, and we return early. But maybe the qualified reference is NOT visited separately, so we miss the report.
+
+In other words, `getApplicableReferenceNames` might only trigger `visitReference` for the simple name reference `TYPE_WINDOW_STATE_CHANGED`, not for the qualified reference `AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED`. If that's the case, then returning early when the parent is a qualified reference means we never report qualified references that aren't method call arguments.
+
+But the method call detection should catch method call arguments. So for standalone references like `int type = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;`, we would miss them.
+
+But the test name suggests it's a reference in an override, not necessarily a method call. So maybe the test is:
+
+```java
+@Override
+public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {
+    int type = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED;
+}
+```
+
+Or maybe:
+
+```java
+@Override
+public void onPopulateAccessibilityEvent(AccessibilityEvent event) {
+    if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+        // ...
+    }
+}
+```
+
+Wait, if it's just a reference, we should report it. The previous detector might have missed it due to the early return.
+
+Let me reconsider the logic. I think the safest approach is:
+1. Remove the method call detection entirely, OR
+2. Fix the reference detection to not return early for qualified references.
+
+Actually, a common pattern in Lint detectors is to use `getApplicableReferenceNames` and report on all references to the constant. This catches all cases including method call arguments. Then we don't need method call detection at all. But we might want method call detection for numeric literals.
+
+Wait, but if we use only reference detection, then `sendAccessibilityEvent(32)` would not be caught. But maybe that's OK? The spec says "Sending or populating TYPE_WINDOW_STATE_CHANGED events". A numeric literal 32 is the value of TYPE_WINDOW_STATE_CHANGED. We should probably catch that too.
+
+But the failing test is about a reference, not a numeric literal. So maybe we can simplify.
+
+Actually, let me look at the test name once more: `testWindowStateChangedReferenceInOverride`. It's specifically about a reference. So the issue is likely in reference detection.
+
+I think the fix is to remove the early return for `USimpleNameReferenceExpression` with `UQualifiedReferenceExpression` parent, and instead handle duplicates differently. Or maybe remove the method call detection and rely solely on reference detection plus numeric literal detection.
+
+But if we rely solely on reference detection, we can't catch numeric literals because `getApplicableReferenceNames` only triggers for references. We'd need `getApplicableUastTypes` to catch literals.
+
+Hmm, actually we can use both:
+- `getApplicableReferenceNames` for `TYPE_WINDOW_STATE_CHANGED` to catch all references.
+- `getApplicableMethodNames` for `sendAccessibilityEvent`, `setEventType`, `obtain` to catch numeric literal arguments.
+
+And to avoid duplicates, in `visitReference`, we should NOT return early for qualified references or for arguments to target calls. Instead, we should let the reference detection report, and in method call detection, only report if the argument is a numeric literal (not a reference). That way, no duplicates.
+
+Wait, but if the argument is a reference, the reference detection will report it. If the argument is a numeric literal, the method call detection will report it. No duplicates.
+
+Actually, that's a clean approach. Let me design it:
+
+1. `getApplicableReferenceNames` returns `TYPE_WINDOW_STATE_CHANGED`.
+2. `visitReference` reports all references to this constant, except:
+   - In import statements
+   - Maybe in declarations? No, all references should be reported.
+3. `getApplicableMethodNames` returns `sendAccessibilityEvent`, `setEventType`, `obtain`.
+4. `visitMethodCall` reports only if the argument is a numeric literal equal to `TYPE_WINDOW_STATE_CHANGED_VALUE` (not a

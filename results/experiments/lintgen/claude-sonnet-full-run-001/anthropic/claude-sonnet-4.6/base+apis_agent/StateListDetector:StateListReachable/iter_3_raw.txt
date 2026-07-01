@@ -1,0 +1,119 @@
+Looking at the test failure, `testStates3` expects a warning but gets "No warnings." This suggests there's a case where an item has no state attributes but the current `hasStateAttribute` check isn't detecting it correctly, OR there's a case where an item has only non-state attributes (like `android:drawable`) and should be considered "unqualified."
+
+The issue is likely that my `hasStateAttribute` check is correct for items WITH state attributes, but the problem might be with items that have attributes like `android:drawable` but no `state_*` attributes - those should be considered unqualified (catch-all).
+
+Wait, looking more carefully - the test passes for some cases but fails for `testStates3`. The issue might be that `testStates3` has a selector where an item without state qualifiers appears before the last item, but my code isn't detecting it. 
+
+The most likely issue: the `hasStateAttribute` check might be failing because the attributes use namespace prefixes like `android:state_pressed` - and my check for `name.contains(":state_")` should catch that. But wait - maybe the issue is with items that have `android:drawable` only (no state attributes) - those ARE unqualified and should trigger warnings for subsequent items.
+
+Actually, re-reading: the problem might be that `testStates3` tests a case where an item has attributes but none are state attributes (e.g., only `android:drawable`), making it a catch-all. My code should handle this... unless the XML uses a different structure.
+
+Let me reconsider - perhaps `testStates3` involves nested selectors or items with `android:color` but no state. The fix should ensure we properly identify items with ONLY non-state attributes as unqualified.
+
+The logic looks correct. Maybe the issue is that `Scope.RESOURCE_FILE` needs to be a set differently, or the `appliesTo` needs to specifically return true for drawable/color folders. Let me check if the scope enum set is correct.
+
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumSet;
+
+public class StateListDetector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "StateListReachable",
+            "Unreachable state in a `<selector>`",
+            "In a selector, only the last child in the state list should omit a state " +
+            "qualifier. If not, all subsequent items in the list will be ignored since " +
+            "the given item will match all.",
+            Category.CORRECTNESS,
+            5,
+            Severity.WARNING,
+            new Implementation(
+                    StateListDetector.class,
+                    EnumSet.of(Scope.RESOURCE_FILE)));
+
+    private static final String TAG_SELECTOR = "selector";
+    private static final String TAG_ITEM = "item";
+
+    public StateListDetector() {
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Collections.singletonList(TAG_SELECTOR);
+    }
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.DRAWABLE
+                || folderType == ResourceFolderType.COLOR
+                || folderType == ResourceFolderType.ANIM
+                || folderType == ResourceFolderType.ANIMATOR;
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        NodeList children = element.getChildNodes();
+        boolean foundUnqualifiedItem = false;
+        int unqualifiedIndex = 0;
+        int itemIndex = 0;
+
+        for (int i = 0, n = children.getLength(); i < n; i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+
+            Element item = (Element) child;
+            if (!TAG_ITEM.equals(item.getTagName())) {
+                continue;
+            }
+
+            itemIndex++;
+
+            if (foundUnqualifiedItem) {
+                context.report(ISSUE, item, context.getLocation(item),
+                        "This item is unreachable because a previous item (item #" +
+                        unqualifiedIndex +
+                        ") is not constrained by any state and will always be matched");
+            } else if (!hasStateAttribute(item)) {
+                foundUnqualifiedItem = true;
+                unqualifiedIndex = itemIndex;
+            }
+        }
+    }
+
+    private static boolean hasStateAttribute(Element item) {
+        NamedNodeMap attributes = item.getAttributes();
+        if (attributes == null) {
+            return false;
+        }
+        for (int i = 0, n = attributes.getLength(); i < n; i++) {
+            Attr attr = (Attr) attributes.item(i);
+            String localName = attr.getLocalName();
+            String name = attr.getName();
+            if ((localName != null && localName.startsWith("state_")) ||
+                (name != null && (name.startsWith("state_") || name.contains(":state_")))) {
+                return true;
+            }
+        }
+        return false;
+    }
+}

@@ -1,0 +1,95 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Incident
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.JavaContext
+import com.android.tools.lint.detector.api.LintMap
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.SourceCodeScanner
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import com.intellij.psi.PsiMethod
+import java.util.EnumSet
+import org.jetbrains.uast.UCallExpression
+import org.w3c.dom.Element
+
+class PackageVisibilityDetector : Detector(), SourceCodeScanner, XmlScanner {
+
+    companion object {
+        private val IMPLEMENTATION = Implementation(
+            PackageVisibilityDetector::class.java,
+            EnumSet.of(Scope.JAVA_FILE, Scope.RESOURCE_FILE),
+        )
+
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "QueryAllPackagesPermission",
+            briefDescription = "Using the QUERY_ALL_PACKAGES permission",
+            explanation = """
+                If you need to query or interact with other installed apps, you should be using a \
+                `<queries>` declaration in your manifest. Using the QUERY_ALL_PACKAGES permission in \
+                order to see all installed apps is rarely necessary, and most apps on Google Play are \
+                not allowed to have this permission.
+            """.trimIndent(),
+            category = Category.COMPLIANCE,
+            priority = 8,
+            severity = Severity.ERROR,
+            implementation = IMPLEMENTATION,
+        )
+
+        @JvmField
+        val QUERY_PERMISSIONS_NEEDED = Issue.create(
+            id = "QueryPermissionsNeeded",
+            briefDescription = "Using APIs affected by package visibility",
+            explanation = """
+                Apps targeting Android 11 (API 30) or higher only see a filtered list of installed apps \
+                by default. To query or interact with other apps, you must declare them using the \
+                `<queries>` element in your manifest.
+            """.trimIndent(),
+            category = Category.COMPLIANCE,
+            priority = 5,
+            severity = Severity.WARNING,
+            implementation = IMPLEMENTATION,
+        )
+    }
+
+    override fun getApplicableElements(): Collection<String> {
+        return listOf("uses-permission")
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val name = element.getAttributeNS("http://schemas.android.com/apk/res/android", "name")
+        if (name == "android.permission.QUERY_ALL_PACKAGES") {
+            val incident = Incident(context, ISSUE)
+                .location(context.getLocation(element))
+                .message("Using the `QUERY_ALL_PACKAGES` permission is rarely necessary; most apps should use the `<queries>` element instead")
+            context.report(incident)
+        }
+    }
+
+    override fun getApplicableMethodNames(): List<String> {
+        return listOf("getInstalledPackages", "getInstalledApplications")
+    }
+
+    override fun visitMethodCall(
+        context: JavaContext, node: UCallExpression, method: PsiMethod,
+    ) {
+        val evaluator = context.evaluator
+        if (evaluator.isMemberInSubClassOf(method, "android.content.pm.PackageManager", false)) {
+            val incident = Incident(context, QUERY_PERMISSIONS_NEEDED)
+                .location(context.getCallLocation(node, false, false))
+                .message("Consider using `<queries>` in your manifest instead of relying on broad package queries")
+            context.report(incident)
+        }
+    }
+
+    override fun filterIncident(context: Context, incident: Incident, map: LintMap): Boolean {
+        val targetSdk = context.project.targetSdkVersion.featureLevel
+        return targetSdk >= 30
+    }
+}

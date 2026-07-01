@@ -1,0 +1,274 @@
+=== SYSTEM ===
+You are an expert Android developer specialising in Android Lint custom checks.
+You write Lint Detector implementations in Kotlin that are correct, idiomatic,
+and compile cleanly against the Android Lint API.
+
+- Output ONLY the detector source file. No explanation, no markdown fences.
+- Use the exact package: com.android.tools.lint.checks
+- The class name must be: ResourceCycleDetector
+
+
+=== USER ===
+Relevant Lint API methods:
+──────────────────────────────────────────
+
+// Implement: class YourDetector : Detector(), XmlScanner
+// Specialized interface for detectors that scan XML files.
+// Scanner interface methods to override:
+  fun getApplicableElements(): Collection<String>?
+  // Returns the list of elements that this detector wants to analyze.
+
+  fun visitElement(context: XmlContext, element: Element)
+  // Visit the given element.
+
+  fun visitElementAfter(context: XmlContext, element: Element)
+  // Visit the given element after its children have been analyzed.
+
+  fun getApplicableAttributes(): Collection<String>?
+  // Returns the list of attributes that this detector wants to analyze.
+
+  fun visitAttribute(context: XmlContext, attribute: Attr)
+  // Visit the given attribute.
+
+  fun visitDocument(context: XmlContext, document: Document)
+  // Visit the given document.
+
+  fun appliesTo(folderType: ResourceFolderType): Boolean
+  // Returns whether this detector applies to the given folder type.
+
+// Available context / utility methods:
+  val ALL_RESOURCES_SCOPE: EnumSet<Scope>
+  // Scope-set used for detectors which scan all resources.
+
+──────────────────────────────────────────
+Required imports:
+  import com.android.resources.ResourceFolderType
+  import com.android.tools.lint.detector.api.Scope
+  import com.android.tools.lint.detector.api.XmlContext
+  import java.util.EnumSet
+  import org.w3c.dom.Attr
+  import org.w3c.dom.Document
+  import org.w3c.dom.Element
+
+Implement an Android Lint Detector named ResourceCycleDetector in Kotlin for the following issue.
+
+Issue ID: ResourceCycle
+
+Specification:
+Cycle in resource definitions
+
+There should be no cycles in resource definitions as this can lead to  runtime exceptions.
+
+Generate the complete ResourceCycleDetector.kt source file now.
+
+---
+
+Your previous attempt failed. Here is the code you generated:
+
+```kt
+package com.android.tools.lint.checks
+
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Location
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import org.w3c.dom.Attr
+import org.w3c.dom.Document
+import org.w3c.dom.Element
+import org.w3c.dom.Node
+import java.util.EnumSet
+import java.util.regex.Pattern
+
+class ResourceCycleDetector : Detector(), XmlScanner {
+
+    private val graph = mutableMapOf<String, MutableSet<String>>()
+    private val locations = mutableMapOf<String, Location>()
+    private val edgeLocations = mutableMapOf<Pair<String, String>, Location>()
+
+    private val refPattern = Pattern.compile("@\\+?([a-zA-Z][a-zA-Z0-9_.]*)/([a-zA-Z0-9_.]+)")
+
+    override fun getApplicableElements(): Collection<String>? = null
+    override fun getApplicableAttributes(): Collection<String>? = null
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        val folderType = context.resourceFolderType ?: return
+        val currentRes = findCurrentResource(context, folderType, element) ?: return
+
+        val definingRes = getCurrentResource(context, folderType, element)
+        if (definingRes != null) {
+            locations.putIfAbsent(definingRes, context.getLocation(element))
+        }
+
+        if (folderType == ResourceFolderType.VALUES && element.tagName == "style") {
+            handleStyleParent(context, element, currentRes)
+        }
+
+        var child = element.firstChild
+        while (child != null) {
+            if (child.nodeType == Node.TEXT_NODE || child.nodeType == Node.CDATA_SECTION_NODE) {
+                val text = child.nodeValue
+                if (text != null && text.contains('@')) {
+                    extractRefs(text, currentRes, context.getLocation(child))
+                }
+            }
+            child = child.nextSibling
+        }
+    }
+
+    override fun visitAttribute(context: XmlContext, attribute: Attr) {
+        val value = attribute.value
+        if (value.isEmpty() || !value.contains('@')) return
+        val folderType = context.resourceFolderType ?: return
+        val currentRes = findCurrentResource(context, folderType, attribute.ownerElement) ?: return
+        extractRefs(value, currentRes, context.getLocation(attribute))
+    }
+
+    private fun getCurrentResource(context: XmlContext, folderType: ResourceFolderType, element: Element): String? {
+        return if (folderType == ResourceFolderType.VALUES) {
+            val name = element.getAttribute("name")
+            if (name.isEmpty()) return null
+            val type = if (element.tagName == "item") element.getAttribute("type") else element.tagName
+            if (type.isEmpty()) return null
+            "$type/$name"
+        } else {
+            val fileName = context.file.name.substringBeforeLast('.')
+            "${folderType.getName()}/$fileName"
+        }
+    }
+
+    private fun findCurrentResource(context: XmlContext, folderType: ResourceFolderType, element: Element): String? {
+        var current: Element? = element
+        while (current != null) {
+            val res = getCurrentResource(context, folderType, current)
+            if (res != null) return res
+            val parent = current.parentNode
+            current = if (parent is Element) parent else null
+        }
+        return null
+    }
+
+    private fun handleStyleParent(context: XmlContext, element: Element, currentRes: String) {
+        val parentAttr = element.getAttributeNode("parent")
+        val loc = context.getLocation(element)
+        if (parentAttr != null) {
+            val parentVal = parentAttr.value
+            if (parentVal.startsWith("@")) {
+                extractRefs(parentVal, currentRes, context.getLocation(parentAttr))
+            } else if (parentVal.isNotEmpty() && !parentVal.startsWith("?") && !parentVal.startsWith("android:")) {
+                addEdge(currentRes, "style/$parentVal", context.getLocation(parentAttr))
+            }
+        } else {
+            val name = element.getAttribute("name")
+            val dotIndex = name.lastIndexOf('.')
+            if (dotIndex > 0) {
+                val impliedParent = name.substring(0, dotIndex)
+                addEdge(currentRes, "style/$impliedParent", loc)
+            }
+        }
+    }
+
+    private fun extractRefs(text: String, currentRes: String, location: Location) {
+        val matcher = refPattern.matcher(text)
+        while (matcher.find()) {
+            val type = matcher.group(1)
+            val name = matcher.group(2)
+            if (type == "android" || type == "id") continue
+            val refRes = "$type/$name"
+            addEdge(currentRes, refRes, location)
+        }
+    }
+
+    private fun addEdge(from: String, to: String, location: Location) {
+        if (from == to) return
+        graph.getOrPut(from) { mutableSetOf() }.add(to)
+        edgeLocations.putIfAbsent(from to to, location)
+    }
+
+    override fun afterCheckProject(context: Context) {
+        val state = mutableMapOf<String, Int>()
+        val path = mutableListOf<String>()
+        val reportedCycles = mutableSetOf<String>()
+
+        fun dfs(node: String) {
+            state[node] = 1
+            path.add(node)
+            for (neighbor in graph[node] ?: emptySet()) {
+                if (state[neighbor] == 1) {
+                    val cycleStartIdx = path.indexOf(neighbor)
+                    if (cycleStartIdx != -1) {
+                        val cycle = path.subList(cycleStartIdx, path.size) + neighbor
+                        val cycleKey = cycle.sorted().joinToString("|")
+                        if (reportedCycles.add(cycleKey)) {
+                            val cycleStr = cycle.joinToString(" -> ")
+                            val loc = edgeLocations[node to neighbor] ?: locations[node] ?: Location.create(context.project.dir)
+                            context.report(ISSUE, loc, "Resource cycle detected: $cycleStr")
+                        }
+                    }
+                } else if (state[neighbor] != 2) {
+                    dfs(neighbor)
+                }
+            }
+            path.removeAt(path.lastIndex)
+            state[node] = 2
+        }
+
+        for (node in locations.keys.toList()) {
+            if (state[node] != 2) {
+                dfs(node)
+            }
+        }
+
+        graph.clear()
+        locations.clear()
+        edgeLocations.clear()
+    }
+
+    companion object {
+        val ISSUE = Issue.create(
+            id = "ResourceCycle",
+            briefDescription = "Cycle in resource definitions",
+            explanation = "There should be no cycles in resource definitions as this can lead to runtime exceptions.",
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(ResourceCycleDetector::class.java, Scope.ALL_RESOURCES_SCOPE)
+        )
+    }
+}
+```
+
+The harness reported the following errors:
+
+Tests failed: testStyleImpliedParent, testDrawableStateListCycle, testFontCycle, testDeepIncludeCycle, testDeepStyleCycle1, testDeepStyleCycle2, testFontCycleWithLocation, testLayouts, testDeepColorCycle1, testDeepColorCycle2, testStylesInvalidParent, testDeepAliasCycle, testColors, testAdaptiveIconCycle, testStyles, testColorStateListCycle, testStringCycle
+
+testStyleImpliedParent: java.lang.AssertionError: Not true that
+"[ResourceCycle]
+is found in lint output
+"No warnings.
+	at org.junit.Assert.fail(Assert.java:89)
+	at org.junit.Assert.assertTrue(Assert.java:42)
+	at com.android.tools.lint.checks.infrastructure.TestLintResult.expectContains(TestLintResult.kt:168)
+	at com.android.tools.lint.checks.infrastructure.TestLintResult.expectContains$default(TestLintResult.kt:142)
+	at com.android.tools.lint.checks.infrastructure.TestLintResult.expectContains(TestLintResult.kt)
+	at com.android.tools.lint.checks.ResourceCycleDetectorTest.testStyleImpliedParent(ResourceCycleDetectorTest.java:76)
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:77)
+	at
+testDrawableStateListCycle: java.lang.AssertionError: Not true that
+"[ResourceCycle]
+is found in lint output
+"No warnings.
+	at org.junit.Assert.fail(Assert.java:89)
+	at org.junit.Assert.assertTrue(Assert.java:42)
+	at com.android.tools.lint.checks.infrastructure.TestLintResult.expectContains(TestLintResult.kt:168)
+	at com.android.tools.lint.checks.infrastructure.TestLintRes
+
+Fix the detector so that it compiles cleanly and all tests pass.
+Output ONLY the corrected source file — no explanation, no markdown fences.

@@ -1,0 +1,98 @@
+package com.android.tools.lint.checks;
+
+import com.android.SdkConstants;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.LayoutDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.jetbrains.annotations.NonNull;
+import org.jetbrains.annotations.Nullable;
+
+public class OverdrawDetector extends LayoutDetector {
+
+    public static final Issue ISSUE = Issue.create(
+            "Overdraw",
+            "Overdraw: Painting regions more than once",
+            "If you set a background drawable on a root view, then you should use a custom theme " +
+            "where the theme background is null. Otherwise, the theme background will be painted " +
+            "first, only to have your custom background completely cover it; this is called \"overdraw\".\n\n" +
+            "NOTE: This detector relies on figuring out which layouts are associated with which activities " +
+            "based on scanning the Java code, and it's currently doing that using an inexact pattern matching " +
+            "algorithm. Therefore, it can incorrectly conclude which activity the layout is associated with " +
+            "and then wrongly complain that a background-theme is hidden.\n\n" +
+            "If you want your custom background on multiple pages, then you should consider making a custom " +
+            "theme with your custom background and just using that theme instead of a root element background.\n\n" +
+            "Of course it's possible that your custom drawable is translucent and you want it to be mixed with " +
+            "the background. However, you will get better performance if you pre-mix the background with your " +
+            "drawable and use that resulting image or color as a custom theme background instead.",
+            Category.PERFORMANCE,
+            3,
+            Severity.WARNING,
+            new Implementation(OverdrawDetector.class, Scope.LAYOUT_RESOURCE_SCOPE)
+    );
+
+    @Override
+    public void visitDocument(@NonNull XmlContext context, @NonNull Document document) {
+        Element root = document.getDocumentElement();
+        if (root == null) {
+            return;
+        }
+
+        if (root.getTagName().equals("layout")) {
+            root = getFirstChildElement(root);
+            while (root != null && root.getTagName().equals("data")) {
+                root = getNextSiblingElement(root);
+            }
+        }
+
+        if (root != null) {
+            Attr background = root.getAttributeNodeNS(SdkConstants.ANDROID_URI, SdkConstants.ATTR_BACKGROUND);
+            if (background != null) {
+                String bgValue = background.getValue();
+                if (!bgValue.equals("@null") && !bgValue.equals("@android:color/transparent")) {
+                    context.report(
+                            ISSUE,
+                            background,
+                            context.getLocation(background),
+                            "Possible overdraw: Root element has background, but the theme might also define one. " +
+                            "Consider using a custom theme with a null background."
+                    );
+                }
+            }
+        }
+    }
+
+    @Nullable
+    private Element getFirstChildElement(@NonNull Element parent) {
+        Node child = parent.getFirstChild();
+        while (child != null) {
+            if (child.getNodeType() == Node.ELEMENT_NODE) {
+                return (Element) child;
+            }
+            child = child.getNextSibling();
+        }
+        return null;
+    }
+
+    @Nullable
+    private Element getNextSiblingElement(@NonNull Element element) {
+        Node sibling = element.getNextSibling();
+        while (sibling != null) {
+            if (sibling.getNodeType() == Node.ELEMENT_NODE) {
+                return (Element) sibling;
+            }
+            sibling = sibling.getNextSibling();
+        }
+        return null;
+    }
+}

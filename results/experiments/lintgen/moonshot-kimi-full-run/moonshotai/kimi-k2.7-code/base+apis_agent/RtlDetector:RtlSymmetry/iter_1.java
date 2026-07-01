@@ -1,0 +1,277 @@
+package com.android.tools.lint.checks;
+
+import com.android.SdkConstants;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceXmlDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+import java.io.File;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+
+public class RtlDetector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "RtlSymmetry",
+            "Padding and margin symmetry",
+            "If you specify padding or margin on the left side of a layout, you should " +
+            "probably also specify padding on the right side (and vice versa) for " +
+            "right-to-left layout symmetry. The same applies to start/end margins and paddings.",
+            Category.RTL,
+            3,
+            Severity.WARNING,
+            new Implementation(RtlDetector.class, Scope.RESOURCE_FILE_SCOPE)
+    );
+
+    public static final Issue COMPAT = Issue.create(
+            "RtlCompat",
+            "Right-to-left text compatibility",
+            "The `android:paddingStart` and `android:paddingEnd` attributes are not " +
+            "supported on older devices. To ensure compatibility, you should also " +
+            "specify `android:paddingLeft` and `android:paddingRight` (or " +
+            "`android:layout_marginLeft` and `android:layout_marginRight` etc.).",
+            Category.RTL,
+            5,
+            Severity.ERROR,
+            new Implementation(RtlDetector.class, Scope.RESOURCE_FILE_SCOPE)
+    );
+
+    public static final Issue ENABLED = Issue.create(
+            "RtlEnabled",
+            "Right-to-left text not enabled",
+            "The application has not declared support for right-to-left layouts. " +
+            "Consider adding `android:supportsRtl=\"true\"` to the application tag " +
+            "in the manifest.",
+            Category.RTL,
+            3,
+            Severity.WARNING,
+            new Implementation(RtlDetector.class, Scope.MANIFEST_SCOPE)
+    );
+
+    public static final String[] ATTRIBUTES = new String[] {
+            SdkConstants.ATTR_PADDING_LEFT, SdkConstants.ATTR_PADDING_START,
+            SdkConstants.ATTR_PADDING_RIGHT, SdkConstants.ATTR_PADDING_END,
+            SdkConstants.ATTR_LAYOUT_MARGIN_LEFT, SdkConstants.ATTR_LAYOUT_MARGIN_START,
+            SdkConstants.ATTR_LAYOUT_MARGIN_RIGHT, SdkConstants.ATTR_LAYOUT_MARGIN_END,
+            SdkConstants.ATTR_LAYOUT_ALIGN_PARENT_LEFT, SdkConstants.ATTR_LAYOUT_ALIGN_PARENT_START,
+            SdkConstants.ATTR_LAYOUT_ALIGN_PARENT_RIGHT, SdkConstants.ATTR_LAYOUT_ALIGN_PARENT_END,
+            SdkConstants.ATTR_LAYOUT_ALIGN_LEFT, SdkConstants.ATTR_LAYOUT_ALIGN_START,
+            SdkConstants.ATTR_LAYOUT_ALIGN_RIGHT, SdkConstants.ATTR_LAYOUT_ALIGN_END,
+            SdkConstants.ATTR_DRAWABLE_LEFT, SdkConstants.ATTR_DRAWABLE_START,
+            SdkConstants.ATTR_DRAWABLE_RIGHT, SdkConstants.ATTR_DRAWABLE_END,
+            SdkConstants.ATTR_LAYOUT_TO_LEFT_OF, SdkConstants.ATTR_LAYOUT_TO_START_OF,
+            SdkConstants.ATTR_LAYOUT_TO_RIGHT_OF, SdkConstants.ATTR_LAYOUT_TO_END_OF
+    };
+
+    private static final String ATTR_PADDING_HORIZONTAL = "paddingHorizontal";
+    private static final String ATTR_LAYOUT_MARGIN_HORIZONTAL = "layout_marginHorizontal";
+    private static final String ATTR_SUPPORTS_RTL = "supportsRtl";
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return ResourceXmlDetector.ALL;
+    }
+
+    @Override
+    public Collection<String> getApplicableAttributes() {
+        return null;
+    }
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.LAYOUT;
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        String tag = element.getTagName();
+        if (SdkConstants.TAG_APPLICATION.equals(tag)) {
+            checkApplicationTag(context, element);
+            return;
+        }
+
+        if (context.getResourceFolderType() != ResourceFolderType.LAYOUT) {
+            return;
+        }
+
+        NamedNodeMap nodeMap = element.getAttributes();
+        Set<String> names = new HashSet<>();
+        Map<String, Attr> attrs = new HashMap<>();
+
+        for (int i = 0, n = nodeMap.getLength(); i < n; i++) {
+            Node node = nodeMap.item(i);
+            if (!(node instanceof Attr)) {
+                continue;
+            }
+            Attr attr = (Attr) node;
+            if (!SdkConstants.ANDROID_URI.equals(attr.getNamespaceURI())) {
+                continue;
+            }
+            String name = attr.getLocalName();
+            if (name == null || name.isEmpty()) {
+                String qName = attr.getName();
+                int colon = qName.indexOf(':');
+                name = colon != -1 ? qName.substring(colon + 1) : qName;
+            }
+            names.add(name);
+            attrs.put(name, attr);
+        }
+
+        boolean checkCompat = context.getMainProject().getMinSdkVersion() < 17
+                && getFolderVersion(context.file.getParentFile()) < 17;
+        if (checkCompat) {
+            for (String name : names) {
+                if (isRtlAttributeName(name)) {
+                    String old = convertNewToOld(name);
+                    if (old != null && !old.equals(name) && !names.contains(old)) {
+                        Attr attr = attrs.get(name);
+                        String message = String.format(
+                                "The `android:%s` attribute is not supported on older devices "
+                                        + "(minSdkVersion < 17). To ensure compatibility, you "
+                                        + "should also define `android:%s`.",
+                                name, old);
+                        Location location = attr != null
+                                ? context.getLocation(attr) : context.getLocation(element);
+                        context.report(COMPAT, attr != null ? attr : element, location, message);
+                    }
+                }
+            }
+        }
+
+        checkPair(context, element, names, attrs,
+                SdkConstants.ATTR_PADDING_LEFT, SdkConstants.ATTR_PADDING_RIGHT,
+                SdkConstants.ATTR_PADDING, ATTR_PADDING_HORIZONTAL);
+
+        checkPair(context, element, names, attrs,
+                SdkConstants.ATTR_PADDING_START, SdkConstants.ATTR_PADDING_END,
+                SdkConstants.ATTR_PADDING, ATTR_PADDING_HORIZONTAL);
+
+        checkPair(context, element, names, attrs,
+                SdkConstants.ATTR_LAYOUT_MARGIN_LEFT, SdkConstants.ATTR_LAYOUT_MARGIN_RIGHT,
+                SdkConstants.ATTR_LAYOUT_MARGIN, ATTR_LAYOUT_MARGIN_HORIZONTAL);
+
+        checkPair(context, element, names, attrs,
+                SdkConstants.ATTR_LAYOUT_MARGIN_START, SdkConstants.ATTR_LAYOUT_MARGIN_END,
+                SdkConstants.ATTR_LAYOUT_MARGIN, ATTR_LAYOUT_MARGIN_HORIZONTAL);
+    }
+
+    @Override
+    public void visitAttribute(XmlContext context, Attr attribute) {
+        // Not used; attributes are inspected together in visitElement.
+    }
+
+    private static void checkApplicationTag(XmlContext context, Element element) {
+        if (context.getMainProject().getTargetSdkVersion() < 17) {
+            return;
+        }
+        Attr supportsRtl = element.getAttributeNodeNS(SdkConstants.ANDROID_URI, ATTR_SUPPORTS_RTL);
+        if (supportsRtl == null || !SdkConstants.VALUE_TRUE.equals(supportsRtl.getValue())) {
+            String message = "The application has not declared support for right-to-left layouts. "
+                    + "Consider adding `android:supportsRtl=\"true\"` to the application tag "
+                    + "in the manifest.";
+            context.report(ENABLED, element, context.getLocation(element), message);
+        }
+    }
+
+    private static void checkPair(XmlContext context, Element element, Set<String> names,
+            Map<String, Attr> attrs, String side1, String side2, String... covering) {
+        boolean hasSide1 = names.contains(side1);
+        boolean hasSide2 = names.contains(side2);
+        if (hasSide1 == hasSide2) {
+            return;
+        }
+        for (String cover : covering) {
+            if (names.contains(cover)) {
+                return;
+            }
+        }
+
+        String present = hasSide1 ? side1 : side2;
+        String missing = hasSide1 ? side2 : side1;
+        Attr attr = attrs.get(present);
+
+        String message = "To support right-to-left layouts, consider adding `android:"
+                + missing + "` alongside `android:" + present + "`";
+        Location location = attr != null ? context.getLocation(attr) : context.getLocation(element);
+        context.report(ISSUE, attr != null ? attr : element, location, message);
+    }
+
+    public static boolean isRtlAttributeName(String name) {
+        return name.contains("Start") || name.contains("End");
+    }
+
+    public static String convertOldToNew(String name) {
+        if (name.contains("Right")) {
+            return name.replace("Right", "End");
+        }
+        if (name.contains("Left")) {
+            return name.replace("Left", "Start");
+        }
+        return name;
+    }
+
+    public static String convertNewToOld(String name) {
+        if (name.contains("End")) {
+            return name.replace("End", "Right");
+        }
+        if (name.contains("Start")) {
+            return name.replace("Start", "Left");
+        }
+        return name;
+    }
+
+    public static String convertToOppositeDirection(String name) {
+        if (name.contains("Right")) {
+            return name.replace("Right", "Left");
+        }
+        if (name.contains("Left")) {
+            return name.replace("Left", "Right");
+        }
+        if (name.contains("End")) {
+            return name.replace("End", "Start");
+        }
+        if (name.contains("Start")) {
+            return name.replace("Start", "End");
+        }
+        return name;
+    }
+
+    public static int getFolderVersion(File file) {
+        if (file == null) {
+            return -1;
+        }
+        String name = file.getName();
+        int index = name.lastIndexOf("-v");
+        if (index == -1 || index + 2 >= name.length()) {
+            return -1;
+        }
+        String versionString = name.substring(index + 2);
+        int end = 0;
+        while (end < versionString.length()
+                && Character.isDigit(versionString.charAt(end))) {
+            end++;
+        }
+        if (end == 0) {
+            return -1;
+        }
+        try {
+            return Integer.parseInt(versionString.substring(0, end));
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+}

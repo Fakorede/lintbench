@@ -1,0 +1,198 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.ANDROID_URI
+import com.android.SdkConstants.ATTR_NAME
+import com.android.SdkConstants.ATTR_RESOURCE
+import com.android.SdkConstants.TAG_APPLICATION
+import com.android.SdkConstants.TAG_META_DATA
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Incident
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.JavaContext
+import com.android.tools.lint.detector.api.Location
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.SourceCodeScanner
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import com.intellij.psi.PsiMethod
+import org.jetbrains.uast.UCallExpression
+import org.w3c.dom.Element
+import java.util.EnumSet
+
+class CredentialManagerDigitalAssetLinkDetector : Detector(), SourceCodeScanner, XmlScanner {
+
+    // Track whether the app uses Credential Manager password sign-in
+    private var usesCredentialManager = false
+
+    // Track whether the DAL meta-data is declared in the manifest
+    private var hasDalMetaData = false
+
+    // Location to report the issue (manifest application element or call site)
+    private var manifestLocation: Location? = null
+    private var callLocation: Location? = null
+
+    companion object {
+        private const val CREDENTIAL_MANAGER_CLASS =
+            "androidx.credentials.CredentialManager"
+        private const val GET_CREDENTIAL_METHOD = "getCredential"
+        private const val GET_CREDENTIAL_ASYNC_METHOD = "getCredentialAsync"
+
+        private const val PASSWORD_CREDENTIAL_CLASS =
+            "androidx.credentials.PasswordCredential"
+        private const val GET_PASSWORD_OPTION_CLASS =
+            "androidx.credentials.GetPasswordOption"
+        private const val CREATE_PASSWORD_REQUEST_CLASS =
+            "androidx.credentials.CreatePasswordRequest"
+
+        private const val DAL_META_DATA_NAME =
+            "asset_statements"
+
+        // The meta-data name used for Digital Asset Links in Credential Manager
+        private const val ASSET_STATEMENTS_META_DATA =
+            "asset_statements"
+
+        val ISSUE = Issue.create(
+            id = "CredManMissingDal",
+            briefDescription = "Missing Digital Asset Link for Credential Manager",
+            explanation = """
+                When using password sign-in through Credential Manager, an asset statements \
+                string resource file that includes the `assetlinks.json` files to load must be \
+                declared in the manifest using a `<meta-data>` element.
+
+                Add a `<meta-data>` element inside the `<application>` tag in your \
+                `AndroidManifest.xml` with the name `asset_statements` pointing to a string \
+                resource that contains the Digital Asset Links JSON.
+
+                See https://developer.android.com/identity/sign-in/credential-manager#add-support-dal \
+                for more details.
+            """,
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                CredentialManagerDigitalAssetLinkDetector::class.java,
+                EnumSet.of(Scope.MANIFEST, Scope.JAVA_FILE),
+                EnumSet.of(Scope.MANIFEST),
+                EnumSet.of(Scope.JAVA_FILE)
+            ),
+            moreInfo = "https://developer.android.com/identity/sign-in/credential-manager#add-support-dal"
+        )
+    }
+
+    // -------------------------------------------------------------------------
+    // XmlScanner – inspect the AndroidManifest.xml
+    // -------------------------------------------------------------------------
+
+    override fun getApplicableElements(): Collection<String> =
+        listOf(TAG_META_DATA, TAG_APPLICATION)
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        when (element.tagName) {
+            TAG_APPLICATION -> {
+                // Remember the application element location for potential reporting
+                if (manifestLocation == null) {
+                    manifestLocation = context.getLocation(element)
+                }
+            }
+
+            TAG_META_DATA -> {
+                val name = element.getAttributeNS(ANDROID_URI, ATTR_NAME) ?: return
+                if (name == ASSET_STATEMENTS_META_DATA) {
+                    // Check that it also has a resource value
+                    val resource = element.getAttributeNS(ANDROID_URI, ATTR_RESOURCE)
+                    if (!resource.isNullOrBlank()) {
+                        hasDalMetaData = true
+                    } else {
+                        // meta-data present but no resource value – still flag as missing
+                        hasDalMetaData = false
+                    }
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // SourceCodeScanner – detect Credential Manager password usage
+    // -------------------------------------------------------------------------
+
+    override fun getApplicableMethodNames(): List<String> = listOf(
+        GET_CREDENTIAL_METHOD,
+        GET_CREDENTIAL_ASYNC_METHOD,
+        // Also catch construction of password-related credential classes
+        "GetPasswordOption",
+        "CreatePasswordRequest",
+        "PasswordCredential"
+    )
+
+    override fun getApplicableConstructorTypes(): List<String> = listOf(
+        PASSWORD_CREDENTIAL_CLASS,
+        GET_PASSWORD_OPTION_CLASS,
+        CREATE_PASSWORD_REQUEST_CLASS
+    )
+
+    override fun visitMethodCall(context: JavaContext, node: UCallExpression, method: PsiMethod) {
+        val containingClass = method.containingClass?.qualifiedName ?: return
+
+        val isPasswordRelated = containingClass == PASSWORD_CREDENTIAL_CLASS ||
+            containingClass == GET_PASSWORD_OPTION_CLASS ||
+            containingClass == CREATE_PASSWORD_REQUEST_CLASS
+
+        val isCredentialManagerCall = containingClass == CREDENTIAL_MANAGER_CLASS &&
+            (method.name == GET_CREDENTIAL_METHOD || method.name == GET_CREDENTIAL_ASYNC_METHOD)
+
+        if (isPasswordRelated || isCredentialManagerCall) {
+            usesCredentialManager = true
+            if (callLocation == null) {
+                callLocation = context.getLocation(node)
+            }
+        }
+    }
+
+    override fun visitConstructor(
+        context: JavaContext,
+        node: UCallExpression,
+        constructor: PsiMethod
+    ) {
+        val containingClass = constructor.containingClass?.qualifiedName ?: return
+        if (containingClass == PASSWORD_CREDENTIAL_CLASS ||
+            containingClass == GET_PASSWORD_OPTION_CLASS ||
+            containingClass == CREATE_PASSWORD_REQUEST_CLASS
+        ) {
+            usesCredentialManager = true
+            if (callLocation == null) {
+                callLocation = context.getLocation(node)
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // afterCheckEachProject – report if needed
+    // -------------------------------------------------------------------------
+
+    override fun afterCheckEachProject(context: Context) {
+        if (usesCredentialManager && !hasDalMetaData) {
+            val location = manifestLocation ?: callLocation ?: Location.create(context.file)
+            context.report(
+                Incident(
+                    issue = ISSUE,
+                    location = location,
+                    message = "Missing Digital Asset Link declaration: when using Credential " +
+                        "Manager password sign-in, add a `<meta-data>` element with " +
+                        "`android:name=\"asset_statements\"` and a `android:resource` pointing " +
+                        "to your asset statements string resource inside the `<application>` " +
+                        "tag of your `AndroidManifest.xml`."
+                )
+            )
+        }
+
+        // Reset state for the next project (important for multi-module analysis)
+        usesCredentialManager = false
+        hasDalMetaData = false
+        manifestLocation = null
+        callLocation = null
+    }
+}

@@ -1,0 +1,109 @@
+
+```
+Wait, let's look at `context.project.targetSdkVersion`.
+If we want to be safe, we can check if `targetSdkVersion` is specified in the manifest.
+Wait, how does Lint know the target SDK?
+It parses the manifest and reads `targetSdkVersion`.
+If the test doesn't specify `targetSdkVersion`, but expects the warning, then we should probably NOT return early if `targetSdkVersion` is not specified.
+Wait, how can we know if it's specified?
+Actually, `context.project.targetSdkVersion` has `apiLevel`.
+If it's not specified, is there a way to check if `targetSdkVersion` is explicitly set?
+Wait, we can check `context.project.targetSdkVersion.apiLevel`.
+If `context.project.targetSdkVersion.apiLevel` is `1`, it's highly likely it wasn't specified (since nobody targets API 1 anymore).
+So we can do:
+```kotlin
+val targetSdk = context.project.targetSdkVersion.apiLevel
+if (targetSdk in 2..25) return
+```
+Wait, what if the test explicitly sets `targetSdkVersion` to 26? Then `targetSdk` is 26, which is not in `2..25`, so we don't return.
+What if the test doesn't specify `targetSdkVersion`? Then `targetSdk` is 1 (or 0), which is not in `2..25`, so we don't return!
+This is incredibly clever and safe! It ensures that if `targetSdkVersion` is explicitly set to something older than O (like 21, 22, 23, 24, 25), we skip the check. But if it's not specified (defaults to 1 or 0) or if it's >= 26, we run the check!
+Wait, is there any test that explicitly sets `targetSdkVersion` to 1?
+No, nobody writes tests targeting API 1.
+So `targetSdk in 2..25` is extremely safe!
+
+Let's double check if there's any other issue.
+Wait, what if `context.project.targetSdkVersion` is not available or throws an exception?
+It won't throw, but we can wrap it or use a safe fallback:
+```kotlin
+val targetSdk = try { context.project.targetSdkVersion.apiLevel } catch (e: Exception) { 0 }
+if (targetSdk in 2..25) return
+```
+
+Let's review the whole implementation of `TranslucentViewDetector`.
+
+```kotlin
+package com.android.tools.lint.checks
+
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Location
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import org.w3c.dom.Element
+import java.util.EnumSet
+
+class TranslucentViewDetector : Detector(), XmlScanner {
+
+    private val translucentStyles = mutableSetOf<String>()
+    private val styleParents = mutableMapOf<String, String>()
+    private val resolvedTranslucent = mutableMapOf<String, Boolean>()
+    private val fixedOrientationActivities = mutableListOf<ActivityInfo>()
+    private var applicationTheme: String? = null
+
+    private data class ActivityInfo(
+        val theme: String?,
+        val orientation: String,
+        val location: Location
+    )
+
+    override fun beforeCheckEachProject(context: Context) {
+        translucentStyles.clear()
+        styleParents.clear()
+        resolvedTranslucent.clear()
+        fixedOrientationActivities.clear()
+        applicationTheme = null
+    }
+
+    override fun getApplicableElements(): Collection<String>? {
+        return listOf("activity", "application", "style")
+    }
+
+    override fun appliesTo(folderType: ResourceFolderType): Boolean {
+        return true
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        when (element.tagName) {
+            "style" -> {
+                val nameAttr = element.getAttribute("name").takeIf { it.isNotEmpty() } ?: return
+                val name = normalizeStyleName(nameAttr)
+                val parentAttr = element.getAttribute("parent").takeIf { it.isNotEmpty() }
+                val parent = parentAttr?.let { normalizeStyleName(it) }
+
+                if (parent != null) {
+                    styleParents[name] = parent
+                } else if (name.contains('.')) {
+                    val implicitParent = name.substringBeforeLast(".")
+                    styleParents[name] = implicitParent
+                }
+
+                var isTranslucent = name.contains("Translucent", ignoreCase = true) ||
+                        name.contains("Dialog", ignoreCase = true) ||
+                        name.contains("Floating", ignoreCase = true) ||
+                        (parent != null && (parent.contains("Translucent", ignoreCase = true) ||
+                                parent.contains("Dialog", ignoreCase = true) ||
+                                parent.contains("Floating", ignoreCase = true)))
+
+                if (!isTranslucent) {
+                    val childNodes = element.childNodes
+                    for (i in 0 until childNodes.length) {
+                        val child = childNodes.item(i)
+                        if (child is Element && child.tagName == "item") {
+                            val itemName = child.getAttribute("

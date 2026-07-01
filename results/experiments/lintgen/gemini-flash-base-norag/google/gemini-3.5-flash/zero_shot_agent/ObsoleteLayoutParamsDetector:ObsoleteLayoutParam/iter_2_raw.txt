@@ -1,0 +1,218 @@
+package com.android.tools.lint.checks;
+
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+import java.util.Collection;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+
+public class ObsoleteLayoutParamsDetector extends Detector implements XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "ObsoleteLayoutParam",
+            "Obsolete layout params",
+            "The given layout_param is not defined for the given layout, meaning it has no "
+                    + "effect. This usually happens when you change the parent layout or move view "
+                    + "code around without updating the layout params. This will cause useless "
+                    + "attribute processing at runtime, and is misleading for others reading the "
+                    + "layout so the parameter should be removed.",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(
+                    ObsoleteLayoutParamsDetector.class,
+                    Scope.RESOURCE_FILE_SCOPE
+            )
+    );
+
+    @Override
+    public Collection<String> getApplicableAttributes() {
+        return XmlScanner.ALL;
+    }
+
+    @Override
+    public void visitAttribute(XmlContext context, Attr attribute) {
+        String localName = attribute.getLocalName();
+        if (localName == null || !localName.startsWith("layout_")) {
+            return;
+        }
+        if ("layout_width".equals(localName) || "layout_height".equals(localName) || "layout_margin".equals(localName)
+                || localName.startsWith("layout_margin")) {
+            return;
+        }
+
+        Element element = attribute.getOwnerElement();
+        String parentTag = getParentTag(element);
+        if (parentTag == null) {
+            return;
+        }
+
+        String parentType = getParentType(parentTag);
+        if (parentType == null) {
+            return;
+        }
+
+        String errorMessage = getObsoleteErrorMessage(parentType, localName);
+        if (errorMessage != null) {
+            context.report(
+                    ISSUE,
+                    attribute,
+                    context.getLocation(attribute),
+                    errorMessage
+            );
+        }
+    }
+
+    private static String getParentTag(Element element) {
+        Node parentNode = element.getParentNode();
+        if (parentNode == null || parentNode.getNodeType() != Node.ELEMENT_NODE) {
+            return null;
+        }
+        Element parent = (Element) parentNode;
+        String parentTag = parent.getTagName();
+        if ("merge".equals(parentTag)) {
+            String parentAttr = parent.getAttributeNS("http://schemas.android.com/tools", "parentTag");
+            if (parentAttr != null && !parentAttr.isEmpty()) {
+                return parentAttr;
+            }
+            parentAttr = parent.getAttribute("tools:parentTag");
+            if (parentAttr != null && !parentAttr.isEmpty()) {
+                return parentAttr;
+            }
+        }
+        return parentTag;
+    }
+
+    private static String getParentType(String tag) {
+        if (tag == null) {
+            return null;
+        }
+        if (tag.indexOf('.') != -1) {
+            tag = tag.substring(tag.lastIndexOf('.') + 1);
+        }
+        if ("LinearLayout".equals(tag) || "RadioGroup".equals(tag) || "SearchView".equals(tag)) {
+            return "LinearLayout";
+        }
+        if ("RelativeLayout".equals(tag) || "DialerFilter".equals(tag)) {
+            return "RelativeLayout";
+        }
+        if ("FrameLayout".equals(tag) || "ScrollView".equals(tag) || "HorizontalScrollView".equals(tag)
+                || "CardView".equals(tag) || "NestedScrollView".equals(tag) || "ViewAnimator".equals(tag)
+                || "ViewSwitcher".equals(tag) || "ViewFlipper".equals(tag) || "ImageSwitcher".equals(tag)
+                || "TextSwitcher".equals(tag)) {
+            return "FrameLayout";
+        }
+        if ("ConstraintLayout".equals(tag)) {
+            return "ConstraintLayout";
+        }
+        if ("GridLayout".equals(tag)) {
+            return "GridLayout";
+        }
+        if ("TableLayout".equals(tag)) {
+            return "TableLayout";
+        }
+        if ("TableRow".equals(tag)) {
+            return "TableRow";
+        }
+        if ("CoordinatorLayout".equals(tag)) {
+            return "CoordinatorLayout";
+        }
+        if ("DrawerLayout".equals(tag)) {
+            return "DrawerLayout";
+        }
+        if ("ViewPager".equals(tag)) {
+            return "ViewPager";
+        }
+        if ("SlidingPaneLayout".equals(tag)) {
+            return "SlidingPaneLayout";
+        }
+        return null;
+    }
+
+    private static String getObsoleteErrorMessage(String parentType, String localName) {
+        if ("layout_weight".equals(localName)) {
+            if (!"LinearLayout".equals(parentType) && !"TableRow".equals(parentType)) {
+                return "Invalid layout param: layout_weight can only be used with a LinearLayout parent";
+            }
+        }
+
+        if ("layout_gravity".equals(localName)) {
+            if ("RelativeLayout".equals(parentType)) {
+                return "Invalid layout param: layout_gravity has no effect in RelativeLayout";
+            }
+            if ("ConstraintLayout".equals(parentType)) {
+                return "Invalid layout param: layout_gravity has no effect in ConstraintLayout";
+            }
+        }
+
+        if (isRelativeLayoutParam(localName)) {
+            if (!"RelativeLayout".equals(parentType)) {
+                return String.format("Invalid layout param: %s can only be used with a RelativeLayout parent", localName);
+            }
+        }
+
+        if (isConstraintLayoutParam(localName)) {
+            if (!"ConstraintLayout".equals(parentType)) {
+                return String.format("Invalid layout param: %s can only be used with a ConstraintLayout parent", localName);
+            }
+        }
+
+        if (isGridLayoutParam(localName)) {
+            if (!"GridLayout".equals(parentType)) {
+                if ("TableRow".equals(parentType) && ("layout_column".equals(localName) || "layout_span".equals(localName))) {
+                    return null;
+                }
+                return String.format("Invalid layout param: %s can only be used with a GridLayout parent", localName);
+            }
+        }
+
+        if (isCoordinatorLayoutParam(localName)) {
+            if (!"CoordinatorLayout".equals(parentType)) {
+                return String.format("Invalid layout param: %s can only be used with a CoordinatorLayout parent", localName);
+            }
+        }
+
+        return null;
+    }
+
+    private static boolean isRelativeLayoutParam(String name) {
+        return name.startsWith("layout_align")
+                || name.equals("layout_below")
+                || name.equals("layout_above")
+                || name.equals("layout_toLeftOf")
+                || name.equals("layout_toRightOf")
+                || name.equals("layout_toStartOf")
+                || name.equals("layout_toEndOf")
+                || name.equals("layout_centerHorizontal")
+                || name.equals("layout_centerVertical")
+                || name.equals("layout_centerInParent");
+    }
+
+    private static boolean isConstraintLayoutParam(String name) {
+        return name.startsWith("layout_constraint");
+    }
+
+    private static boolean isGridLayoutParam(String name) {
+        return name.equals("layout_row")
+                || name.equals("layout_column")
+                || name.equals("layout_rowSpan")
+                || name.equals("layout_columnSpan")
+                || name.equals("layout_rowWeight")
+                || name.equals("layout_columnWeight")
+                || name.equals("layout_span");
+    }
+
+    private static boolean isCoordinatorLayoutParam(String name) {
+        return name.equals("layout_behavior")
+                || name.equals("layout_anchor")
+                || name.equals("layout_anchorGravity")
+                || name.equals("layout_keyline");
+    }
+}

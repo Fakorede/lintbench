@@ -1,0 +1,175 @@
+package com.android.tools.lint.checks;
+
+import com.android.SdkConstants;
+import com.android.tools.lint.client.api.JavaEvaluator;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.Project;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.intellij.psi.PsiClass;
+import com.intellij.psi.PsiModifier;
+
+import org.jetbrains.uast.UClass;
+import org.jetbrains.uast.ULambdaExpression;
+
+import org.w3c.dom.Element;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+public class RegistrationDetector extends Detector implements Detector.XmlScanner, Detector.ClassScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "Registered",
+            "Class is not registered in the manifest",
+            "Activities, services and content providers should be registered in the "
+                    + "`AndroidManifest.xml` file using `<activity>`, `<service>` and "
+                    + "`<provider>` tags.\n"
+                    + "\n"
+                    + "If your activity is simply a parent class intended to be subclassed "
+                    + "by other \"real\" activities, make it an abstract class.\n"
+                    + "\n"
+                    + "Reference documentation:\n"
+                    + "  - https://developer.android.com/guide/topics/manifest/manifest-intro.html",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(RegistrationDetector.class, Scope.JAVA_FILE_SCOPE, Scope.MANIFEST_SCOPE)
+    );
+
+    private final Map<Project, Set<String>> mRegistered = new HashMap<>();
+    private final Map<Project, List<Candidate>> mCandidates = new HashMap<>();
+
+    @Override
+    public void beforeCheckEachProject(Context context) {
+        Project project = context.getProject();
+        mRegistered.put(project, new HashSet<>());
+        mCandidates.put(project, new ArrayList<>());
+    }
+
+    @Override
+    public void afterCheckEachProject(Context context) {
+        Project project = context.getProject();
+        Set<String> registered = mRegistered.remove(project);
+        List<Candidate> candidates = mCandidates.remove(project);
+        if (registered == null || candidates == null) {
+            return;
+        }
+
+        for (Candidate candidate : candidates) {
+            String fqcn = candidate.cls.getQualifiedName();
+            if (fqcn == null) {
+                continue;
+            }
+            if (!registered.contains(fqcn)) {
+                Location location = candidate.context.getNameLocation(candidate.cls);
+                candidate.context.report(ISSUE, location,
+                        "Class is not registered in the manifest");
+            }
+        }
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return Arrays.asList(
+                SdkConstants.TAG_ACTIVITY,
+                SdkConstants.TAG_SERVICE,
+                SdkConstants.TAG_PROVIDER
+        );
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        String name = element.getAttributeNS(SdkConstants.ANDROID_URI, SdkConstants.ATTR_NAME);
+        if (name == null || name.isEmpty()) {
+            name = element.getAttribute(SdkConstants.ATTR_NAME);
+        }
+        if (name == null || name.isEmpty()) {
+            return;
+        }
+
+        String resolved = resolveName(name, context.getProject().getPackage());
+        if (resolved != null) {
+            mRegistered.computeIfAbsent(context.getProject(), k -> new HashSet<>()).add(resolved);
+        }
+    }
+
+    @Override
+    public List<String> applicableSuperClasses() {
+        return Arrays.asList(
+                "android.app.Activity",
+                "android.app.Service",
+                "android.content.ContentProvider"
+        );
+    }
+
+    @Override
+    public void visitClass(JavaContext context, UClass node) {
+        PsiClass psi = node.getJavaPsi();
+        if (psi == null) {
+            return;
+        }
+        if (psi.hasModifierProperty(PsiModifier.ABSTRACT)
+                || node.isInterface()
+                || node.isAnnotationType()) {
+            return;
+        }
+
+        String fqcn = node.getQualifiedName();
+        if (fqcn == null || fqcn.indexOf('$') != -1) {
+            return;
+        }
+
+        JavaEvaluator evaluator = context.getEvaluator();
+        if (evaluator.extendsClass(psi, "android.app.Activity", false)
+                || evaluator.extendsClass(psi, "android.app.Service", false)
+                || evaluator.extendsClass(psi, "android.content.ContentProvider", false)) {
+            mCandidates.computeIfAbsent(context.getProject(), k -> new ArrayList<>())
+                    .add(new Candidate(node, context));
+        }
+    }
+
+    @Override
+    public void visitClass(JavaContext context, ULambdaExpression lambda) {
+        // Not applicable
+    }
+
+    private static String resolveName(String name, String packageName) {
+        if (name == null) {
+            return null;
+        }
+        if (packageName == null) {
+            return name.indexOf('.') != -1 ? name : null;
+        }
+        if (name.startsWith(".")) {
+            return packageName + name;
+        } else if (name.indexOf('.') == -1) {
+            return packageName + "." + name;
+        } else {
+            return name;
+        }
+    }
+
+    private static class Candidate {
+        final UClass cls;
+        final JavaContext context;
+
+        Candidate(UClass cls, JavaContext context) {
+            this.cls = cls;
+            this.context = context;
+        }
+    }
+}

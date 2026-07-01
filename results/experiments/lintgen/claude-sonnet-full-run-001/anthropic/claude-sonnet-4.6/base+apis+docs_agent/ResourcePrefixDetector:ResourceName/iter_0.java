@@ -1,0 +1,254 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.resources.ResourceFolderType;
+import com.android.resources.ResourceType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.LintFix;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceFolderScanner;
+import com.android.tools.lint.detector.api.ResourceContext;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+import com.android.utils.XmlUtils;
+
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.io.File;
+import java.util.EnumSet;
+
+import static com.android.SdkConstants.ANDROID_NS_NAME_PREFIX;
+import static com.android.SdkConstants.ATTR_NAME;
+import static com.android.SdkConstants.DOT_XML;
+import static com.android.SdkConstants.TAG_RESOURCES;
+
+public class ResourcePrefixDetector extends Detector implements XmlScanner, ResourceFolderScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "ResourceName",
+            "Resource with Wrong Prefix",
+            "In Gradle projects you can specify a resource prefix that all resources " +
+            "in the project must conform to. This makes it easier to ensure that you don't " +
+            "accidentally combine resources from different libraries, since they all end " +
+            "up in the same shared app namespace.",
+            Category.CORRECTNESS,
+            8,
+            Severity.FATAL,
+            new Implementation(
+                    ResourcePrefixDetector.class,
+                    EnumSet.of(Scope.RESOURCE_FILE, Scope.RESOURCE_FOLDER)
+            )
+    );
+
+    public ResourcePrefixDetector() {
+    }
+
+    // ---- Implements ResourceFolderScanner ----
+
+    @Override
+    public void checkFolder(@NonNull ResourceContext context, @NonNull String folderName) {
+        String prefix = getResourcePrefix(context);
+        if (prefix == null) {
+            return;
+        }
+
+        ResourceFolderType folderType = context.getResourceFolderType();
+        if (folderType == null || folderType == ResourceFolderType.VALUES) {
+            return;
+        }
+
+        // For non-values resource folders, the resource name is the filename (without extension)
+        File file = context.file;
+        String fileName = file.getName();
+        // Strip extension
+        int dot = fileName.lastIndexOf('.');
+        String resourceName = dot != -1 ? fileName.substring(0, dot) : fileName;
+
+        // Skip files that start with android_ or are framework resources
+        if (!resourceName.startsWith(prefix)) {
+            String message = String.format(
+                    "Resource named `%1$s` does not start with the project's resource prefix `%2$s`; "
+                            + "rename to `%3$s`?",
+                    resourceName, prefix, prefix + resourceName);
+            Location location = Location.create(file);
+            context.report(ISSUE, location, message);
+        }
+    }
+
+    // ---- Implements XmlScanner ----
+
+    @Override
+    public void visitDocument(@NonNull XmlContext context, @NonNull Document document) {
+        String prefix = getResourcePrefix(context);
+        if (prefix == null) {
+            return;
+        }
+
+        ResourceFolderType folderType = context.getResourceFolderType();
+        if (folderType != ResourceFolderType.VALUES) {
+            return;
+        }
+
+        Element root = document.getDocumentElement();
+        if (root == null) {
+            return;
+        }
+
+        if (!TAG_RESOURCES.equals(root.getTagName())) {
+            return;
+        }
+
+        NodeList children = root.getChildNodes();
+        for (int i = 0, n = children.getLength(); i < n; i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() != Node.ELEMENT_NODE) {
+                continue;
+            }
+            Element element = (Element) child;
+            checkValueElement(context, element, prefix);
+        }
+    }
+
+    private void checkValueElement(
+            @NonNull XmlContext context,
+            @NonNull Element element,
+            @NonNull String prefix) {
+        String tagName = element.getTagName();
+
+        // Handle <declare-styleable> children separately - they have item children
+        // but the styleable itself should be checked
+        String name = element.getAttribute(ATTR_NAME);
+        if (name != null && !name.isEmpty()) {
+            // Determine the resource type from the tag
+            ResourceType type = getResourceType(tagName);
+            if (type != null) {
+                checkResourceName(context, element, name, prefix, type);
+            }
+        }
+
+        // For declare-styleable, also check attr children
+        if ("declare-styleable".equals(tagName)) {
+            NodeList children = element.getChildNodes();
+            for (int i = 0, n = children.getLength(); i < n; i++) {
+                Node child = children.item(i);
+                if (child.getNodeType() != Node.ELEMENT_NODE) {
+                    continue;
+                }
+                Element childElement = (Element) child;
+                String childName = childElement.getAttribute(ATTR_NAME);
+                if (childName != null && !childName.isEmpty()) {
+                    // attr items inside declare-styleable don't need prefix check
+                    // as they are scoped to the styleable
+                }
+            }
+        }
+    }
+
+    private void checkResourceName(
+            @NonNull XmlContext context,
+            @NonNull Element element,
+            @NonNull String name,
+            @NonNull String prefix,
+            @NonNull ResourceType type) {
+        // Strip any existing namespace qualifier (e.g. "android:")
+        String localName = name;
+        int colon = name.indexOf(':');
+        if (colon != -1) {
+            // This is a reference to an external resource, skip
+            return;
+        }
+
+        if (!localName.startsWith(prefix)) {
+            String suggested = prefix + localName;
+            String message = String.format(
+                    "Resource named `%1$s` does not start with the project's resource prefix `%2$s`; "
+                            + "rename to `%3$s`?",
+                    localName, prefix, suggested);
+
+            Attr nameAttr = element.getAttributeNode(ATTR_NAME);
+            Location location;
+            if (nameAttr != null) {
+                location = context.getValueLocation(nameAttr);
+            } else {
+                location = context.getElementLocation(element);
+            }
+
+            context.report(ISSUE, element, location, message);
+        }
+    }
+
+    @Nullable
+    private static String getResourcePrefix(@NonNull Context context) {
+        return context.getProject().getResourcePrefix();
+    }
+
+    @Nullable
+    private static ResourceType getResourceType(@NonNull String tagName) {
+        switch (tagName) {
+            case "string":
+            case "string-array":
+                return ResourceType.STRING;
+            case "plurals":
+                return ResourceType.PLURALS;
+            case "color":
+                return ResourceType.COLOR;
+            case "dimen":
+                return ResourceType.DIMEN;
+            case "drawable":
+                return ResourceType.DRAWABLE;
+            case "bool":
+                return ResourceType.BOOL;
+            case "integer":
+            case "integer-array":
+                return ResourceType.INTEGER;
+            case "array":
+                return ResourceType.ARRAY;
+            case "style":
+                return ResourceType.STYLE;
+            case "declare-styleable":
+                return ResourceType.STYLEABLE;
+            case "attr":
+                return ResourceType.ATTR;
+            case "id":
+                return ResourceType.ID;
+            case "fraction":
+                return ResourceType.FRACTION;
+            case "layout":
+                return ResourceType.LAYOUT;
+            case "menu":
+                return ResourceType.MENU;
+            case "raw":
+                return ResourceType.RAW;
+            case "xml":
+                return ResourceType.XML;
+            case "font":
+                return ResourceType.FONT;
+            case "navigation":
+                return ResourceType.NAVIGATION;
+            case "transition":
+                return ResourceType.TRANSITION;
+            case "interpolator":
+                return ResourceType.INTERPOLATOR;
+            case "animator":
+                return ResourceType.ANIMATOR;
+            case "anim":
+                return ResourceType.ANIM;
+            case "mipmap":
+                return ResourceType.MIPMAP;
+            default:
+                return null;
+        }
+    }
+}

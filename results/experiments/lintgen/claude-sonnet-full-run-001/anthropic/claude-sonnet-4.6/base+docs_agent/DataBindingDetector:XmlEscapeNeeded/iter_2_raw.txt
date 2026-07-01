@@ -1,0 +1,166 @@
+package com.android.tools.lint.checks
+
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.*
+import org.w3c.dom.Attr
+import org.w3c.dom.Element
+import org.w3c.dom.Node
+
+class DataBindingDetector : Detector(), XmlScanner {
+
+    companion object {
+        val ISSUE = Issue.create(
+            id = "XmlEscapeNeeded",
+            briefDescription = "Missing XML Escape",
+            explanation = """
+                When a string contains characters that have special usage in XML, \
+                you must escape the characters.
+            """,
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                DataBindingDetector::class.java,
+                Scope.RESOURCE_FILE_SCOPE
+            )
+        )
+
+        private val VALID_ENTITIES = setOf("amp", "lt", "gt", "apos", "quot")
+    }
+
+    override fun appliesTo(folderType: ResourceFolderType): Boolean {
+        return folderType == ResourceFolderType.VALUES
+    }
+
+    override fun getApplicableElements(): Collection<String>? {
+        return XmlScannerConstants.ALL
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        // Check text content of the element by examining child text nodes
+        var child = element.firstChild
+        while (child != null) {
+            if (child.nodeType == Node.TEXT_NODE || child.nodeType == Node.CDATA_SECTION_NODE) {
+                val text = child.nodeValue ?: continue
+                checkForUnescapedChars(context, element, text)
+            }
+            child = child.nextSibling
+        }
+
+        // Check attributes
+        val attributes = element.attributes
+        if (attributes != null) {
+            for (i in 0 until attributes.length) {
+                val attr = attributes.item(i) as? Attr ?: continue
+                val value = attr.value ?: continue
+                checkForUnescapedCharsInAttribute(context, attr, value)
+            }
+        }
+    }
+
+    private fun checkForUnescapedChars(context: XmlContext, element: Element, text: String) {
+        var i = 0
+        while (i < text.length) {
+            val c = text[i]
+            when (c) {
+                '<' -> {
+                    reportUnescaped(context, element, c)
+                    return
+                }
+                '&' -> {
+                    val semicolonIndex = text.indexOf(';', i)
+                    if (semicolonIndex == -1) {
+                        reportUnescaped(context, element, c)
+                        return
+                    } else {
+                        val entity = text.substring(i + 1, semicolonIndex)
+                        if (!isValidEntity(entity)) {
+                            reportUnescaped(context, element, c)
+                            return
+                        }
+                        i = semicolonIndex
+                    }
+                }
+            }
+            i++
+        }
+    }
+
+    private fun checkForUnescapedCharsInAttribute(context: XmlContext, attribute: Attr, value: String) {
+        var i = 0
+        while (i < value.length) {
+            val c = value[i]
+            when (c) {
+                '<' -> {
+                    reportUnescapedAttr(context, attribute, c)
+                    return
+                }
+                '&' -> {
+                    val semicolonIndex = value.indexOf(';', i)
+                    if (semicolonIndex == -1) {
+                        reportUnescapedAttr(context, attribute, c)
+                        return
+                    } else {
+                        val entity = value.substring(i + 1, semicolonIndex)
+                        if (!isValidEntity(entity)) {
+                            reportUnescapedAttr(context, attribute, c)
+                            return
+                        }
+                        i = semicolonIndex
+                    }
+                }
+            }
+            i++
+        }
+    }
+
+    private fun isValidEntity(entity: String): Boolean {
+        if (entity.isEmpty()) return false
+        if (VALID_ENTITIES.contains(entity)) {
+            return true
+        }
+        if (entity.startsWith("#")) {
+            val rest = entity.substring(1)
+            if (rest.startsWith("x") || rest.startsWith("X")) {
+                val hex = rest.substring(1)
+                return hex.isNotEmpty() && hex.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }
+            }
+            return rest.isNotEmpty() && rest.all { it.isDigit() }
+        }
+        return false
+    }
+
+    private fun reportUnescaped(context: XmlContext, element: Element, c: Char) {
+        val escapeSequence = when (c) {
+            '<' -> "&lt;"
+            '>' -> "&gt;"
+            '&' -> "&amp;"
+            '"' -> "&quot;"
+            '\'' -> "&apos;"
+            else -> "\\$c"
+        }
+        context.report(
+            ISSUE,
+            element,
+            context.getElementLocation(element),
+            "The character '$c' must be escaped as `$escapeSequence` in XML"
+        )
+    }
+
+    private fun reportUnescapedAttr(context: XmlContext, attribute: Attr, c: Char) {
+        val escapeSequence = when (c) {
+            '<' -> "&lt;"
+            '>' -> "&gt;"
+            '&' -> "&amp;"
+            '"' -> "&quot;"
+            '\'' -> "&apos;"
+            else -> "\\$c"
+        }
+        context.report(
+            ISSUE,
+            attribute.ownerElement,
+            context.getLocation(attribute),
+            "The character '$c' must be escaped as `$escapeSequence` in XML"
+        )
+    }
+}

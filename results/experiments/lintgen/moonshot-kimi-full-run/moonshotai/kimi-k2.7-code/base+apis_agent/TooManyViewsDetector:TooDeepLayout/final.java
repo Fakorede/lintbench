@@ -1,0 +1,93 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+import com.android.tools.lint.detector.api.XmlScanner;
+import java.util.Collection;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+
+public class TooManyViewsDetector extends Detector implements XmlScanner {
+
+    private static final String ENV_MAX_DEPTH = "ANDROID_LINT_MAX_DEPTH";
+    private static final int DEFAULT_MAX_DEPTH = 10;
+
+    public static final Issue ISSUE = Issue.create(
+            "TooDeepLayout",
+            "Layout hierarchy is too deep",
+            "Layouts with too much nesting is bad for performance. Consider using a flatter layout "
+                    + "(such as `RelativeLayout` or `GridLayout`). The default maximum depth is "
+                    + DEFAULT_MAX_DEPTH
+                    + " but can be configured with the environment variable `"
+                    + ENV_MAX_DEPTH
+                    + "`.",
+            Category.PERFORMANCE,
+            5,
+            Severity.WARNING,
+            new Implementation(TooManyViewsDetector.class, Scope.RESOURCE_FILE_SCOPE));
+
+    @Override
+    public boolean appliesTo(@NonNull ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.LAYOUT;
+    }
+
+    @Override
+    @NonNull
+    public Collection<String> getApplicableElements() {
+        return XmlScanner.ALL;
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        Node parent = element.getParentNode();
+        if (parent != null && parent.getNodeType() == Node.ELEMENT_NODE) {
+            return;
+        }
+
+        int maxDepth = getMaxDepth();
+        int depth = computeMaxDepth(element, 1);
+        if (depth > maxDepth) {
+            context.report(
+                    ISSUE,
+                    element,
+                    context.getLocation(element),
+                    "Layout has too many nested levels ("
+                            + depth
+                            + "), maximum allowed is "
+                            + maxDepth);
+        }
+    }
+
+    private static int computeMaxDepth(@NonNull Element element, int currentDepth) {
+        int max = currentDepth;
+        Node child = element.getFirstChild();
+        while (child != null) {
+            if (child.getNodeType() == Node.ELEMENT_NODE) {
+                int childDepth = computeMaxDepth((Element) child, currentDepth + 1);
+                if (childDepth > max) {
+                    max = childDepth;
+                }
+            }
+            child = child.getNextSibling();
+        }
+        return max;
+    }
+
+    private static int getMaxDepth() {
+        String value = System.getenv(ENV_MAX_DEPTH);
+        if (value != null) {
+            try {
+                return Integer.parseInt(value);
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return DEFAULT_MAX_DEPTH;
+    }
+}

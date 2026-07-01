@@ -1,0 +1,5028 @@
+ We need produce Java source file for Android Lint Detector. Need choose scanner interfaces. Issue: Obsolete layout params: given layout_param not defined for given layout. This is XML resource files (layouts). Need XmlScanner. Need inspect layout attributes that are layout params (e.g. android:layout_width, layout_height, layout_weight, layout_gravity, etc.) and check if parent layout supports them. This is similar to existing Android Lint check? There is ObsoleteLayoutParamDetector in lint? Actually there is a check named "ObsoleteLayoutParam" in Android Lint. Need implement. We need output only source file, no markdown fences, package com.android.tools.lint.checks, class ObsoleteLayoutParamsDetector implements Detector.XmlScanner.
+
+Need generate complete source. Need be correct, idiomatic, compile against Android Lint API. We need implement getApplicableElements? Or visitElement. For XML layout files, we can visit each view element and its parent. Determine namespace? Layout params attributes are in android namespace and maybe app. The parent layout's LayoutParams class defines supported params. We can map known layouts to their supported params. Existing implementation likely uses a map of layout tag to set of allowed layout params. Need detect attributes that start with "layout_" but not in allowed set for parent. But careful: some layout params are inherited from ViewGroup.MarginLayoutParams (layout_margin*, layout_width, layout_height). Also layout_gravity exists for FrameLayout and LinearLayout, not RelativeLayout. layout_weight only LinearLayout. layout_align* etc only RelativeLayout. layout_column/span TableLayout/TableRow. layout_below etc RelativeLayout. layout_toStartOf etc. layout_constraint* ConstraintLayout. layout_anchor, layout_behavior CoordinatorLayout. layout_scrollFlags AppBarLayout. etc.
+
+We can implement a reasonable version. Since user asks complete source. Need include Issue registration via getIssues(). Need maybe extends LayoutEditorDetector? But class must be named ObsoleteLayoutParamsDetector and package exact. It can extend Detector implements XmlScanner.
+
+Need decide scanner methods. XmlScanner has getApplicableElements, visitElement, getApplicableAttributes, visitAttribute. Since we need check each attribute against parent, perhaps visitElement for each child, get parent tag, check attributes. Use getApplicableElements with ALL or specific? We can return XmlScannerConstants.ALL. Or use visitElement for every element. In visitElement, get parent via context.getElementParent(element) maybe? Actually XmlContext has getElementParent? There is context.getElementParent(element) maybe not. In XmlScanner, visitElement receives element and its parent? Signature: void visitElement(@NonNull XmlContext context, @NonNull Element element). To get parent, element.getParentNode() as Element. For root element no parent.
+
+Need map of layout tags to allowed params. Need include all standard layout params. Also need handle custom layouts? We can only know standard ones. For unknown parent layouts, skip? Or maybe report nothing. The existing lint check likely has comprehensive list.
+
+Need also handle attributes in app namespace? Layout params defined in support library (app:layout_constraintBottom_toBottomOf etc). Need include app:layout_* for ConstraintLayout and CoordinatorLayout. The issue description says layout_param not defined for layout. We can check both android and app namespaces with prefix layout_. But many custom attrs start with layout_? Could be false positives. Existing check likely only checks android:layout_* and app:layout_*? Let's recall actual Android Lint ObsoleteLayoutParam check. It checks attributes in the Android namespace that start with "layout_" and are not applicable to parent. It might also check support library attributes? I think it checks all namespaces? Let's search memory: The class is `ObsoleteLayoutParamDetector` in `com.android.tools.lint.checks`. It extends `LayoutEditorDetector`? It uses `LayoutMetadata`? Hmm.
+
+We can implement robust enough. Need ensure compile against Lint API. Use `LintClient`? Not needed.
+
+Let's design:
+
+```
+package com.android.tools.lint.checks;
+
+import static com.android.SdkConstants.*;
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.*;
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+
+import java.util.*;
+
+public class ObsoleteLayoutParamsDetector extends Detector implements Detector.XmlScanner {
+
+    private static final Implementation IMPLEMENTATION = new Implementation(
+            ObsoleteLayoutParamsDetector.class,
+            Scope.RESOURCE_FILE_SCOPE);
+
+    public static final Issue ISSUE = Issue.create(
+            "ObsoleteLayoutParam",
+            "Obsolete layout params",
+            "The given layout_param is not defined for the given layout, meaning it has no effect. ...",
+            Category.CORRECTNESS,
+            4,
+            Severity.WARNING,
+            IMPLEMENTATION);
+
+    @Override
+    public boolean appliesTo(@NonNull ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.LAYOUT;
+    }
+
+    @Override
+    public Collection<String> getApplicableElements() {
+        return XmlScannerConstants.ALL;
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        Node parentNode = element.getParentNode();
+        if (!(parentNode instanceof Element)) return;
+        Element parent = (Element) parentNode;
+        String parentTag = parent.getTagName();
+        Set<String> allowed = LAYOUT_PARAMS.get(parentTag);
+        if (allowed == null) return; // unknown layout, skip
+
+        NamedNodeMap attrs = element.getAttributes();
+        for (int i = 0, n = attrs.getLength(); i < n; i++) {
+            Node attr = attrs.item(i);
+            String name = attr.getLocalName();
+            String ns = attr.getNamespaceURI();
+            if (name == null) continue;
+            if (!name.startsWith("layout_")) continue;
+            // Only check Android namespace and app namespace (support libs)
+            if (!ANDROID_URI.equals(ns) && !APP_URI.equals(ns) && !AUTO_URI.equals(ns)) continue;
+            if (!allowed.contains(name)) {
+                context.report(ISSUE, attr, context.getLocation(attr),
+                        String.format("Invalid layout param in a `%1$s` parent: `%2$s`", parentTag, name));
+            }
+        }
+    }
+```
+
+Need define constants ANDROID_URI, APP_URI, AUTO_URI. SdkConstants has ANDROID_URI, APP_PREFIX? Actually `SdkConstants.ANDROID_URI` = "http://schemas.android.com/apk/res/android". `APP_URI` maybe not defined; there is `AUTO_URI` = "http://schemas.android.com/apk/res-auto". In support library, app namespace is just auto URI. Use AUTO_URI. But some use `TOOLS_URI`. Not needed.
+
+Need map LAYOUT_PARAMS. Need include all layout param attribute names (local names) for each parent layout. Need include inherited ones: layout_width, layout_height, layout_margin*, layout_margin (all variants). Also for ViewGroup.MarginLayoutParams: layout_margin, layout_marginLeft/Right/Start/End/Top/Bottom, layout_marginHorizontal/Vertical (API 26). Also layout_weight for LinearLayout. layout_gravity for FrameLayout/LinearLayout/TableRow/TableLayout? Actually TableRow.LayoutParams has gravity? TableRow cells support layout_column, layout_span, layout_weight, layout_gravity? Not sure. For GridLayout, layout_row, layout_column, layout_rowSpan, layout_columnSpan, layout_gravity. For ConstraintLayout, many app:layout_constraint*. For CoordinatorLayout, app:layout_anchor, app:layout_anchorGravity, app:layout_behavior, app:layout_dodgeInsetEdges, app:layout_insetEdge, app:layout_keyline. For AppBarLayout, app:layout_scrollFlags. For CollapsingToolbarLayout, app:layout_collapseMode, app:layout_collapseParallaxMultiplier. For FlexboxLayout, app:layout_order, layout_flexGrow, etc. For PercentFrameLayout/RelativeLayout old percent attrs. For MotionLayout, layout_constraint* plus motion attrs. But we can include common ones.
+
+Need ensure no false positives for custom layouts. We skip unknown.
+
+Need maybe also check that attribute is in android namespace; for ConstraintLayout, attributes are in app namespace (auto). Our map should include both android and app names. Since we only compare local name, it's fine.
+
+Need define map. Use static initializer or Map.of with many entries. Since Java version unknown, but Lint API likely Java 8+. Use `ImmutableMap`? Not available. Use `Collections.unmodifiableMap(new HashMap<>())`. Or static block.
+
+Need import `com.android.SdkConstants`. Use `ANDROID_URI`, `AUTO_URI`. Also `ANDROID_NS_NAME`? Not needed.
+
+Need maybe use `ResourceXmlDetector`? No, class must be named and package. Extending Detector implements XmlScanner is fine.
+
+Need ensure `getApplicableElements` returning ALL triggers visitElement for every element. Good.
+
+Need issue explanation text. Use provided spec.
+
+Need severity WARNING. Priority 4.
+
+Need maybe `appliesTo` to limit to layout. Good.
+
+Potential issue: `attr.getLocalName()` returns null for attributes without namespace? For xmlns, localName may be null or prefix? Actually xmlns attributes have namespace null and localName maybe null? We skip null. For no-namespace attributes, localName is name. Layout params always have namespace android or app. Good.
+
+Potential issue: parent tag may include full class name (e.g., `androidx.constraintlayout.widget.ConstraintLayout`). Map key should match. Use tag name as is. For support library, parent tag often `androidx.constraintlayout.widget.ConstraintLayout` or `android.support.constraint.ConstraintLayout`. Need include both. Also `LinearLayout`, `RelativeLayout`, `FrameLayout`, `GridLayout`, `TableLayout`, `TableRow`, `CoordinatorLayout`, `AppBarLayout`, `CollapsingToolbarLayout`, `FlexboxLayout`, `PercentFrameLayout`, `PercentRelativeLayout`, `com.google.android.material...`. Include common.
+
+Need map sets. Let's build comprehensive sets.
+
+Define helper method to create base set with width/height/margin. Then add specific.
+
+```
+private static Set<String> base() {
+    Set<String> set = new HashSet<>();
+    set.add("layout_width");
+    set.add("layout_height");
+    set.add("layout_margin");
+    set.add("layout_marginLeft");
+    set.add("layout_marginRight");
+    set.add("layout_marginTop");
+    set.add("layout_marginBottom");
+    set.add("layout_marginStart");
+    set.add("layout_marginEnd");
+    set.add("layout_marginHorizontal");
+    set.add("layout_marginVertical");
+    return set;
+}
+```
+
+For ViewGroup itself? `ViewGroup.LayoutParams` only width/height. `ViewGroup.MarginLayoutParams` adds margins. Many layouts extend MarginLayoutParams.
+
+Map entries:
+
+- `LinearLayout`: base + layout_weight, layout_gravity.
+- `FrameLayout`: base + layout_gravity.
+- `RelativeLayout`: base + layout_above, layout_alignBaseline, layout_alignBottom, layout_alignEnd, layout_alignLeft, layout_alignParentBottom, layout_alignParentEnd, layout_alignParentLeft, layout_alignParentRight, layout_alignParentStart, layout_alignParentTop, layout_alignRight, layout_alignStart, layout_alignTop, layout_alignWithParentIfMissing, layout_below, layout_centerHorizontal, layout_centerInParent, layout_centerVertical, layout_toEndOf, layout_toLeftOf, layout_toRightOf, layout_toStartOf.
+- `GridLayout`: base? Actually GridLayout.LayoutParams extends MarginLayoutParams? It extends ViewGroup.MarginLayoutParams. Adds layout_column, layout_columnSpan, layout_gravity, layout_row, layout_rowSpan. Also layout_width/height default wrap_content? It supports width/height. So base + those.
+- `TableLayout`: base? TableLayout.LayoutParams extends LinearLayout.LayoutParams? Actually TableLayout.LayoutParams extends LinearLayout.LayoutParams. So supports width/height, weight, gravity, margin. base + layout_weight, layout_gravity. But for direct children (TableRows) maybe. We'll include.
+- `TableRow`: TableRow.LayoutParams extends LinearLayout.LayoutParams. Adds layout_column, layout_span. So base + layout_weight, layout_gravity, layout_column, layout_span.
+- `CoordinatorLayout`: base + app layout_anchor, layout_anchorGravity, layout_behavior, layout_dodgeInsetEdges, layout_insetEdge, layout_keyline. Note base includes margin. layout_gravity? CoordinatorLayout.LayoutParams extends MarginLayoutParams and includes gravity? Actually it has gravity? It uses layout_gravity? I think CoordinatorLayout.LayoutParams has gravity (for positioning child within coordinator). It may support layout_gravity. Include layout_gravity.
+- `AppBarLayout`: app layout_scrollFlags, layout_scrollInterpolator. Also base? AppBarLayout.LayoutParams extends LinearLayout.LayoutParams, so base + layout_weight, layout_gravity + scrollFlags, scrollInterpolator.
+- `CollapsingToolbarLayout`: app layout_collapseMode, layout_collapseParallaxMultiplier. Base? CollapsingToolbarLayout.LayoutParams extends FrameLayout.LayoutParams, so base + layout_gravity + collapseMode, collapseParallaxMultiplier.
+- `ConstraintLayout` (androidx and support): base? ConstraintLayout.LayoutParams extends ViewGroup.MarginLayoutParams. Supports layout_constraint* many, layout_width/height (match_parent not recommended), margins, layout_goneMargin*, layout_constraintWidth*, layout_constraintHeight*, layout_constraintHorizontal_bias, layout_constraintVertical_bias, layout_constraintDimensionRatio, layout_constraintCircle, layout_editor_absolute_x/y, layout_optimizationLevel? Some are on ConstraintLayout itself not children. For children: layout_constraintBottom_toBottomOf, _toTopOf, _toLeftOf, _toRightOf, _toStartOf, _toEndOf, _baseline_toBaselineOf, _top_toTopOf, _top_toBottomOf, _bottom_toTopOf, _bottom_toBottomOf, _left_toLeftOf, _left_toRightOf, _right_toLeftOf, _right_toRightOf, _start_toEndOf, _start_toStartOf, _end_toStartOf, _end_toEndOf, _circle, _circleAngle, _circleRadius, _dimensionRatio, _height_default, _width_default, _height_percent, _width_percent, _height_min, _width_min, _height_max, _width_max, _vertical_bias, _horizontal_bias, _vertical_chainStyle, _horizontal_chainStyle, _vertical_weight, _horizontal_weight, _gone_margin*, _gone_marginLeft etc. Also layout_marginBaseline? Many. We can include a broad set. Also layout_gravity? ConstraintLayout doesn't support layout_gravity. But ConstraintLayout.LayoutParams has layout_gravity? I think not. So base only width/height/margin + constraints.
+- `MotionLayout`: same as ConstraintLayout plus motion attrs? Not needed.
+- `FlexboxLayout`: app layout_order, layout_flexGrow, layout_flexShrink, layout_flexBasisPercent, layout_alignSelf, layout_minWidth, layout_minHeight, layout_maxWidth, layout_maxHeight, layout_wrapBefore. Also base? FlexboxLayout.LayoutParams extends ViewGroup.MarginLayoutParams, so base + those. layout_gravity? no.
+- `PercentFrameLayout`: app layout_widthPercent, layout_heightPercent, layout_marginPercent, layout_marginLeftPercent etc. Also base. Deprecated.
+- `PercentRelativeLayout`: same.
+- `RadioGroup`: extends LinearLayout, so base + weight/gravity.
+- `Toolbar`? Not a layout parent? It extends ViewGroup but children? Toolbar.LayoutParams extends ActionMenuView.LayoutParams? Not common. Skip.
+- `ViewPager`, `ViewPager2`: not layouts? ViewPager2.LayoutParams extends ViewGroup.MarginLayoutParams plus layout_gravity? Actually ViewPager2 page views? Not typical layout params. Skip.
+- `DrawerLayout`: DrawerLayout.LayoutParams extends ViewGroup.MarginLayoutParams plus layout_gravity. So base + layout_gravity.
+- `SlidingPaneLayout`: base? LayoutParams extends ViewGroup.MarginLayoutParams plus weight? It has layout_weight? Actually SlidingPaneLayout.LayoutParams has weight. Include base + layout_weight.
+- `NestedScrollView` extends FrameLayout, so base + layout_gravity.
+- `ScrollView`, `HorizontalScrollView` extends FrameLayout, base + layout_gravity.
+- `CardView` extends FrameLayout, base + layout_gravity.
+- `GridView`, `ListView`? They are AdapterView, not typical direct children layout params? AdapterView.LayoutParams extends ViewGroup.LayoutParams plus layout_gravity. But children are item views, not in XML. Skip.
+- `AdapterView`? skip.
+- `StackView`, `AdapterViewFlipper` skip.
+
+Need include both old support and androidx class names for ConstraintLayout, CoordinatorLayout, AppBarLayout, CollapsingToolbarLayout, FlexboxLayout, Percent layouts, CardView, DrawerLayout, etc.
+
+Need ensure map keys include full class names and simple names. Parent tag can be `androidx.constraintlayout.widget.ConstraintLayout` or `android.support.constraint.ConstraintLayout`. Also custom views extending these? We can't know. Skip.
+
+Need maybe include `View`? No.
+
+Need maybe include `merge`? Parent tag merge? In `<merge>` root, children will have parent determined by the layout that includes it. We can't know. If parent is merge, skip.
+
+Need maybe include `include`? If a view is inside include? skip.
+
+Need handle `tools:` namespace? Not layout params.
+
+Need issue message: "Invalid layout param in a `RelativeLayout` parent: `layout_below`"? Actually if attribute not allowed, message like "Invalid layout param in a `LinearLayout` parent: `layout_alignParentTop`". Good.
+
+Need maybe include quickfix? Not required.
+
+Need ensure imports. Use `com.android.tools.lint.detector.api.*`. Use `org.w3c.dom.*`.
+
+Need maybe implement `getApplicableAttributes` instead? But checking per element easier.
+
+Potential compile issue: `Scope.RESOURCE_FILE_SCOPE` is available. `Implementation` constructor expects Class<? extends Detector> and EnumSet<Scope>. `Scope.RESOURCE_FILE_SCOPE` is an EnumSet? Actually `Scope.RESOURCE_FILE_SCOPE` is `EnumSet<Scope>`? Let's recall: In Lint API, `Scope` enum has constants like `Scope.RESOURCE_FILE_SCOPE`? I think `Scope.RESOURCE_FILE_SCOPE` is an `EnumSet<Scope>`? Wait, `Scope` has static final `EnumSet<Scope> RESOURCE_FILE_SCOPE`? Actually yes, there are predefined sets: `Scope.ALL_RESOURCE_FILES`, `Scope.RESOURCE_FILE_SCOPE`, `Scope.ALL_JAVA_FILES`. Need check. In older API, `Scope.RESOURCE_FILE_SCOPE` is `EnumSet<Scope>`? Let's verify. `com.android.tools.lint.detector.api.Scope` has constants: `Scope.RESOURCE_FILE_SCOPE` is an `EnumSet<Scope>`? I recall `Scope.RESOURCE_FILE_SCOPE` is `EnumSet.of(Scope.RESOURCE_FILE)`. And `Scope.ALL_RESOURCE_FILES` is `EnumSet.of(Scope.RESOURCE_FILE)`. Hmm. Actually `Scope` enum values: `RESOURCE_FILE`, `JAVA_FILE`, `CLASS_FILE`, `MANIFEST`, `RESOURCE_FOLDER`, `ALL_RESOURCE_FILES`, `GRADLE_FILE`, `PROGUARD_FILE`, `PROPERTY_FILE`, `TEST_SOURCES`, `OTHER`, `BINARY_RESOURCE_FILE`. There are also static sets: `Scope.RESOURCE_FILE_SCOPE` maybe `EnumSet.of(Scope.RESOURCE_FILE)`. I think yes. Implementation constructor: `Implementation(Class<? extends Detector> detectorClass, EnumSet<Scope> scope)`. So pass Scope.RESOURCE_FILE_SCOPE.
+
+Need `appliesTo` returns boolean. Good.
+
+Need maybe override `getApplicableElements` returning `XmlScannerConstants.ALL`. Good.
+
+Need ensure `visitElement` uses `context.getLocation(attr)`. `XmlContext.getLocation(Node)` returns Location. Good.
+
+Need maybe use `context.report(ISSUE, attr, ...)` signature: `report(Issue issue, Node scope, Location location, String message)`. Good.
+
+Need maybe include `getApplicableAttributes`? Not needed.
+
+Need ensure no markdown fences. Output only source file. No explanation.
+
+Need produce final answer with code only. Let's craft complete code.
+
+Let's think about exact map. We can define a static method `newSet(String...)` and `withBase(String...)`. Use `HashSet`.
+
+```
+private static Set<String> baseSet() { ... }
+private static Set<String> set(String... extras) { Set<String> s = baseSet(); Collections.addAll(s, extras); return s; }
+private static Set<String> noBase(String... extras) { Set<String> s = new HashSet<>(); Collections.addAll(s, extras); return s; }
+```
+
+But base includes margins. For layouts that don't extend MarginLayoutParams? All standard layouts extend MarginLayoutParams except some? `ViewAnimator`, `ViewSwitcher` extends FrameLayout. `AdapterView` extends ViewGroup but children not in XML. `AbsoluteLayout` extends ViewGroup and its LayoutParams extends ViewGroup.LayoutParams (no margins). Actually AbsoluteLayout.LayoutParams extends ViewGroup.LayoutParams, not MarginLayoutParams. So base for AbsoluteLayout should only width/height + layout_x, layout_y. Need include AbsoluteLayout. `WebView` not layout. `GestureOverlayView` extends FrameLayout. `SurfaceView` not layout.
+
+`ViewGroup` direct custom layouts may support margins if MarginLayoutParams. Unknown skip.
+
+`PagerTitleStrip`? skip.
+
+`RadioGroup` extends LinearLayout, so base+weight+gravity.
+
+`SearchView`? not layout.
+
+`Toolbar` extends ViewGroup, LayoutParams? It has gravity? Not common.
+
+`ChipGroup` extends Flow? Material: extends ViewGroup, LayoutParams? Not common.
+
+`Flow`, `Layer`, `Guideline` are helper widgets in ConstraintLayout, not parents.
+
+`MotionLayout` extends ConstraintLayout.
+
+`SwipeRefreshLayout` extends ViewGroup, LayoutParams extends MarginLayoutParams plus gravity? Actually SwipeRefreshLayout only one direct child. LayoutParams? It extends ViewGroup.MarginLayoutParams. Not common to put layout params on child? It supports margins. Skip.
+
+`DrawerLayout` base+gravity.
+
+`SlidingPaneLayout` base+weight.
+
+`NestedScrollView` extends FrameLayout.
+
+`HorizontalScrollView` extends FrameLayout.
+
+`ScrollView` extends FrameLayout.
+
+`CardView` extends FrameLayout.
+
+`ViewPager2` extends ViewGroup, LayoutParams extends ViewGroup.MarginLayoutParams plus layout_gravity? Actually ViewPager2 pages are RecyclerView items, not XML children. Skip.
+
+`AdapterView` etc skip.
+
+`GridView` extends AbsListView, LayoutParams extends ViewGroup.LayoutParams + gravity. But XML children not used. Skip.
+
+`RecyclerView` extends ViewGroup, LayoutParams extends ViewGroup.MarginLayoutParams. Not typical XML children. Skip.
+
+`FragmentContainerView` extends FrameLayout, base+gravity.
+
+`NavHostFragment` not XML.
+
+`ComposeView` skip.
+
+Need include `androidx.fragment.app.FragmentContainerView`.
+
+Need include `androidx.core.widget.NestedScrollView`.
+
+Need include `com.google.android.material.card.MaterialCardView` extends CardView -> FrameLayout.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout` extends FrameLayout.
+
+`com.google.android.material.appbar.AppBarLayout` extends LinearLayout.
+
+`com.google.android.material.bottomnavigation.BottomNavigationView` not layout.
+
+`com.google.android.material.navigation.NavigationView` extends ScrimInsetsFrameLayout -> FrameLayout.
+
+`com.google.android.material.navigationrail.NavigationRailView` not layout.
+
+`com.google.android.material.tabs.TabLayout` not layout.
+
+`com.google.android.material.floatingactionbutton.FloatingActionButton` not layout.
+
+`com.google.android.material.textfield.TextInputLayout` extends LinearLayout.
+
+`com.google.android.material.appbar.MaterialToolbar` extends Toolbar.
+
+`com.google.android.material.chip.ChipGroup` extends ViewGroup.
+
+`com.google.android.material.button.MaterialButtonToggleGroup` extends LinearLayout.
+
+`com.google.android.material.imageview.ShapeableImageView` not.
+
+`com.google.android.material.slider.RangeSlider` not.
+
+`com.google.android.material.datepicker.MaterialDatePicker` not.
+
+`com.google.android.material.timepicker.MaterialTimePicker` not.
+
+`com.google.android.material.internal.FlowLayout`? skip.
+
+`com.google.android.material.motion.MotionLayout`? no.
+
+`androidx.percentlayout.widget.PercentFrameLayout`, `PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`, `androidx.constraintlayout.widget.MotionLayout`, `androidx.constraintlayout.helper.widget.Flow`, etc not parents.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.viewpager.widget.ViewPager` extends ViewGroup, LayoutParams extends ViewGroup.LayoutParams + gravity? It has layout_gravity? Actually ViewPager pages not XML. Skip.
+
+`androidx.viewpager2.widget.ViewPager2` skip.
+
+`androidx.appcompat.widget.LinearLayoutCompat` extends ViewGroup, LayoutParams extends MarginLayoutParams + weight/gravity. Include.
+
+`androidx.appcompat.widget.Toolbar` extends ViewGroup, LayoutParams extends ActionMenuView.LayoutParams? Not common.
+
+`androidx.appcompat.widget.ActionMenuView` extends LinearLayout.
+
+`androidx.appcompat.widget.ButtonBarLayout` extends LinearLayout.
+
+`androidx.appcompat.widget.ContentFrameLayout` extends FrameLayout.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout` extends FrameLayout.
+
+`androidx.appcompat.widget.AlertDialogLayout` extends LinearLayout.
+
+`androidx.appcompat.widget.DialogTitle` not.
+
+`androidx.appcompat.widget.ScrollingTabContainerView` extends HorizontalScrollView.
+
+`androidx.appcompat.widget.SearchView` not.
+
+`androidx.appcompat.widget.SwitchCompat` not.
+
+`androidx.appcompat.widget.ViewStubCompat` not.
+
+`androidx.cardview.widget.CardView` extends FrameLayout.
+
+`com.google.android.material.appbar.HeaderScrollingViewBehavior` not.
+
+`com.google.android.material.appbar.ViewOffsetBehavior` not.
+
+`com.google.android.material.appbar.AppBarLayout$ScrollingViewBehavior` not.
+
+`com.google.android.material.behavior.HideBottomViewOnScrollBehavior` not.
+
+`com.google.android.material.behavior.SwipeDismissBehavior` not.
+
+`com.google.android.material.bottomsheet.BottomSheetBehavior` not.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout` etc.
+
+`com.google.android.material.internal.CheckableImageButton` not.
+
+`com.google.android.material.internal.NavigationMenuItemView` not.
+
+`com.google.android.material.internal.NavigationMenuView` RecyclerView.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout` extends FrameLayout.
+
+`com.google.android.material.internal.TouchObserverFrameLayout` extends FrameLayout.
+
+`com.google.android.material.navigation.NavigationView` extends ScrimInsetsFrameLayout.
+
+`com.google.android.material.textfield.TextInputLayout` extends LinearLayout.
+
+`com.google.android.material.button.MaterialButtonToggleGroup` extends HorizontalScrollView? Actually extends LinearLayout.
+
+`com.google.android.material.chip.ChipGroup` extends ViewGroup.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.material.timepicker.TimePickerView` extends LinearLayout.
+
+`com.google.android.material.timepicker.ClockFaceView` extends RadialViewGroup.
+
+`com.google.android.material.timepicker.RadialViewGroup` extends ConstraintLayout? Actually extends ConstraintLayout? Hmm.
+
+`com.google.android.material.carousel.MaskableFrameLayout` extends FrameLayout.
+
+`com.google.android.material.divider.MaterialDividerItemDecoration` not.
+
+`com.google.android.material.imageview.ShapeableImageView` not.
+
+`com.google.android.material.radiobutton.MaterialRadioButton` not.
+
+`com.google.android.material.checkbox.MaterialCheckBox` not.
+
+`com.google.android.material.switchmaterial.SwitchMaterial` not.
+
+`com.google.android.material.textview.MaterialTextView` not.
+
+`com.google.android.material.appbar.MaterialToolbar` extends Toolbar.
+
+`com.google.android.material.bottomappbar.BottomAppBar` extends Toolbar.
+
+`com.google.android.material.search.SearchBar` extends AppBarLayout? Actually extends AppBarLayout? It extends AppBarLayout? SearchBar extends AppBarLayout? I think SearchBar extends AppBarLayout? Not sure. But children not typical.
+
+`com.google.android.material.search.SearchView` extends ?
+
+`com.google.android.material.sidesheet.SideSheetDialog` not.
+
+`com.google.android.material.motion.MaterialMainAxisTransition` not.
+
+`com.google.android.material.transition.MaterialFadeThrough` not.
+
+`com.google.android.material.transition.MaterialSharedAxis` not.
+
+`com.google.android.material.transition.MaterialElevationScale` not.
+
+`com.google.android.material.transition.platform` not.
+
+`com.google.android.material.transition.Hold` not.
+
+`com.google.android.material.shape` not.
+
+`com.google.android.material.theme` not.
+
+`com.google.android.material.resources` not.
+
+`com.google.android.material.animation` not.
+
+`com.google.android.material.appbar.AppBarLayout$LayoutParams` has scrollFlags.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout$LayoutParams` has collapseMode.
+
+`com.google.android.material.bottomsheet.BottomSheetBehavior` not parent.
+
+`com.google.android.material.card.MaterialCardView` extends CardView.
+
+`com.google.android.material.carousel.MaskableFrameLayout` extends FrameLayout.
+
+`com.google.android.material.divider.MaterialDivider` not.
+
+`com.google.android.material.floatingactionbutton.FloatingActionButton` not.
+
+`com.google.android.material.imageview.ShapeableImageView` not.
+
+`com.google.android.material.internal.FlowLayout` extends ViewGroup, LayoutParams? skip.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout` extends FrameLayout.
+
+`com.google.android.material.internal.TouchObserverFrameLayout` extends FrameLayout.
+
+`com.google.android.material.navigation.NavigationView` extends ScrimInsetsFrameLayout.
+
+`com.google.android.material.navigationrail.NavigationRailView` not.
+
+`com.google.android.material.search.SearchBar` extends AppBarLayout? If extends AppBarLayout, base+weight+gravity+scrollFlags. But not necessary.
+
+`com.google.android.material.sidesheet.SideSheetDialog` not.
+
+`com.google.android.material.slider` not.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout` extends FrameLayout.
+
+`com.google.android.material.tabs.TabLayout` not.
+
+`com.google.android.material.textfield.TextInputLayout` extends LinearLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` extends ConstraintLayout? If so constraints. But not common.
+
+`com.google.android.material.transition` not.
+
+`com.google.android.material.widget` not.
+
+`androidx.appcompat.widget.ContentFrameLayout` etc.
+
+`androidx.constraintlayout.helper.widget.Flow` not parent.
+
+`androidx.constraintlayout.helper.widget.Layer` not parent.
+
+`androidx.constraintlayout.helper.widget.Guideline` not parent.
+
+`androidx.constraintlayout.helper.widget.Barrier` not parent.
+
+`androidx.constraintlayout.helper.widget.Group` not parent.
+
+`androidx.constraintlayout.helper.widget.Carousel` not parent.
+
+`androidx.constraintlayout.motion.widget.MotionLayout` extends ConstraintLayout.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.core.widget.NestedScrollView` extends FrameLayout.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.fragment.app.FragmentContainerView` extends FrameLayout.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`, `PercentRelativeLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.swiperefreshlayout.widget.SwipeRefreshLayout` extends ViewGroup, LayoutParams extends MarginLayoutParams. Not common XML children. Could include base only.
+
+`androidx.viewpager.widget.ViewPager` skip.
+
+`androidx.viewpager2.widget.ViewPager2` skip.
+
+`androidx.appcompat.widget.ActionBarContainer` extends FrameLayout.
+
+`androidx.appcompat.widget.ActionBarOverlayLayout` extends ViewGroup.
+
+`androidx.appcompat.widget.ActionMenuView` extends LinearLayout.
+
+`androidx.appcompat.widget.AlertDialogLayout` extends LinearLayout.
+
+`androidx.appcompat.widget.ButtonBarLayout` extends LinearLayout.
+
+`androidx.appcompat.widget.ContentFrameLayout` extends FrameLayout.
+
+`androidx.appcompat.widget.DialogTitle` not.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout` extends FrameLayout.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout` extends LinearLayout.
+
+`androidx.appcompat.widget.LinearLayoutCompat` extends ViewGroup, LayoutParams extends MarginLayoutParams + weight/gravity.
+
+`androidx.appcompat.widget.ListPopupWindow$DropDownListView` not.
+
+`androidx.appcompat.widget.MenuPopupWindow$MenuDropDownListView` not.
+
+`androidx.appcompat.widget.ScrollingTabContainerView` extends HorizontalScrollView.
+
+`androidx.appcompat.widget.Toolbar` extends ViewGroup, LayoutParams extends ActionMenuView.LayoutParams? It has gravity? Not common.
+
+`androidx.appcompat.widget.ViewStubCompat` not.
+
+`androidx.appcompat.widget.ActionBarContextView` extends AbsActionBarView extends ViewGroup.
+
+`androidx.appcompat.widget.ActivityChooserView` extends ViewGroup.
+
+`androidx.appcompat.widget.SearchView` extends LinearLayout.
+
+`androidx.appcompat.widget.SuggestionsAdapter` not.
+
+`androidx.appcompat.widget.Toolbar` skip.
+
+`androidx.emoji2.widget.EmojiExtractEditText` not.
+
+`androidx.media3.ui.PlayerView` extends FrameLayout? Actually extends AspectRatioFrameLayout extends FrameLayout. base+gravity.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout` extends FrameLayout.
+
+`com.google.android.exoplayer2.ui.PlayerView` extends FrameLayout.
+
+`com.google.android.gms.ads.AdView` not.
+
+`com.google.android.gms.maps.MapView` not.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout` etc.
+
+`com.google.android.material.bottomappbar.BottomAppBar` extends Toolbar.
+
+`com.google.android.material.bottomnavigation.BottomNavigationView` not.
+
+`com.google.android.material.bottomsheet.BottomSheetDialog` not.
+
+`com.google.android.material.button.MaterialButtonToggleGroup` extends LinearLayout.
+
+`com.google.android.material.card.MaterialCardView` extends CardView.
+
+`com.google.android.material.carousel.MaskableFrameLayout` extends FrameLayout.
+
+`com.google.android.material.chip.ChipGroup` extends ViewGroup.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.material.datepicker.MaterialDatePicker` not.
+
+`com.google.android.material.divider.MaterialDivider` not.
+
+`com.google.android.material.floatingactionbutton.FloatingActionButton` not.
+
+`com.google.android.material.imageview.ShapeableImageView` not.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout` extends FrameLayout.
+
+`com.google.android.material.internal.TouchObserverFrameLayout` extends FrameLayout.
+
+`com.google.android.material.navigation.NavigationView` extends ScrimInsetsFrameLayout.
+
+`com.google.android.material.navigationrail.NavigationRailView` not.
+
+`com.google.android.material.radiobutton.MaterialRadioButton` not.
+
+`com.google.android.material.search.SearchBar` extends AppBarLayout? If so.
+
+`com.google.android.material.search.SearchView` extends ?
+
+`com.google.android.material.slider` not.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout` extends FrameLayout.
+
+`com.google.android.material.tabs.TabLayout` not.
+
+`com.google.android.material.textfield.TextInputLayout` extends LinearLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` extends ConstraintLayout? If so constraints.
+
+`com.google.android.material.transition` not.
+
+`com.google.android.material.widget` not.
+
+`androidx.compose.ui.platform.ComposeView` not.
+
+`androidx.recyclerview.widget.RecyclerView` skip.
+
+`androidx.viewpager.widget.ViewPager` skip.
+
+`androidx.viewpager2.widget.ViewPager2` skip.
+
+`androidx.appcompat.widget.ActionBarContainer` etc.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.fragment.app.FragmentContainerView`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`, `PercentRelativeLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.swiperefreshlayout.widget.SwipeRefreshLayout`.
+
+`androidx.viewpager.widget.ViewPager`.
+
+`androidx.viewpager2.widget.ViewPager2`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.appcompat.widget.ScrollingTabContainerView`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.appbar.MaterialToolbar` extends Toolbar.
+
+`com.google.android.material.bottomappbar.BottomAppBar` extends Toolbar.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.timepicker.TimePickerView` extends LinearLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`androidx.constraintlayout.helper.widget.Flow` not parent.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`com.google.android.material.carousel.MaskableFrameLayout`.
+
+`com.google.android.material.internal.ScrimInsetsFrameLayout`.
+
+`com.google.android.material.internal.TouchObserverFrameLayout`.
+
+`com.google.android.material.navigation.NavigationView`.
+
+`com.google.android.material.snackbar.Snackbar$SnackbarLayout`.
+
+`com.google.android.material.textfield.TextInputLayout`.
+
+`com.google.android.material.timepicker.TimePickerView`.
+
+`com.google.android.material.button.MaterialButtonToggleGroup`.
+
+`com.google.android.material.chip.ChipGroup`.
+
+`com.google.android.material.appbar.MaterialToolbar` skip.
+
+`com.google.android.material.bottomappbar.BottomAppBar` skip.
+
+`com.google.android.material.search.SearchBar` maybe AppBarLayout.
+
+`com.google.android.material.timepicker.RadialViewGroup` maybe ConstraintLayout.
+
+`com.google.android.material.datepicker.MaterialCalendarGridView` extends GridView.
+
+`com.google.android.exoplayer2.ui.AspectRatioFrameLayout`.
+
+`com.google.android.exoplayer2.ui.PlayerView`.
+
+`androidx.media3.ui.AspectRatioFrameLayout`.
+
+`androidx.media3.ui.PlayerView`.
+
+`androidx.constraintlayout.widget.ConstraintLayout`.
+
+`androidx.constraintlayout.motion.widget.MotionLayout`.
+
+`com.google.android.flexbox.FlexboxLayout`.
+
+`androidx.percentlayout.widget.PercentFrameLayout`.
+
+`androidx.percentlayout.widget.PercentRelativeLayout`.
+
+`androidx.gridlayout.widget.GridLayout`.
+
+`androidx.drawerlayout.widget.DrawerLayout`.
+
+`androidx.slidingpanelayout.widget.SlidingPaneLayout`.
+
+`androidx.coordinatorlayout.widget.CoordinatorLayout`.
+
+`androidx.appcompat.widget.ActionMenuView`.
+
+`androidx.appcompat.widget.LinearLayoutCompat`.
+
+`androidx.appcompat.widget.AlertDialogLayout`.
+
+`androidx.appcompat.widget.ButtonBarLayout`.
+
+`androidx.appcompat.widget.ContentFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsFrameLayout`.
+
+`androidx.appcompat.widget.FitWindowsLinearLayout`.
+
+`androidx.core.widget.NestedScrollView`.
+
+`androidx.cardview.widget.CardView`.
+
+`com.google.android.material.card.MaterialCardView`.
+
+`com.google.android.material.appbar.AppBarLayout`.
+
+`com.google.android.material.appbar.CollapsingToolbarLayout`.
+
+`

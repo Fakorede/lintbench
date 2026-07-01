@@ -1,0 +1,325 @@
+package com.android.tools.lint.checks;
+
+import com.android.annotations.NonNull;
+import com.android.annotations.Nullable;
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Context;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceXmlDetector;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Element;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+public class DuplicateIdDetector extends ResourceXmlDetector {
+    private static final String ANDROID_URI = "http://schemas.android.com/apk/res/android";
+    private static final String INCLUDE = "include";
+    private static final String LAYOUT_PREFIX = "@layout/";
+
+    public static final Issue ISSUE = Issue.create(
+            "DuplicateIncludedIds",
+            "Duplicate ids across layouts combined with include tags",
+            "It's okay for two independent layouts to use the same ids. However, if "
+                    + "layouts are combined with include tags, then the ids need to be unique "
+                    + "within any chain of included layouts, or Activity#findViewById() can "
+                    + "return an unexpected view.",
+            Category.CORRECTNESS,
+            6,
+            Severity.WARNING,
+            new Implementation(DuplicateIdDetector.class, Scope.RESOURCE_FILE_SCOPE));
+
+    private final Map<String, FileInfo> mFileInfos = new HashMap<>();
+    private final Map<String, List<FileInfo>> mLayoutInfos = new HashMap<>();
+    private final Map<String, LayoutResult> mResults = new HashMap<>();
+
+    private static class FileInfo {
+        final File file;
+        final String layoutName;
+        final List<IdOccurrence> ids = new ArrayList<>();
+        final List<IncludeInfo> includes = new ArrayList<>();
+        final Set<String> rootIds = new HashSet<>();
+
+        FileInfo(File file, String layoutName) {
+            this.file = file;
+            this.layoutName = layoutName;
+        }
+    }
+
+    private static class IdOccurrence {
+        final String id;
+        final Location location;
+
+        IdOccurrence(String id, Location location) {
+            this.id = id;
+            this.location = location;
+        }
+    }
+
+    private static class IncludeInfo {
+        final String layoutName;
+        final String overrideId;
+        final Location location;
+
+        IncludeInfo(String layoutName, String overrideId, Location location) {
+            this.layoutName = layoutName;
+            this.overrideId = overrideId;
+            this.location = location;
+        }
+    }
+
+    private static class LayoutResult {
+        final Set<String> allIds;
+        final Set<String> rootIds;
+        final boolean hasDuplicates;
+        final Set<String> duplicateIds;
+
+        LayoutResult(Set<String> allIds, Set<String> rootIds, boolean hasDuplicates,
+                Set<String> duplicateIds) {
+            this.allIds = allIds;
+            this.rootIds = rootIds;
+            this.hasDuplicates = hasDuplicates;
+            this.duplicateIds = duplicateIds;
+        }
+    }
+
+    @Override
+    public boolean appliesTo(@NonNull ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.LAYOUT;
+    }
+
+    @Override
+    public void beforeCheckProject(@NonNull Context context) {
+        mFileInfos.clear();
+        mLayoutInfos.clear();
+        mResults.clear();
+    }
+
+    @Nullable
+    @Override
+    public Collection<String> getApplicableElements() {
+        return null;
+    }
+
+    @Override
+    public void visitElement(@NonNull XmlContext context, @NonNull Element element) {
+        FileInfo fileInfo = getFileInfo(context);
+        String tag = element.getTagName();
+
+        if (INCLUDE.equals(tag)) {
+            String layout = element.getAttribute("layout");
+            if (layout != null && layout.startsWith(LAYOUT_PREFIX)) {
+                String included = layout.substring(LAYOUT_PREFIX.length());
+                String override = stripId(element.getAttributeNS(ANDROID_URI, "id"));
+                fileInfo.includes.add(new IncludeInfo(included, override,
+                        context.getLocation(element)));
+            }
+            return;
+        }
+
+        String id = stripId(element.getAttributeNS(ANDROID_URI, "id"));
+        if (id != null && !id.isEmpty()) {
+            fileInfo.ids.add(new IdOccurrence(id, context.getLocation(element)));
+            if (element == element.getOwnerDocument().getDocumentElement()) {
+                fileInfo.rootIds.add(id);
+            }
+        }
+    }
+
+    private FileInfo getFileInfo(XmlContext context) {
+        String path = context.file.getPath();
+        FileInfo info = mFileInfos.get(path);
+        if (info == null) {
+            File file = context.file;
+            String name = file.getName();
+            int dot = name.lastIndexOf('.');
+            if (dot > 0) {
+                name = name.substring(0, dot);
+            }
+            info = new FileInfo(file, name);
+            mFileInfos.put(path, info);
+
+            List<FileInfo> list = mLayoutInfos.get(name);
+            if (list == null) {
+                list = new ArrayList<>();
+                mLayoutInfos.put(name, list);
+            }
+            list.add(info);
+        }
+        return info;
+    }
+
+    @Nullable
+    private static String stripId(String id) {
+        if (id == null || id.isEmpty()) {
+            return null;
+        }
+        int slash = id.lastIndexOf('/');
+        if (slash != -1) {
+            id = id.substring(slash + 1);
+        }
+        return id;
+    }
+
+    @Override
+    public void afterCheckProject(@NonNull Context context) {
+        for (FileInfo fileInfo : mFileInfos.values()) {
+            checkFile(context, fileInfo);
+        }
+    }
+
+    private void checkFile(Context context, FileInfo fileInfo) {
+        Set<String> seen = new HashSet<>();
+        for (IdOccurrence occ : fileInfo.ids) {
+            seen.add(occ.id);
+        }
+
+        for (IncludeInfo include : fileInfo.includes) {
+            LayoutResult result = computeLayoutResult(include.layoutName, new HashSet<String>());
+
+            Set<String> includedIds = new HashSet<>(result.allIds);
+            if (include.overrideId != null) {
+                includedIds.removeAll(result.rootIds);
+                includedIds.add(include.overrideId);
+            }
+
+            List<String> conflicts = new ArrayList<>();
+            for (String id : includedIds) {
+                if (!seen.add(id)) {
+                    conflicts.add(id);
+                }
+            }
+
+            Set<String> duplicateIds = computeEffectiveDuplicateIds(result, include);
+
+            if (!duplicateIds.isEmpty() || !conflicts.isEmpty()) {
+                String message = buildMessage(include.layoutName, duplicateIds, conflicts);
+                context.report(ISSUE, include.location, message);
+            }
+        }
+    }
+
+    private Set<String> computeEffectiveDuplicateIds(LayoutResult result, IncludeInfo include) {
+        Set<String> dups = new HashSet<>(result.duplicateIds);
+        if (include.overrideId != null) {
+            dups.removeAll(result.rootIds);
+            if (result.allIds.contains(include.overrideId)
+                    && !result.rootIds.contains(include.overrideId)) {
+                dups.add(include.overrideId);
+            }
+        }
+        return dups;
+    }
+
+    private String buildMessage(String layoutName, Set<String> duplicateIds,
+            List<String> conflicts) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("The included layout \"@layout/").append(layoutName).append("\"");
+
+        boolean hasDups = !duplicateIds.isEmpty();
+        boolean hasConflicts = !conflicts.isEmpty();
+
+        if (hasDups) {
+            sb.append(" has duplicate ids");
+            appendIds(sb, duplicateIds);
+        }
+
+        if (hasConflicts) {
+            if (hasDups) {
+                sb.append(" and");
+            }
+            sb.append(" contains ids already used in this layout");
+            appendIds(sb, conflicts);
+        }
+
+        return sb.toString();
+    }
+
+    private void appendIds(StringBuilder sb, Collection<String> ids) {
+        List<String> sorted = new ArrayList<>(ids);
+        Collections.sort(sorted);
+        sb.append(" (");
+        for (int i = 0; i < sorted.size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(sorted.get(i));
+        }
+        sb.append(")");
+    }
+
+    @NonNull
+    private LayoutResult computeLayoutResult(@NonNull String layoutName,
+            @NonNull Set<String> visiting) {
+        LayoutResult cached = mResults.get(layoutName);
+        if (cached != null) {
+            return cached;
+        }
+
+        if (!visiting.add(layoutName)) {
+            return new LayoutResult(Collections.<String>emptySet(),
+                    Collections.<String>emptySet(), false, Collections.<String>emptySet());
+        }
+
+        List<FileInfo> files = mLayoutInfos.get(layoutName);
+        if (files == null) {
+            visiting.remove(layoutName);
+            return new LayoutResult(Collections.<String>emptySet(),
+                    Collections.<String>emptySet(), false, Collections.<String>emptySet());
+        }
+
+        Set<String> allIds = new HashSet<>();
+        Set<String> rootIds = new HashSet<>();
+        Set<String> duplicateIds = new HashSet<>();
+        boolean hasDuplicates = false;
+
+        for (FileInfo file : files) {
+            Set<String> fileIds = new HashSet<>();
+
+            for (IdOccurrence occ : file.ids) {
+                if (!fileIds.add(occ.id)) {
+                    hasDuplicates = true;
+                    duplicateIds.add(occ.id);
+                }
+            }
+
+            rootIds.addAll(file.rootIds);
+
+            for (IncludeInfo include : file.includes) {
+                LayoutResult child = computeLayoutResult(include.layoutName, visiting);
+                Set<String> childIds = new HashSet<>(child.allIds);
+                if (include.overrideId != null) {
+                    childIds.removeAll(child.rootIds);
+                    childIds.add(include.overrideId);
+                }
+
+                for (String id : childIds) {
+                    if (!fileIds.add(id)) {
+                        hasDuplicates = true;
+                        duplicateIds.add(id);
+                    }
+                }
+            }
+
+            allIds.addAll(fileIds);
+        }
+
+        visiting.remove(layoutName);
+        LayoutResult result = new LayoutResult(allIds, rootIds, hasDuplicates, duplicateIds);
+        mResults.put(layoutName, result);
+        return result;
+    }
+}

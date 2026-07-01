@@ -1,0 +1,184 @@
+```kotlin
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.ANDROID_URI
+import com.android.SdkConstants.ATTR_NAME
+import com.android.SdkConstants.TAG_APPLICATION
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.LintMap
+import com.android.tools.lint.detector.api.Location
+import com.android.tools.lint.detector.api.ResourceXmlDetector
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import com.android.utils.iterator
+import org.w3c.dom.Element
+import java.util.EnumSet
+
+/**
+ * Detector that checks whether adaptive launcher icons define a monochrome layer.
+ */
+class MonochromeLauncherIconDetector : ResourceXmlDetector(), XmlScanner {
+
+    // Tracks adaptive icon files that are missing a <monochrome> element.
+    // Maps resource name (e.g. "ic_launcher") -> location of the adaptive-icon element.
+    private val adaptiveIconsMissingMonochrome = mutableMapOf<String, Location>()
+
+    // Tracks adaptive icon files that DO have a <monochrome> element.
+    private val adaptiveIconsWithMonochrome = mutableSetOf<String>()
+
+    // The launcher icon attribute value from the manifest (e.g. "@mipmap/ic_launcher")
+    private var launcherIconRef: String? = null
+    private var launcherIconLocation: Location? = null
+
+    // The round launcher icon attribute value from the manifest
+    private var launcherRoundIconRef: String? = null
+    private var launcherRoundIconLocation: Location? = null
+
+    companion object {
+        private const val TAG_ADAPTIVE_ICON = "adaptive-icon"
+        private const val TAG_MONOCHROME = "monochrome"
+        private const val ATTR_ICON = "icon"
+        private const val ATTR_ROUND_ICON = "roundIcon"
+
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "MonochromeLauncherIcon",
+            briefDescription = "Monochrome icon is not defined",
+            explanation = """
+                The system may use the coloring of the user's chosen wallpaper and theme to \
+                tint app icons. Providing a `<monochrome>` layer (which will be used for \
+                tinting) for every adaptive icon is strongly recommended, otherwise Android \
+                16 QPR 2 and above will simply tint the color version of the icon, which may \
+                look unusual. Devices running earlier Android versions will (with no monochrome \
+                layer) show the untinted color icon for your app, which will look inconsistent.
+            """,
+            category = Category.ICONS,
+            priority = 6,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                MonochromeLauncherIconDetector::class.java,
+                EnumSet.of(Scope.MANIFEST, Scope.RESOURCE_FILE),
+                EnumSet.of(Scope.MANIFEST),
+                EnumSet.of(Scope.RESOURCE_FILE)
+            )
+        )
+
+        private fun extractResourceName(ref: String?): String? {
+            if (ref == null) return null
+            // e.g. "@mipmap/ic_launcher" or "@drawable/ic_launcher"
+            val slash = ref.lastIndexOf('/')
+            return if (slash >= 0) ref.substring(slash + 1) else null
+        }
+    }
+
+    override fun appliesTo(folderType: ResourceFolderType): Boolean {
+        return folderType == ResourceFolderType.MIPMAP ||
+            folderType == ResourceFolderType.DRAWABLE
+    }
+
+    override fun getApplicableElements(): Collection<String> {
+        return listOf(TAG_ADAPTIVE_ICON, TAG_APPLICATION)
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        when (element.tagName) {
+            TAG_APPLICATION -> visitApplicationElement(context, element)
+            TAG_ADAPTIVE_ICON -> visitAdaptiveIconElement(context, element)
+        }
+    }
+
+    private fun visitApplicationElement(context: XmlContext, element: Element) {
+        val iconAttr = element.getAttributeNodeNS(ANDROID_URI, ATTR_ICON)
+        if (iconAttr != null) {
+            launcherIconRef = iconAttr.value
+            launcherIconLocation = context.getLocation(iconAttr)
+        }
+
+        val roundIconAttr = element.getAttributeNodeNS(ANDROID_URI, ATTR_ROUND_ICON)
+        if (roundIconAttr != null) {
+            launcherRoundIconRef = roundIconAttr.value
+            launcherRoundIconLocation = context.getLocation(roundIconAttr)
+        }
+    }
+
+    private fun visitAdaptiveIconElement(context: XmlContext, element: Element) {
+        val resourceName = getResourceName(context) ?: return
+
+        var hasMonochrome = false
+        for (child in element) {
+            if (child is Element && child.tagName == TAG_MONOCHROME) {
+                hasMonochrome = true
+                break
+            }
+        }
+
+        if (hasMonochrome) {
+            adaptiveIconsWithMonochrome.add(resourceName)
+            // Remove from missing map if it was added by a different density folder
+            adaptiveIconsMissingMonochrome.remove(resourceName)
+        } else {
+            // Only add to missing if we haven't already seen a version with monochrome
+            if (!adaptiveIconsWithMonochrome.contains(resourceName)) {
+                if (!adaptiveIconsMissingMonochrome.containsKey(resourceName)) {
+                    adaptiveIconsMissingMonochrome[resourceName] = context.getLocation(element)
+                }
+            }
+        }
+    }
+
+    private fun getResourceName(context: XmlContext): String? {
+        val file = context.file
+        return file.nameWithoutExtension
+    }
+
+    override fun afterCheckRootProject(context: Context) {
+        // Determine which launcher icon resource names we care about
+        val launcherIconName = extractResourceName(launcherIconRef)
+        val launcherRoundIconName = extractResourceName(launcherRoundIconRef)
+
+        val relevantNames = mutableSetOf<String>()
+        if (launcherIconName != null) relevantNames.add(launcherIconName)
+        if (launcherRoundIconName != null) relevantNames.add(launcherRoundIconName)
+
+        // For each relevant launcher icon that is an adaptive icon without monochrome, report
+        for (name in relevantNames) {
+            if (adaptiveIconsWithMonochrome.contains(name)) {
+                // At least one variant has monochrome - OK
+                continue
+            }
+            val missingLocation = adaptiveIconsMissingMonochrome[name]
+            if (missingLocation != null) {
+                // It's an adaptive icon but missing monochrome
+                val location = if (name == launcherIconName && launcherIconLocation != null) {
+                    launcherIconLocation!!.withSecondary(
+                        missingLocation,
+                        "Adaptive icon missing <monochrome> tag"
+                    )
+                } else if (name == launcherRoundIconName && launcherRoundIconLocation != null) {
+                    launcherRoundIconLocation!!.withSecondary(
+                        missingLocation,
+                        "Adaptive icon missing <monochrome> tag"
+                    )
+                } else {
+                    missingLocation
+                }
+                context.report(
+                    ISSUE,
+                    location,
+                    "The launcher icon `$name` is an adaptive icon, but does not define a " +
+                        "`<monochrome>` layer. Without a monochrome layer, Android 16 QPR 2+ " +
+                        "will tint the color icon directly, which may look unusual."
+                )
+            }
+            // If it's not in adaptiveIconsMissingMonochrome either, it might not be an
+            // adaptive icon at all (e.g. a plain PNG), so we don't report.
+        }
+    }
+}
+```

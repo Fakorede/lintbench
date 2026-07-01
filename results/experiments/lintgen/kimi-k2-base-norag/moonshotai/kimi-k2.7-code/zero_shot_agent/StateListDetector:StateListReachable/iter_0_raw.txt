@@ -1,0 +1,85 @@
+package com.android.tools.lint.checks;
+
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.XmlContext;
+
+import org.w3c.dom.Element;
+import org.w3c.dom.NamedNodeMap;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import java.util.Arrays;
+import java.util.List;
+
+public class StateListDetector extends Detector implements Detector.XmlScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "StateListReachable",
+            "Unreachable state in a `<selector>`",
+            "In a selector, only the last child in the state list should omit a state qualifier. "
+                    + "If not, all subsequent items in the list will be ignored since the given item will match all states.",
+            Category.CORRECTNESS,
+            5,
+            Severity.WARNING,
+            new Implementation(StateListDetector.class, Scope.RESOURCE_FILE_SCOPE)
+    );
+
+    @Override
+    public List<String> getApplicableElements() {
+        return Arrays.asList("selector");
+    }
+
+    @Override
+    public void visitElement(XmlContext context, Element element) {
+        NodeList children = element.getChildNodes();
+
+        int lastItemIndex = -1;
+        for (int i = 0; i < children.getLength(); i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() == Node.ELEMENT_NODE
+                    && "item".equals(child.getLocalName())) {
+                lastItemIndex = i;
+            }
+        }
+
+        if (lastItemIndex < 0) {
+            return;
+        }
+
+        for (int i = 0; i < lastItemIndex; i++) {
+            Node child = children.item(i);
+            if (child.getNodeType() != Node.ELEMENT_NODE
+                    || !"item".equals(child.getLocalName())) {
+                continue;
+            }
+
+            Element item = (Element) child;
+            if (!hasStateQualifier(item)) {
+                context.report(
+                        ISSUE,
+                        item,
+                        context.getLocation(item),
+                        "Only the last `<item>` in a `<selector>` should omit a state qualifier; "
+                                + "this item matches all states and causes subsequent items to be ignored."
+                );
+            }
+        }
+    }
+
+    private static boolean hasStateQualifier(Element item) {
+        NamedNodeMap attributes = item.getAttributes();
+        for (int i = 0; i < attributes.getLength(); i++) {
+            Node attribute = attributes.item(i);
+            String name = attribute.getLocalName();
+            if (name != null && name.startsWith("state_")) {
+                return true;
+            }
+        }
+        return false;
+    }
+}

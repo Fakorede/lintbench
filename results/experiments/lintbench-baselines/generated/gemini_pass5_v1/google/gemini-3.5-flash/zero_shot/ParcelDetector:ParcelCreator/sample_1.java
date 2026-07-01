@@ -1,0 +1,97 @@
+package com.android.tools.lint.checks;
+
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.JavaContext;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+import com.android.tools.lint.detector.api.SourceCodeScanner;
+import com.intellij.psi.PsiClass;
+import com.intellij.psi.PsiField;
+import com.intellij.psi.PsiModifier;
+import com.intellij.psi.PsiType;
+import java.util.Collections;
+import java.util.List;
+import org.jetbrains.uast.UClass;
+
+public class ParcelDetector extends Detector implements SourceCodeScanner {
+
+    public static final Issue ISSUE = Issue.create(
+            "ParcelCreator",
+            "Missing Parcelable CREATOR field",
+            "According to the `Parcelable` interface documentation, \"Classes " +
+            "implementing the Parcelable interface must also have a static " +
+            "field called `CREATOR`, which is an object implementing the " +
+            "`Parcelable.Creator` interface.\"",
+            Category.CORRECTNESS,
+            5,
+            Severity.ERROR,
+            new Implementation(
+                    ParcelDetector.class,
+                    Scope.JAVA_FILE_SET
+            )
+    );
+
+    @Override
+    public List<String> applicableSuperClasses() {
+        return Collections.singletonList("android.os.Parcelable");
+    }
+
+    @Override
+    public void visitClass(JavaContext context, UClass declaration) {
+        if (declaration.isInterface() || declaration.hasModifierProperty(PsiModifier.ABSTRACT)) {
+            return;
+        }
+
+        if (declaration.getName() == null) {
+            return;
+        }
+
+        PsiField creatorField = declaration.findFieldByName("CREATOR", false);
+        if (creatorField == null) {
+            context.report(
+                    ISSUE,
+                    declaration,
+                    context.getNameLocation(declaration),
+                    "This class implements `Parcelable` but is missing a `CREATOR` field"
+            );
+            return;
+        }
+
+        if (!creatorField.hasModifierProperty(PsiModifier.STATIC)) {
+            context.report(
+                    ISSUE,
+                    creatorField,
+                    context.getLocation(creatorField),
+                    "The `CREATOR` field must be `static`"
+            );
+            return;
+        }
+
+        PsiType type = creatorField.getType();
+        String typeName = type.getCanonicalText();
+        boolean implementsCreator = false;
+
+        if (typeName.startsWith("android.os.Parcelable.Creator")) {
+            implementsCreator = true;
+        } else {
+            PsiClass fieldClass = context.getEvaluator().getTypeClass(type);
+            if (fieldClass != null) {
+                if (context.getEvaluator().inheritsFrom(fieldClass, "android.os.Parcelable.Creator", false)) {
+                    implementsCreator = true;
+                }
+            }
+        }
+
+        if (!implementsCreator) {
+            context.report(
+                    ISSUE,
+                    creatorField,
+                    context.getLocation(creatorField),
+                    "The `CREATOR` field must implement `android.os.Parcelable.Creator`"
+            );
+        }
+    }
+}

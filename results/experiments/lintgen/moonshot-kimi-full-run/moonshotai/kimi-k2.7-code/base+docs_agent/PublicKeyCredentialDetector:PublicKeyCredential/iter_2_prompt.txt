@@ -1,0 +1,238 @@
+=== SYSTEM ===
+You are an expert Android developer specialising in Android Lint custom checks.
+You write Lint Detector implementations in Kotlin that are correct, idiomatic,
+and compile cleanly against the Android Lint API.
+
+- Output ONLY the detector source file. No explanation, no markdown fences.
+- Use the exact package: com.android.tools.lint.checks
+- The class name must be: PublicKeyCredentialDetector
+
+
+=== USER ===
+Implement an Android Lint Detector named PublicKeyCredentialDetector in Kotlin for the following issue.
+
+Issue ID: PublicKeyCredential
+
+Specification:
+Creating public key credential
+
+Credential Manager API supports creating public key credential (Passkeys) starting Android 9 or higher.  Please check for the Android version before calling the method.
+
+Generate the complete PublicKeyCredentialDetector.kt source file now.
+
+---
+
+Your previous attempt failed. Here is the code you generated:
+
+```kt
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.client.api.UElementHandler
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.ConstantEvaluator
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.JavaContext
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.SourceCodeScanner
+import com.intellij.psi.PsiClassType
+import com.intellij.psi.PsiField
+import org.jetbrains.uast.UBinaryExpression
+import org.jetbrains.uast.UCallExpression
+import org.jetbrains.uast.UElement
+import org.jetbrains.uast.UExpression
+import org.jetbrains.uast.UIfExpression
+import org.jetbrains.uast.UParenthesizedExpression
+import org.jetbrains.uast.UReferenceExpression
+import org.jetbrains.uast.UastBinaryOperator
+import org.jetbrains.uast.getParentOfType
+import java.util.EnumSet
+
+private const val MIN_SDK = 28
+private const val CREDENTIAL_MANAGER_CLASS = "androidx.credentials.CredentialManager"
+private const val PUBLIC_KEY_REQUEST_CLASS = "androidx.credentials.CreatePublicKeyCredentialRequest"
+
+class PublicKeyCredentialDetector : Detector(), SourceCodeScanner {
+
+    override fun getApplicableUastTypes(): List<Class<out UElement>> {
+        return listOf(UCallExpression::class.java)
+    }
+
+    override fun createUastHandler(context: JavaContext): UElementHandler {
+        return object : UElementHandler() {
+            override fun visitCallExpression(node: UCallExpression) {
+                if (!isCreatePublicKeyCredentialCall(context, node)) return
+                if (isGuardedBySdkCheck(node, MIN_SDK)) return
+
+                context.report(
+                    ISSUE,
+                    node,
+                    context.getLocation(node),
+                    "Creating a public key credential (passkey) requires Android 9 (API 28) or higher. " +
+                        "Check `Build.VERSION.SDK_INT >= Build.VERSION_CODES.P` before calling this method."
+                )
+            }
+        }
+    }
+
+    companion object {
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "PublicKeyCredential",
+            briefDescription = "Public key credential creation requires Android 9+",
+            explanation = """
+                Credential Manager supports creating public key credentials (passkeys) starting with Android 9 (API level 28).
+                Calling `CredentialManager.createCredential(...)` with a `CreatePublicKeyCredentialRequest` on older devices can fail at runtime.
+                Always guard the call with a `Build.VERSION.SDK_INT >= Build.VERSION_CODES.P` check.
+            """,
+            category = Category.CORRECTNESS,
+            priority = 5,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                PublicKeyCredentialDetector::class.java,
+                EnumSet.of(Scope.JAVA_FILE, Scope.TEST_SOURCES)
+            )
+        )
+    }
+}
+
+private fun isCreatePublicKeyCredentialCall(context: JavaContext, node: UCallExpression): Boolean {
+    if (node.methodName != "createCredential") return false
+
+    val method = node.resolve() ?: return false
+    val containingClass = method.containingClass ?: return false
+    if (!context.evaluator.extendsClass(containingClass, CREDENTIAL_MANAGER_CLASS, false)) return false
+
+    return node.valueArguments.any { arg ->
+        isPublicKeyCredentialRequest(context, arg)
+    }
+}
+
+private fun isPublicKeyCredentialRequest(context: JavaContext, expression: UExpression?): Boolean {
+    if (expression == null) return false
+
+    val type = expression.getExpressionType()
+    if (type != null) {
+        val canonical = type.canonicalText
+        if (canonical == PUBLIC_KEY_REQUEST_CLASS) return true
+        val cls = (type as? PsiClassType)?.resolve()
+        if (cls != null && context.evaluator.extendsClass(cls, PUBLIC_KEY_REQUEST_CLASS, false)) {
+            return true
+        }
+    }
+
+    if (expression is UCallExpression) {
+        val returnType = expression.getExpressionType()
+        if (returnType != null) {
+            val canonical = returnType.canonicalText
+            if (canonical == PUBLIC_KEY_REQUEST_CLASS) return true
+            val cls = (returnType as? PsiClassType)?.resolve()
+            if (cls != null && context.evaluator.extendsClass(cls, PUBLIC_KEY_REQUEST_CLASS, false)) {
+                return true
+            }
+        }
+    }
+
+    return false
+}
+
+private fun isGuardedBySdkCheck(node: UCallExpression, minSdk: Int): Boolean {
+    var current: UElement? = node
+    while (current != null) {
+        val ifExpr = current.getParentOfType(UIfExpression::class.java, true) ?: break
+        if (conditionEnsuresAtLeast(ifExpr.condition, minSdk)) return true
+        current = ifExpr.uastParent
+    }
+    return false
+}
+
+private fun conditionEnsuresAtLeast(
+    expression: UExpression?,
+    minSdk: Int
+): Boolean {
+    val binary = unwrap(expression) as? UBinaryExpression ?: return false
+
+    return when (binary.operator) {
+        UastBinaryOperator.GREATER_OR_EQUALS,
+        UastBinaryOperator.GREATER -> {
+            val sdkSide = when {
+                isSdkIntReference(binary.leftOperand) -> binary.rightOperand
+                isSdkIntReference(binary.rightOperand) -> binary.leftOperand
+                else -> return false
+            }
+            val value = ConstantEvaluator.evaluate(null, sdkSide) as? Int ?: return false
+            value >= minSdk
+        }
+
+        UastBinaryOperator.LESS_OR_EQUALS,
+        UastBinaryOperator.LESS -> {
+            val sdkSide = when {
+                isSdkIntReference(binary.leftOperand) -> binary.rightOperand
+                isSdkIntReference(binary.rightOperand) -> binary.leftOperand
+                else -> return false
+            }
+            val value = ConstantEvaluator.evaluate(null, sdkSide) as? Int ?: return false
+            value <= minSdk
+        }
+
+        UastBinaryOperator.EQUALS,
+        UastBinaryOperator.IDENTITY_EQUALS -> {
+            val sdkSide = when {
+                isSdkIntReference(binary.leftOperand) -> binary.rightOperand
+                isSdkIntReference(binary.rightOperand) -> binary.leftOperand
+                else -> return false
+            }
+            val value = ConstantEvaluator.evaluate(null, sdkSide) as? Int ?: return false
+            value >= minSdk
+        }
+
+        UastBinaryOperator.LOGICAL_AND -> {
+            conditionEnsuresAtLeast(binary.leftOperand, minSdk) ||
+                    conditionEnsuresAtLeast(binary.rightOperand, minSdk)
+        }
+
+        UastBinaryOperator.LOGICAL_OR -> {
+            conditionEnsuresAtLeast(binary.leftOperand, minSdk) &&
+                    conditionEnsuresAtLeast(binary.rightOperand, minSdk)
+        }
+
+        else -> false
+    }
+}
+
+private fun isSdkIntReference(expression: UExpression?): Boolean {
+    val ref = unwrap(expression) as? UReferenceExpression ?: return false
+    val field = ref.resolve() as? PsiField ?: return false
+    return field.containingClass?.qualifiedName == "android.os.Build.VERSION" && field.name == "SDK_INT"
+}
+
+private fun unwrap(expression: UExpression?): UExpression? {
+    var current = expression
+    while (current is UParenthesizedExpression) {
+        current = current.expression
+    }
+    return current
+}
+```
+
+The harness reported the following errors:
+
+Tests failed: testDocumentationExample
+
+testDocumentationExample: java.lang.AssertionError: Not true that
+"[PublicKeyCredential]
+is found in lint output
+"No warnings.
+	at org.junit.Assert.fail(Assert.java:89)
+	at org.junit.Assert.assertTrue(Assert.java:42)
+	at com.android.tools.lint.checks.infrastructure.TestLintResult.expectContains(TestLintResult.kt:168)
+	at com.android.tools.lint.checks.infrastructure.TestLintResult.expectContains$default(TestLintResult.kt:142)
+	at com.android.tools.lint.checks.PublicKeyCredentialDetectorTest.testDocumentationExample(PublicKeyCredentialDetectorTest.kt:53)
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:77)
+	at java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMe
+
+Fix the detector so that it compiles cleanly and all tests pass.
+Output ONLY the corrected source file — no explanation, no markdown fences.

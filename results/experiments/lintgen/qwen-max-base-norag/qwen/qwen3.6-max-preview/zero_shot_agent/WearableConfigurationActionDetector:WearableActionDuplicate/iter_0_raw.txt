@@ -1,0 +1,140 @@
+package com.android.tools.lint.checks
+
+import com.android.tools.lint.detector.api.*
+import org.w3c.dom.Element
+import org.w3c.dom.NodeList
+
+class WearableConfigurationActionDetector : Detector(), XmlScanner {
+
+    companion object {
+        private const val ANDROID_URI = "http://schemas.android.com/apk/res/android"
+        private const val TAG_MANIFEST = "manifest"
+        private const val TAG_SERVICE = "service"
+        private const val TAG_ACTIVITY = "activity"
+        private const val TAG_META_DATA = "meta-data"
+        private const val TAG_INTENT_FILTER = "intent-filter"
+        private const val TAG_ACTION = "action"
+        private const val TAG_CATEGORY = "category"
+        private const val ATTR_NAME = "name"
+        private const val ATTR_VALUE = "value"
+        private const val METADATA_NAME = "wearableConfigurationAction"
+        private const val ACTION_NAME = "WATCH_FACE_EDITOR"
+        private const val CATEGORY_NAME = "com.google.android.wearable.watchface.category.WEARABLE_CONFIGURATION"
+
+        val ISSUE = Issue.create(
+            id = "WearableActionDuplicate",
+            briefDescription = "Duplicate watch face configuration activities found",
+            explanation = "If and only if a watch face service defines `wearableConfigurationAction` metadata, with the value `WATCH_FACE_EDITOR`, there should be an activity in the same package, which has an intent filter for `WATCH_FACE_EDITOR` (with com.google.android.wearable.watchface.category.WEARABLE_CONFIGURATION if minSdkVersion is less than 30).",
+            category = Category.CORRECTNESS,
+            priority = 6,
+            severity = Severity.ERROR,
+            implementation = Implementation(
+                WearableConfigurationActionDetector::class.java,
+                Scope.MANIFEST_SCOPE
+            )
+        )
+    }
+
+    override fun getApplicableElements(): Collection<String>? = listOf(TAG_MANIFEST)
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        if (element.tagName != TAG_MANIFEST) return
+
+        val minSdk = try {
+            context.mainProject.minSdkVersion.apiLevel
+        } catch (e: Exception) {
+            30
+        }
+
+        val services = element.getElementsByTagName(TAG_SERVICE)
+        val activities = element.getElementsByTagName(TAG_ACTIVITY)
+
+        val servicesWithMeta = mutableListOf<Element>()
+        for (i in 0 until services.length) {
+            val service = services.item(i) as Element
+            if (hasWearableConfigMetadata(service)) {
+                servicesWithMeta.add(service)
+            }
+        }
+
+        val activitiesWithFilter = mutableListOf<Element>()
+        for (i in 0 until activities.length) {
+            val activity = activities.item(i) as Element
+            if (hasWearableConfigIntentFilter(activity, minSdk)) {
+                activitiesWithFilter.add(activity)
+            }
+        }
+
+        if (activitiesWithFilter.size > 1) {
+            for (i in 1 until activitiesWithFilter.size) {
+                context.report(
+                    ISSUE,
+                    context.getLocation(activitiesWithFilter[i]),
+                    "Duplicate watch face configuration activity found. Only one activity should handle the $ACTION_NAME intent."
+                )
+            }
+        }
+
+        val hasServiceMeta = servicesWithMeta.isNotEmpty()
+        val hasActivityFilter = activitiesWithFilter.isNotEmpty()
+
+        if (hasServiceMeta && !hasActivityFilter) {
+            context.report(
+                ISSUE,
+                context.getLocation(servicesWithMeta[0]),
+                "Watch face service defines $METADATA_NAME metadata but no matching configuration activity was found."
+            )
+        } else if (!hasServiceMeta && hasActivityFilter) {
+            context.report(
+                ISSUE,
+                context.getLocation(activitiesWithFilter[0]),
+                "Configuration activity found for $ACTION_NAME but no watch face service defines the corresponding $METADATA_NAME metadata."
+            )
+        }
+    }
+
+    private fun hasWearableConfigMetadata(service: Element): Boolean {
+        val metaDatas: NodeList = service.getElementsByTagName(TAG_META_DATA)
+        for (i in 0 until metaDatas.length) {
+            val meta = metaDatas.item(i) as Element
+            val name = meta.getAttributeNS(ANDROID_URI, ATTR_NAME)
+            val value = meta.getAttributeNS(ANDROID_URI, ATTR_VALUE)
+            if (name == METADATA_NAME && value == ACTION_NAME) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun hasWearableConfigIntentFilter(activity: Element, minSdk: Int): Boolean {
+        val filters: NodeList = activity.getElementsByTagName(TAG_INTENT_FILTER)
+        for (i in 0 until filters.length) {
+            val filter = filters.item(i) as Element
+            var hasAction = false
+            var hasCategory = minSdk >= 30
+
+            val actions: NodeList = filter.getElementsByTagName(TAG_ACTION)
+            for (j in 0 until actions.length) {
+                val action = actions.item(j) as Element
+                if (action.getAttributeNS(ANDROID_URI, ATTR_NAME) == ACTION_NAME) {
+                    hasAction = true
+                }
+            }
+
+            if (!hasAction) continue
+
+            if (minSdk < 30) {
+                val categories: NodeList = filter.getElementsByTagName(TAG_CATEGORY)
+                for (j in 0 until categories.length) {
+                    val cat = categories.item(j) as Element
+                    if (cat.getAttributeNS(ANDROID_URI, ATTR_NAME) == CATEGORY_NAME) {
+                        hasCategory = true
+                    }
+                }
+            }
+
+            if (hasAction && hasCategory) return true
+        }
+        return false
+    }
+}

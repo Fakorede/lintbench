@@ -1,0 +1,143 @@
+package com.android.tools.lint.checks;
+
+import com.android.resources.ResourceFolderType;
+import com.android.tools.lint.detector.api.Category;
+import com.android.tools.lint.detector.api.Detector;
+import com.android.tools.lint.detector.api.Implementation;
+import com.android.tools.lint.detector.api.Issue;
+import com.android.tools.lint.detector.api.Location;
+import com.android.tools.lint.detector.api.ResourceContext;
+import com.android.tools.lint.detector.api.Scope;
+import com.android.tools.lint.detector.api.Severity;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+
+public class IconDetector extends Detector implements Detector.BinaryResourceScanner {
+
+    public static final Issue WEBP_UNSUPPORTED = Issue.create(
+            "WebpUnsupported",
+            "WebP unsupported",
+            "The WebP format requires Android 4.0 (API 15). Certain features, such as "
+                    + "lossless encoding and transparency, requires Android 4.2.1 (API 18; API 17 "
+                    + "is 4.2.0.)",
+            Category.ICONS,
+            6,
+            Severity.WARNING,
+            new Implementation(IconDetector.class, Scope.BINARY_RESOURCE_FILE_SCOPE)
+    );
+
+    @Override
+    public boolean appliesTo(ResourceFolderType folderType) {
+        return folderType == ResourceFolderType.DRAWABLE
+                || folderType == ResourceFolderType.MIPMAP;
+    }
+
+    @Override
+    public void checkBinaryResource(ResourceContext context) {
+        File file = context.getFile();
+        String name = file.getName();
+        if (name.length() < 5
+                || !name.regionMatches(true, name.length() - 5, ".webp", 0, 5)) {
+            return;
+        }
+
+        byte[] data;
+        try {
+            data = Files.readAllBytes(file.toPath());
+        } catch (IOException e) {
+            return;
+        }
+
+        int requiredApi = getRequiredWebpApiLevel(data);
+        if (requiredApi == -1) {
+            return;
+        }
+
+        int minSdk = context.getMainProject().getMinSdk();
+        if (minSdk >= requiredApi) {
+            return;
+        }
+
+        String message;
+        if (requiredApi == 18) {
+            message = String.format(
+                    "WebP images with lossless encoding or transparency require Android 4.2.1 "
+                            + "(API 18) or later (current minSdk is %d)",
+                    minSdk);
+        } else {
+            message = String.format(
+                    "WebP images require Android 4.0 (API 15) or later (current minSdk is %d)",
+                    minSdk);
+        }
+
+        context.report(WEBP_UNSUPPORTED, Location.create(file), message);
+    }
+
+    private static int getRequiredWebpApiLevel(byte[] data) {
+        if (data == null || data.length < 12
+                || readInt(data, 0) != fourCc("RIFF")
+                || readInt(data, 8) != fourCc("WEBP")) {
+            return -1;
+        }
+
+        int offset = 12;
+        boolean lossless = false;
+        boolean alpha = false;
+        boolean hasVp8 = false;
+
+        while (offset + 8 <= data.length) {
+            int chunkId = readInt(data, offset);
+            int chunkSize = readInt(data, offset + 4);
+            if (chunkSize < 0) {
+                break;
+            }
+            int dataStart = offset + 8;
+            int nextOffset = dataStart + chunkSize;
+            if ((chunkSize & 1) != 0) {
+                nextOffset++;
+            }
+            if (nextOffset < 0 || nextOffset > data.length) {
+                break;
+            }
+
+            if (chunkId == fourCc("VP8X") && chunkSize >= 10) {
+                int flags = data[dataStart] & 0xFF;
+                if ((flags & 0x04) != 0) {
+                    alpha = true;
+                }
+            } else if (chunkId == fourCc("VP8L")) {
+                lossless = true;
+            } else if (chunkId == fourCc("ALPH")) {
+                alpha = true;
+            } else if (chunkId == fourCc("VP8 ")) {
+                hasVp8 = true;
+            }
+
+            offset = nextOffset;
+        }
+
+        if (lossless || alpha) {
+            return 18;
+        }
+        if (hasVp8) {
+            return 15;
+        }
+        return -1;
+    }
+
+    private static int readInt(byte[] data, int offset) {
+        return (data[offset] & 0xFF)
+                | ((data[offset + 1] & 0xFF) << 8)
+                | ((data[offset + 2] & 0xFF) << 16)
+                | ((data[offset + 3] & 0xFF) << 24);
+    }
+
+    private static int fourCc(String s) {
+        return (s.charAt(0) & 0xFF)
+                | ((s.charAt(1) & 0xFF) << 8)
+                | ((s.charAt(2) & 0xFF) << 16)
+                | ((s.charAt(3) & 0xFF) << 24);
+    }
+}

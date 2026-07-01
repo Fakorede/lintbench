@@ -1,0 +1,131 @@
+package com.android.tools.lint.checks
+
+import com.android.SdkConstants.TAG_ADAPTIVE_ICON
+import com.android.resources.ResourceFolderType
+import com.android.tools.lint.detector.api.Category
+import com.android.tools.lint.detector.api.Context
+import com.android.tools.lint.detector.api.Detector
+import com.android.tools.lint.detector.api.Implementation
+import com.android.tools.lint.detector.api.Issue
+import com.android.tools.lint.detector.api.Location
+import com.android.tools.lint.detector.api.Scope
+import com.android.tools.lint.detector.api.Severity
+import com.android.tools.lint.detector.api.XmlContext
+import com.android.tools.lint.detector.api.XmlScanner
+import org.w3c.dom.Element
+import java.io.File
+
+class MonochromeLauncherIconDetector : Detector(), XmlScanner {
+
+    companion object {
+        private const val TAG_MONOCHROME = "monochrome"
+
+        @JvmField
+        val ISSUE = Issue.create(
+            id = "MonochromeLauncherIcon",
+            briefDescription = "Monochrome icon is not defined",
+            explanation = """
+                The system may use the coloring of the user's chosen wallpaper and theme to tint \
+                app icons. Providing a `<monochrome>` layer (which will be used for tinting) for \
+                every adaptive icon is strongly recommended, otherwise Android 16 QPR 2 and above \
+                will simply tint the color version of the icon, which may look unusual. Devices \
+                running earlier Android versions will (with no monochrome layer) show the untinted \
+                color icon for your app, which will look inconsistent.
+            """,
+            category = Category.ICONS,
+            priority = 6,
+            severity = Severity.WARNING,
+            implementation = Implementation(
+                MonochromeLauncherIconDetector::class.java,
+                Scope.MANIFEST_AND_RESOURCE_SCOPE,
+                Scope.RESOURCE_FILE_SCOPE
+            )
+        )
+
+        private val LAUNCHER_ICON_ATTRIBUTES = setOf("android:icon", "android:roundIcon")
+    }
+
+    /** Set of launcher icon names referenced from the manifest */
+    private val launcherIconNames = mutableSetOf<String>()
+
+    /** Map from adaptive icon resource name to the location of the adaptive-icon element */
+    private val adaptiveIconsWithoutMonochrome = mutableMapOf<String, Location>()
+
+    override fun getApplicableElements(): Collection<String> {
+        return listOf(
+            "application",
+            TAG_ADAPTIVE_ICON
+        )
+    }
+
+    override fun appliesTo(folderType: ResourceFolderType): Boolean {
+        return folderType == ResourceFolderType.MIPMAP ||
+                folderType == ResourceFolderType.DRAWABLE ||
+                folderType == ResourceFolderType.XML
+    }
+
+    override fun visitElement(context: XmlContext, element: Element) {
+        when (element.tagName) {
+            "application" -> {
+                // Collect launcher icon names from the manifest
+                for (attr in LAUNCHER_ICON_ATTRIBUTES) {
+                    val value = element.getAttributeNS(
+                        "http://schemas.android.com/apk/res/android",
+                        attr.removePrefix("android:")
+                    )
+                    if (value.isNotEmpty()) {
+                        // value is like @mipmap/ic_launcher or @drawable/ic_launcher
+                        val name = value.substringAfterLast('/')
+                        if (name.isNotEmpty()) {
+                            launcherIconNames.add(name)
+                        }
+                    }
+                }
+            }
+
+            TAG_ADAPTIVE_ICON -> {
+                // Check if this adaptive icon has a monochrome child
+                val hasMonochrome = hasMonochromeChild(element)
+                if (!hasMonochrome) {
+                    val resourceName = getResourceName(context)
+                    if (resourceName != null) {
+                        adaptiveIconsWithoutMonochrome[resourceName] =
+                            context.getLocation(element)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun hasMonochromeChild(element: Element): Boolean {
+        val children = element.childNodes
+        for (i in 0 until children.length) {
+            val child = children.item(i)
+            if (child is Element && child.tagName == TAG_MONOCHROME) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun getResourceName(context: XmlContext): String? {
+        val file = context.file
+        return file.nameWithoutExtension
+    }
+
+    override fun afterCheckRootProject(context: Context) {
+        // If we have no launcher icons recorded (e.g. manifest not scanned), warn about all
+        // adaptive icons without monochrome. Otherwise, only warn about those that are
+        // launcher icons.
+        for ((resourceName, location) in adaptiveIconsWithoutMonochrome) {
+            if (launcherIconNames.isEmpty() || resourceName in launcherIconNames) {
+                context.report(
+                    ISSUE,
+                    location,
+                    "Adaptive icon `$resourceName` does not have a `<monochrome>` layer; " +
+                            "the system may tint the color icon instead, which may look unusual"
+                )
+            }
+        }
+    }
+}
