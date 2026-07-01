@@ -185,12 +185,14 @@ def aggregate_metrics(instance_results: list[InstanceResult], k: int) -> dict:
     if n == 0:
         return {}
 
-    overall_pass1   = round(sum(r.pass_at_1 for r in instance_results) / n, 4)
-    overall_passk   = round(sum(r.pass_at_k for r in instance_results) / n, 4)
-    overall_compile = round(sum(r.compilation_rate for r in instance_results) / n, 4)
+    overall_pass1      = round(sum(r.pass_at_1 for r in instance_results) / n, 4)
+    overall_passk      = round(sum(r.pass_at_k for r in instance_results) / n, 4)
+    overall_compile    = round(sum(r.compilation_rate for r in instance_results) / n, 4)
+    overall_compile1   = round(sum(estimate_pass_at_k(r.n_samples, r.n_compiled, 1) for r in instance_results) / n, 4)
+    overall_compilek   = round(sum(estimate_pass_at_k(r.n_samples, r.n_compiled, k) for r in instance_results) / n, 4)
 
     by_diff: dict[str, dict] = {}
-    for tier in ("EASY", "HARD"):
+    for tier in ("EASY", "MEDIUM", "HARD"):
         subset = [r for r in instance_results if r.difficulty == tier]
         if subset:
             by_diff[tier] = {
@@ -198,6 +200,8 @@ def aggregate_metrics(instance_results: list[InstanceResult], k: int) -> dict:
                 "pass_at_1":       round(sum(r.pass_at_1 for r in subset) / len(subset), 4),
                 "pass_at_k":       round(sum(r.pass_at_k for r in subset) / len(subset), 4),
                 "compilation_rate": round(sum(r.compilation_rate for r in subset) / len(subset), 4),
+                "compile_at_1":    round(sum(estimate_pass_at_k(r.n_samples, r.n_compiled, 1) for r in subset) / len(subset), 4),
+                "compile_at_k":    round(sum(estimate_pass_at_k(r.n_samples, r.n_compiled, k) for r in subset) / len(subset), 4),
             }
 
     by_cat: dict[str, dict] = {}
@@ -216,6 +220,8 @@ def aggregate_metrics(instance_results: list[InstanceResult], k: int) -> dict:
     return {
         "pass_at_1":          overall_pass1,
         "pass_at_k":          overall_passk,
+        "compile_at_1":       overall_compile1,
+        "compile_at_k":       overall_compilek,
         "compilation_rate":   overall_compile,
         "by_difficulty":      by_diff,
         "by_category":        by_cat,
@@ -250,10 +256,13 @@ def print_summary(metrics: dict, model: str, prompt: str, k: int) -> None:
     print(f"\n  pass@1:            {metrics['pass_at_1']:.1%}")
     if k > 1:
         print(f"  pass@{k}:            {metrics['pass_at_k']:.1%}")
+    print(f"  compile@1:         {metrics['compile_at_1']:.1%}")
+    if k > 1:
+        print(f"  compile@{k}:         {metrics['compile_at_k']:.1%}")
     print(f"  compilation rate:  {metrics['compilation_rate']:.1%}")
 
     print(f"\nStratified pass@1:")
-    for tier in ("EASY", "HARD"):
+    for tier in ("EASY", "MEDIUM", "HARD"):
         d = metrics["by_difficulty"].get(tier, {})
         if d:
             print(f"  {tier:<8} n={d['n']:<4}  pass@1={d['pass_at_1']:.1%}  "

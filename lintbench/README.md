@@ -7,19 +7,22 @@ implementation and its JUnit test suite for automated pass/fail evaluation.
 
 ## Dataset
 
-**156 validated instances** in `data/dataset.jsonl`, drawn from the AOSP `tools/base`
-repository (`mirror-goog-studio-main`, May 2026) and filtered through a two-stage
-validation pipeline (see [Dataset validation](#dataset-validation) below).
+**148 validated instances** in `data/dataset.jsonl`, drawn from the AOSP `tools/base`
+repository (`mirror-goog-studio-main`, 2026) and filtered through a two-stage
+validation pipeline (see [Dataset validation](#dataset-validation) below). A
+human-validated subset of **113 instances** (`data/dataset_verified.jsonl`)
+excludes 35 instances flagged as under-specified or subject to sibling-test
+burden (see `data/annotation-criteria.md`).
 
-| Split  | Raw | Validated | Criteria |
-|--------|-----|-----------|----------|
-| easy   | 124 | 65        | Score 0–2: simple method-call matching, single scope |
-| medium | 174 | 56        | Score 3–5: type-aware, multi-scope, light data-flow |
-| hard   | 141 | 35        | Score 6+: interprocedural, deep data-flow, CFG-level |
+| Split  | Raw | Validated | Verified | Criteria |
+|--------|-----|-----------|----------|----------|
+| easy   | 124 | 41        | 38       | Score 0–2: simple method-call matching, single scope |
+| medium | 174 | 82        | 61       | Score 3–5: type-aware, multi-scope, light data-flow |
+| hard   | 141 | 25        | 14       | Score 6+: interprocedural, deep data-flow, CFG-level |
 
 - **Languages:** Kotlin · Java
 - **Categories:** CORRECTNESS, SECURITY, PERFORMANCE, ICONS, others
-- **Evaluation:** pass@k — all `tests_to_run` methods must pass in the real Lint test harness
+- **Evaluation:** pass@k — all relevant tests must pass in the real Lint test harness
 
 `data/lintbench.jsonl` contains all 439 raw instances including those filtered out
 during validation.
@@ -63,7 +66,8 @@ lintbench/
       StubGenerator.kt  Kotlin compiler PSI (.kt) + JavaParser (.java)
   data/
     lintbench.jsonl     All 439 raw instances
-    dataset.jsonl       162 validated instances (oracle pass + stub fail)
+    dataset.jsonl       148 validated instances (final benchmark)
+    dataset_verified.jsonl  113 human-validated instances
   results/
     oracle/             oracle_eval results and per-instance logs
     stub/               stub_eval results and per-instance logs
@@ -132,7 +136,7 @@ are syntactically faithful to the original — companion objects and `Issue`
 declarations are preserved verbatim while all method bodies are replaced with
 typed no-op stubs.
 
-### Step 2 — Rn Inference
+### Step 2 — Run Inference
 
 Send benchmark instances to an LLM and save generated detector files.
 

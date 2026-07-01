@@ -298,6 +298,23 @@ def evaluate_instance(
 # Main
 # ---------------------------------------------------------------------------
 
+def _load_generation_cost(generated_dir: Path) -> float | None:
+    """Sum cost_usd from generation_log.jsonl if present, else return None."""
+    log_path = generated_dir / "generation_log.jsonl"
+    if not log_path.exists():
+        return None
+    total = 0.0
+    found = False
+    for line in log_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        if "cost_usd" in rec:
+            total += rec["cost_usd"]
+            found = True
+    return round(total, 4) if found else None
+
+
 def _write_results(
     out_path: Path,
     instance_results: list[InstanceResult],
@@ -308,6 +325,7 @@ def _write_results(
     """Compute metrics and write results JSON — called after each instance and at the end."""
     metrics = aggregate_metrics(instance_results, k=args.samples)
     metrics["by_api_surface"] = aggregate_by_api_surface(instance_results, instance_map)
+    total_cost = _load_generation_cost(Path(args.generated))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     output = {
         "model":                args.model,
@@ -319,7 +337,10 @@ def _write_results(
         "timestamp":            datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
         "pass_at_1":            metrics["pass_at_1"],
         "pass_at_k":            metrics["pass_at_k"],
+        "compile_at_1":         metrics["compile_at_1"],
+        "compile_at_k":         metrics["compile_at_k"],
         "compilation_rate":     metrics["compilation_rate"],
+        "total_cost_usd":       total_cost,
         "by_difficulty":        metrics["by_difficulty"],
         "by_category":          metrics["by_category"],
         "by_api_surface":       metrics["by_api_surface"],
